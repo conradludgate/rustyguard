@@ -1,0 +1,21 @@
+[package]
+name = "rustyguard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# aws-lc-rs = "1.7"
+# snow = { version = "0.9", default-features = false }
+# cl-noise-protocol = "0.2"
+zeroize = "1.8"
+ipnet = "2.9"
+blake2 = "0.10.6"
+siphasher = "1"
+# bytemuck = { version = "1", features = ["derive"] }
+
+zerocopy = { version = "0.7" }
+zerocopy-derive = { version = "0.7" }
+hkdf = "0.12.4"
+tai64 = "4.0.0"
+x25519-dalek = { version = "2.0.1", features = ["getrandom", "static_secrets"] }
+chacha20poly1305 = "0.10.1"
