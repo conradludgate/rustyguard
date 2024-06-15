@@ -1,25 +1,14 @@
 use std::{borrow::Borrow, collections::HashMap, hash::BuildHasher};
 
-// use aws_lc_rs::{
-//     aead::{
-//         self,
-//         nonce_sequence::{Counter64, Counter64Builder},
-//         Aad, BoundKey, OpeningKey, UnboundKey,
-//     },
-//     agreement::{self, PrivateKey, PublicKey},
-// };
-use blake2::digest::consts::{U12, U28, U32, U48};
-use blake2::digest::generic_array::ArrayLength;
+use blake2::digest::consts::{U12, U32};
 use blake2::digest::generic_array::{sequence::Split, GenericArray};
-use blake2::digest::{core_api::Block, Digest, Output};
-use blake2::Blake2s256;
-use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce, Tag};
+use bytemuck::{Pod, Zeroable};
+use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Tag};
 use ipnet::IpNet;
+use utils::{hash, hkdf, nonce, Bytes, Encrypted, LEU32};
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
-use zerocopy::{little_endian, FromBytes};
-use zerocopy_derive::{AsBytes, FromBytes, FromZeroes};
 
-// mod noise_lc;
+mod utils;
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
 pub struct PublicKeyWrapper(PublicKey);
@@ -104,15 +93,14 @@ impl Sessions {
         match msg_type {
             // First Message
             MSG_FIRST => {
-                let Some(first_message) = FirstMessage::mut_from(rest) else {
-                    return Err(Error::InvalidMessage);
-                };
+                let first_message = bytemuck::try_from_bytes_mut::<FirstMessage>(rest)
+                    .map_err(|_| Error::InvalidMessage)?;
                 let (c, h) = first_message.process(&self.config)?;
 
                 if !self
                     .config
                     .peers
-                    .contains_key(&first_message.static_key[..32])
+                    .contains_key(&first_message.static_key.0[..32])
                 {
                     return Err(Error::Rejected);
                 }
@@ -131,13 +119,13 @@ impl Sessions {
     }
 }
 
-#[derive(FromBytes, FromZeroes, AsBytes)]
+#[derive(Pod, Zeroable, Clone, Copy)]
 #[repr(C)]
 struct FirstMessage {
-    sender: little_endian::U32,
+    sender: LEU32,
     ephemeral_key: [u8; 32],
-    static_key: [u8; 32 + 16],
-    timestamp: [u8; 12 + 16],
+    static_key: Bytes<Encrypted<U32>>,
+    timestamp: Bytes<Encrypted<U12>>,
     mac1: [u8; 16],
     mac2: [u8; 16],
 }
@@ -158,10 +146,9 @@ impl FirstMessage {
         let [c, k] = hkdf(&c, [prk.as_bytes()]);
 
         let aad = h;
-        let h = hash([&h, &self.static_key]);
+        let h = hash([&h, &self.static_key.0]);
 
-        let static_key = GenericArray::<u8, U48>::from(self.static_key);
-        let (mut spk_i, tag) = static_key.split();
+        let (mut spk_i, tag) = self.static_key.0.split();
         ChaCha20Poly1305::new(&k).decrypt_in_place_detached(&nonce(0), &aad, &mut spk_i, &tag);
 
         let spk_i = PublicKey::from(<[u8; 32]>::from(spk_i));
@@ -169,21 +156,20 @@ impl FirstMessage {
         let [c, k] = hkdf(&c, [prk.as_bytes()]);
 
         let aad = h;
-        let h = hash([&h, &self.timestamp]);
+        let h = hash([&h, &self.timestamp.0]);
 
-        let timestamp = GenericArray::<u8, U28>::from(self.timestamp);
-        let (mut timestamp, tag): (GenericArray<u8, U12>, Tag) = timestamp.split();
+        let (mut timestamp, tag): (GenericArray<u8, U12>, Tag) = self.timestamp.0.split();
         ChaCha20Poly1305::new(&k).decrypt_in_place_detached(&nonce(0), &aad, &mut timestamp, &tag);
 
         Ok((c, h))
     }
 }
 
-#[derive(FromBytes, FromZeroes, AsBytes)]
+#[derive(Pod, Zeroable, Clone, Copy)]
 #[repr(C)]
 struct SecondMessage {
-    sender: little_endian::U32,
-    receiver: little_endian::U32,
+    sender: LEU32,
+    receiver: LEU32,
     ephemeral_key: [u8; 32],
     empty: [u8; 16],
     mac1: [u8; 16],
@@ -226,93 +212,6 @@ impl SecondMessage {
         //     .map_err(|_: aws_lc_rs::error::Unspecified| Error::Unspecified)?;
 
         Ok((c, h))
-    }
-}
-
-fn nonce(counter: u64) -> Nonce {
-    let mut n = Nonce::default();
-    n[4..].copy_from_slice(&u64::to_le_bytes(counter));
-    n
-}
-
-fn hash<const M: usize>(msg: [&[u8]; M]) -> Output<Blake2s256> {
-    let mut digest = Blake2s256::default();
-    for msg in msg {
-        digest.update(msg);
-    }
-    digest.finalize()
-}
-
-fn hmac<const M: usize>(key: &GenericArray<u8, U32>, msg: [&[u8]; M]) -> Output<Blake2s256> {
-    const IPAD: u8 = 0x36;
-    const OPAD: u8 = 0x5C;
-
-    let mut buf = Block::<Blake2s256>::default();
-    buf[..32].copy_from_slice(key);
-    for b in buf.iter_mut() {
-        *b ^= IPAD;
-    }
-    let mut digest = Blake2s256::default();
-    digest.update(&buf);
-
-    for b in buf.iter_mut() {
-        *b ^= IPAD ^ OPAD;
-    }
-
-    let mut opad_digest = Blake2s256::default();
-    opad_digest.update(&buf);
-
-    for msg in msg {
-        digest.update(msg);
-    }
-
-    opad_digest.chain_update(digest.finalize()).finalize()
-}
-
-fn hkdf<const N: usize, const M: usize>(
-    key: &GenericArray<u8, U32>,
-    msg: [&[u8]; M],
-) -> [Output<Blake2s256>; N] {
-    assert!(N <= 255);
-    assert!(N >= 1);
-
-    let mut output = [Output::<Blake2s256>::default(); N];
-
-    let t0 = hmac(key, msg);
-    let mut ti = hmac(&t0, [&[1]]);
-    output[0] = ti;
-    for i in 1..N as u8 {
-        ti = hmac(&t0, [&ti, &[i + 1]]);
-        output[i as usize] = ti;
-    }
-
-    output
-}
-
-#[repr(C)]
-struct ZeroCopyBytes<U: ArrayLength<u8>>(GenericArray<u8, U>);
-
-unsafe impl<U: ArrayLength<u8>> zerocopy::FromBytes for ZeroCopyBytes<U> {
-    fn only_derive_is_allowed_to_implement_this_trait()
-    where
-        Self: Sized,
-    {
-    }
-}
-
-unsafe impl<U: ArrayLength<u8>> zerocopy::FromZeroes for ZeroCopyBytes<U> {
-    fn only_derive_is_allowed_to_implement_this_trait()
-    where
-        Self: Sized,
-    {
-    }
-}
-
-unsafe impl<U: ArrayLength<u8>> zerocopy::AsBytes for ZeroCopyBytes<U> {
-    fn only_derive_is_allowed_to_implement_this_trait()
-    where
-        Self: Sized,
-    {
     }
 }
 
