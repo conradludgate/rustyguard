@@ -1,11 +1,15 @@
+use std::net::SocketAddr;
+use std::ops::ControlFlow;
 use std::{borrow::Borrow, collections::HashMap, hash::BuildHasher};
 
-use blake2::digest::consts::{U12, U32};
+use blake2::digest::consts::{U12, U16, U32};
 use blake2::digest::generic_array::{sequence::Split, GenericArray};
-use bytemuck::{Pod, Zeroable};
-use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Tag};
+use bytemuck::{bytes_of, offset_of, NoUninit, Pod, Zeroable};
+use chacha20poly1305::aead::rand_core::{CryptoRng, RngCore};
+use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Tag, XNonce};
 use ipnet::IpNet;
-use utils::{hash, hkdf, nonce, Bytes, Encrypted, LEU32};
+use rand::rngs::StdRng;
+use utils::{hash, hkdf, mac, nonce, Bytes, Encrypted, HandshakeState, TaggedMessage, LEU32};
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 
 mod utils;
@@ -32,20 +36,32 @@ impl BuildHasher for SipHasher24 {
 pub struct Config {
     private_key: StaticSecret,
     public_key: PublicKey,
-    peers: HashMap<PublicKeyWrapper, Vec<IpNet>, SipHasher24>,
+    mac1_key: GenericArray<u8, U32>,
+    mac2_key: GenericArray<u8, U32>,
+    peers: HashMap<PublicKey, Vec<IpNet>, SipHasher24>,
+}
+
+pub struct Peer {
+    key: PublicKey,
+    allowed_source_ips: Vec<IpNet>,
+    internet_endpoint: Option<SocketAddr>,
 }
 
 pub struct Sessions {
     config: Config,
-    sessions: HashMap<PublicKeyWrapper, (), SipHasher24>,
+    rng: StdRng,
+    random_secret: GenericArray<u8, U32>,
+    sessions: HashMap<PublicKeyWrapper, Session, SipHasher24>,
 }
 
 enum Session {
-    Initiated(HandshakeState),
+    Initiated(HandshakeState2),
     Completed(CipherState),
 }
 
-struct HandshakeState;
+struct HandshakeState2 {
+    sender: LEU32,
+}
 struct CipherState;
 
 pub enum Error {
@@ -77,10 +93,31 @@ const IDENTIFIER_HASH: [u8; 32] = [
     34, 17, 179, 97, 8, 26, 197, 102, 105, 18, 67, 219, 69, 138, 213, 50, 45, 156, 108, 102, 34,
     147, 232, 183, 14, 225, 156, 101, 186, 7, 158, 243,
 ];
+const LABEL_MAC1: [u8; 8] = *b"mac1----";
+const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
 impl Sessions {
+    fn overloaded(&self) -> bool {
+        false
+    }
+
+    fn cookie(&self, socket: SocketAddr) -> GenericArray<u8, U16> {
+        let ip_bytes = match socket.ip() {
+            std::net::IpAddr::V4(ipv4) => &ipv4.octets()[..],
+            std::net::IpAddr::V6(ipv6) => &ipv6.octets()[..],
+        };
+        mac(
+            &self.random_secret,
+            [ip_bytes, &socket.port().to_be_bytes()[..]],
+        )
+    }
+
     // TODO(conrad): enforce the msg is 4 byte aligned.
-    pub fn recv_message(&mut self, msg: &mut [u8]) -> Result<Message, Error> {
+    pub fn recv_message<'m>(
+        &mut self,
+        socket: SocketAddr,
+        msg: &'m mut [u8],
+    ) -> Result<Message<'m>, Error> {
         if !msg.as_ptr().cast::<u32>().is_aligned() {
             return Err(Error::Unaligned);
         }
@@ -93,15 +130,24 @@ impl Sessions {
         match msg_type {
             // First Message
             MSG_FIRST => {
-                let first_message = bytemuck::try_from_bytes_mut::<FirstMessage>(rest)
-                    .map_err(|_| Error::InvalidMessage)?;
-                let (c, h) = first_message.process(&self.config)?;
+                let mac: &mut MacProtected<FirstMessage> =
+                    bytemuck::try_from_bytes_mut(rest).map_err(|_| Error::InvalidMessage)?;
 
-                if !self
-                    .config
-                    .peers
-                    .contains_key(&first_message.static_key.0[..32])
-                {
+                mac.verify_mac1(&self.config)?;
+                if self.overloaded() && mac.verify_mac2(self, socket).is_err() {
+                    let cookie = CookieMessage::new(mac.inner.sender, self, socket, &mac.mac1.0);
+                    let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
+                    cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
+
+                    // return cookie
+                    return Ok(Message::Response(&*cookie_msg));
+                }
+
+                let hs = mac.inner.process(&self.config)?;
+                let sender_static_key = mac.inner.static_key.assumed_decrypted();
+                let sender_static_key = PublicKey::from(<[u8; 32]>::from(*sender_static_key));
+
+                if !self.config.peers.contains_key(&sender_static_key) {
                     return Err(Error::Rejected);
                 }
             }
@@ -124,44 +170,130 @@ impl Sessions {
 struct FirstMessage {
     sender: LEU32,
     ephemeral_key: [u8; 32],
-    static_key: Bytes<Encrypted<U32>>,
-    timestamp: Bytes<Encrypted<U12>>,
-    mac1: [u8; 16],
-    mac2: [u8; 16],
+    static_key: Encrypted<U32>,
+    timestamp: Encrypted<U12>,
+}
+
+#[derive(Pod, Zeroable, Clone, Copy)]
+#[repr(C)]
+struct CookieMessage {
+    receiver: LEU32,
+    nonce: Bytes<chacha20poly1305::consts::U24>,
+    cookie: Encrypted<U16>,
+}
+
+impl CookieMessage {
+    fn new(
+        receiver: LEU32,
+        state: &mut Sessions,
+        socket: SocketAddr,
+        mac1: &GenericArray<u8, U16>,
+    ) -> Self {
+        let t = state.cookie(socket);
+        let mut nonce = XNonce::default();
+        state.rng.fill_bytes(&mut nonce);
+        let cookie = Encrypted::encrypt_cookie(t, &state.config.mac2_key, &nonce, &mac1);
+
+        Self {
+            receiver,
+            nonce: Bytes(nonce),
+            cookie,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MacProtected<T> {
+    inner: T,
+    mac1: Bytes<U16>,
+    mac2: Bytes<U16>,
+}
+
+unsafe impl Pod for MacProtected<FirstMessage> {}
+unsafe impl Zeroable for MacProtected<FirstMessage> {}
+unsafe impl Pod for MacProtected<SecondMessage> {}
+unsafe impl Zeroable for MacProtected<SecondMessage> {}
+
+impl<T> MacProtected<T>
+where
+    Self: Pod,
+{
+    // pub fn verify(&mut self, overloaded: bool, config: &Config) -> Result<ControlFlow<Message, &mut T>, Error> {
+    //     self.verify_mac1(config)?;
+    //     if overloaded && !self.verify_mac2() {
+    //         let bytes = bytemuck::bytes_of_mut(&mut self.inner);
+
+    //         Ok(ControlFlow::Break(Message::Response(
+
+    //         )))
+    //     } else {
+    //         Ok(ControlFlow::Continue(&mut self.inner))
+    //     }
+    // }
+
+    fn verify_mac1(&self, config: &Config) -> Result<(), Error> {
+        use subtle::ConstantTimeEq;
+        let actual_mac1 = self.mac1(&config.mac1_key);
+        if actual_mac1.ct_ne(&self.mac1.0).into() {
+            Err(Error::Rejected)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_mac2(&self, state: &Sessions, socket: SocketAddr) -> Result<(), Error> {
+        use subtle::ConstantTimeEq;
+        let cookie = state.cookie(socket);
+        let actual_mac2 = self.mac2(&cookie);
+        if actual_mac2.ct_ne(&self.mac2.0).into() {
+            Err(Error::Rejected)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn mac1(&self, mac1_key: &GenericArray<u8, U32>) -> GenericArray<u8, U16> {
+        let offset = offset_of!(self, MacProtected<T>, mac1);
+        let bytes = bytemuck::bytes_of(self);
+        mac(mac1_key, [&bytes[..offset]])
+    }
+
+    fn mac2(&self, cookie: &GenericArray<u8, U16>) -> GenericArray<u8, U16> {
+        let offset = offset_of!(self, MacProtected<T>, mac2);
+        let bytes = bytemuck::bytes_of(self);
+        mac(cookie, [&bytes[..offset]])
+    }
+}
+
+fn mac1_key(spk: &PublicKey) -> GenericArray<u8, U32> {
+    hash([&LABEL_MAC1, spk.as_bytes()])
+}
+fn mac2_key(spk: &PublicKey) -> GenericArray<u8, U32> {
+    hash([&LABEL_COOKIE, spk.as_bytes()])
 }
 
 impl FirstMessage {
-    fn process(
-        &mut self,
-        config: &Config,
-    ) -> Result<(GenericArray<u8, U32>, GenericArray<u8, U32>), Error> {
-        let c = GenericArray::from(CONSTRUCTION_HASH);
-        let h = GenericArray::<u8, U32>::from(IDENTIFIER_HASH);
-        let h = hash([&*h, config.public_key.as_ref()]);
-        let [c] = hkdf(&c, [&self.ephemeral_key]);
-        let h = hash([&h, &self.ephemeral_key]);
+    fn process(&mut self, config: &Config) -> Result<HandshakeState, Error> {
+        let mut hs = HandshakeState::default();
+        hs.mix_hash(config.public_key.as_bytes());
+        hs.mix_chain(&self.ephemeral_key);
+        hs.mix_hash(&self.ephemeral_key);
 
         let epk_i = PublicKey::from(self.ephemeral_key);
-        let prk = config.private_key.diffie_hellman(&epk_i);
-        let [c, k] = hkdf(&c, [prk.as_bytes()]);
+        let k = hs.mix_key_dh(&config.private_key, &epk_i);
 
-        let aad = h;
-        let h = hash([&h, &self.static_key.0]);
+        let spk_i = self.static_key.decrypt_and_hash(&mut hs, &k)?;
+        let spk_i = PublicKey::from(<[u8; 32]>::from(*spk_i));
 
-        let (mut spk_i, tag) = self.static_key.0.split();
-        ChaCha20Poly1305::new(&k).decrypt_in_place_detached(&nonce(0), &aad, &mut spk_i, &tag);
+        let k = hs.mix_key_dh(&config.private_key, &spk_i);
+        let timestamp = self.static_key.decrypt_and_hash(&mut hs, &k)?;
 
-        let spk_i = PublicKey::from(<[u8; 32]>::from(spk_i));
-        let prk = config.private_key.diffie_hellman(&spk_i);
-        let [c, k] = hkdf(&c, [prk.as_bytes()]);
+        if !config.peers.contains_key(&spk_i) {
+            return Err(Error::Rejected);
+        }
 
-        let aad = h;
-        let h = hash([&h, &self.timestamp.0]);
-
-        let (mut timestamp, tag): (GenericArray<u8, U12>, Tag) = self.timestamp.0.split();
-        ChaCha20Poly1305::new(&k).decrypt_in_place_detached(&nonce(0), &aad, &mut timestamp, &tag);
-
-        Ok((c, h))
+        Ok(hs)
     }
 }
 
@@ -172,8 +304,6 @@ struct SecondMessage {
     receiver: LEU32,
     ephemeral_key: [u8; 32],
     empty: [u8; 16],
-    mac1: [u8; 16],
-    mac2: [u8; 16],
 }
 
 impl SecondMessage {
@@ -219,6 +349,8 @@ impl SecondMessage {
 mod tests {
     use blake2::Digest;
 
+    use crate::{utils::TaggedMessage, CookieMessage, FirstMessage, MacProtected, SecondMessage};
+
     #[test]
     fn construction_identifier() {
         let c = blake2::Blake2s256::default()
@@ -231,5 +363,17 @@ mod tests {
 
         assert_eq!(&*c, &super::CONSTRUCTION_HASH);
         assert_eq!(&*h, &super::IDENTIFIER_HASH);
+    }
+
+    #[test]
+    fn test_size_align() {
+        assert_eq!(core::mem::size_of::<MacProtected<FirstMessage>>(), 144);
+        assert_eq!(core::mem::align_of::<MacProtected<FirstMessage>>(), 4);
+
+        assert_eq!(core::mem::size_of::<MacProtected<SecondMessage>>(), 88);
+        assert_eq!(core::mem::align_of::<MacProtected<SecondMessage>>(), 4);
+
+        assert_eq!(core::mem::size_of::<CookieMessage>(), 60);
+        assert_eq!(core::mem::align_of::<CookieMessage>(), 4);
     }
 }
