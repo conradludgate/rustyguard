@@ -12,6 +12,8 @@ use chacha20poly1305::XNonce;
 use hkdf::hmac::SimpleHmac;
 use x25519_dalek::PublicKey;
 use x25519_dalek::StaticSecret;
+use zeroize::Zeroize;
+use zeroize::ZeroizeOnDrop;
 
 pub(crate) fn nonce(counter: u64) -> Nonce {
     let mut n = Nonce::default();
@@ -27,7 +29,6 @@ pub(crate) fn hash<const M: usize>(msg: [&[u8]; M]) -> Output<Blake2s256> {
     digest.finalize()
 }
 
-#[inline]
 pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> GenericArray<u8, U16> {
     use blake2::digest::Mac;
     let mut mac = blake2::Blake2sMac::<U16>::new_from_slice(key).unwrap();
@@ -69,6 +70,7 @@ pub(crate) fn hkdf<const N: usize, const M: usize>(
     output
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct HandshakeState {
     hash: GenericArray<u8, U32>,
     chain: GenericArray<u8, U32>,
@@ -110,6 +112,12 @@ impl HandshakeState {
 
     pub fn mix_hash(&mut self, b: &[u8]) {
         self.hash = hash([&self.hash, b]);
+    }
+
+    pub fn split(&mut self) -> (Key, Key) {
+        let [k1, k2] = hkdf(&self.chain, []);
+        self.zeroize();
+        (k1, k2)
     }
 }
 

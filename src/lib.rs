@@ -8,9 +8,11 @@ use bytemuck::{offset_of, Pod, Zeroable};
 use chacha20poly1305::XNonce;
 use ipnet::IpNet;
 use rand::rngs::{OsRng, StdRng};
-use rand::RngCore;
+use rand::{Rng, RngCore};
+use tai64::Tai64N;
 use utils::{hash, hkdf, mac, Bytes, Encrypted, HandshakeState, LEU32};
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 mod utils;
 
@@ -44,7 +46,10 @@ pub struct Config {
 struct Peer2 {
     ips: Vec<IpNet>,
     preshared_key: GenericArray<u8, U32>,
+    latest_ts: Tai64NBytes,
 }
+
+type Tai64NBytes = GenericArray<u8, U12>;
 
 pub struct Peer {
     key: PublicKey,
@@ -56,19 +61,19 @@ pub struct Sessions {
     config: Config,
     rng: StdRng,
     random_secret: GenericArray<u8, U32>,
-    sessions: HashMap<PublicKeyWrapper, Session, SipHasher24>,
-}
-
-enum Session {
-    Initiated(HandshakeState2),
-    Completed(CipherState),
+    sessions: HashMap<u32, CipherState, SipHasher24>,
+    handshakes: HashMap<u32, HandshakeState, SipHasher24>,
 }
 
 struct HandshakeState2 {
     sender: LEU32,
 }
 
-struct CipherState {}
+struct CipherState {
+    encrypt: chacha20poly1305::Key,
+    nonce: u64,
+    decrypt: chacha20poly1305::Key,
+}
 
 pub enum Error {
     InvalidMessage,
@@ -135,39 +140,57 @@ impl Sessions {
 
         match msg_type {
             // First Message
-            MSG_FIRST => match MacProtected::<FirstMessage>::verify(rest, self, socket)? {
-                ControlFlow::Break(cookie) => {
-                    let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
-                    cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                    return Ok(Message::Response(&*cookie_msg));
-                }
-                ControlFlow::Continue((sender, first)) => {
-                    let (_hs, response) = first.process(sender, &self.config)?;
-                    let sender_static_key = first.static_key.assumed_decrypted();
-                    let sender_static_key = PublicKey::from(<[u8; 32]>::from(*sender_static_key));
+            MSG_FIRST => {
+                let (sender, first_message) =
+                    match MacProtected::<FirstMessage>::verify(rest, self, socket)? {
+                        ControlFlow::Break(cookie) => {
+                            // cookie message is always smaller than the initial message
+                            let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
+                            cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
+                            return Ok(Message::Response(&*cookie_msg));
+                        }
+                        ControlFlow::Continue((sender, first)) => (sender, first),
+                    };
 
-                    // TODO: derive cipher keys from hs
-                    self.sessions.insert(
-                        PublicKeyWrapper(sender_static_key),
-                        Session::Completed(CipherState {}),
-                    );
+                let mut hs = HandshakeState::default();
+                let response = first_message.process(&mut hs, sender, &mut self.config)?;
 
-                    let resp = MacProtected::new(LEU32::new(0), response, None, &self.config);
+                let mut sender = self.rng.gen();
+                let vacant = loop {
+                    use std::collections::hash_map::Entry;
+                    match self.sessions.entry(sender) {
+                        Entry::Occupied(_) => sender = self.rng.gen(),
+                        Entry::Vacant(v) => break v,
+                    }
+                };
 
-                    let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
-                    resp_msg.copy_from_slice(bytemuck::bytes_of(&resp));
-                    return Ok(Message::Response(&*resp_msg));
-                }
-            },
+                let (initiator, responder) = hs.split();
+                vacant.insert(CipherState {
+                    nonce: 0,
+                    encrypt: responder,
+                    decrypt: initiator,
+                });
+
+                let resp = MacProtected::new(LEU32::new(sender), response, None, &self.config);
+
+                // response message is always smaller than the initial message
+                let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
+                resp_msg.copy_from_slice(bytemuck::bytes_of(&resp));
+                return Ok(Message::Response(&*resp_msg));
+            }
             // Second Message
-            MSG_SECOND => match MacProtected::<SecondMessage>::verify(rest, self, socket)? {
-                ControlFlow::Break(cookie) => {
-                    let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
-                    cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                    return Ok(Message::Response(&*cookie_msg));
-                }
-                ControlFlow::Continue((sender, second)) => {}
-            },
+            MSG_SECOND => {
+                let (sender, second_message) =
+                    match MacProtected::<SecondMessage>::verify(rest, self, socket)? {
+                        ControlFlow::Break(cookie) => {
+                            // cookie message is always smaller than the response message
+                            let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
+                            cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
+                            return Ok(Message::Response(&*cookie_msg));
+                        }
+                        ControlFlow::Continue((sender, second)) => (sender, second),
+                    };
+            }
             // Data Message
             MSG_DATA => {}
             // Cookie
@@ -314,10 +337,10 @@ fn mac2_key(spk: &PublicKey) -> GenericArray<u8, U32> {
 impl FirstMessage {
     fn process(
         &mut self,
+        hs: &mut HandshakeState,
         sender: LEU32,
-        config: &Config,
-    ) -> Result<(HandshakeState, SecondMessage), Error> {
-        let mut hs = HandshakeState::default();
+        config: &mut Config,
+    ) -> Result<SecondMessage, Error> {
         hs.mix_hash(config.public_key.as_bytes());
         hs.mix_chain(&self.ephemeral_key);
         hs.mix_hash(&self.ephemeral_key);
@@ -325,15 +348,24 @@ impl FirstMessage {
         let epk_i = PublicKey::from(self.ephemeral_key);
         let k = hs.mix_key_dh(&config.private_key, &epk_i);
 
-        let spk_i = self.static_key.decrypt_and_hash(&mut hs, &k)?;
+        let spk_i = self.static_key.decrypt_and_hash(hs, &k)?;
         let spk_i = PublicKey::from(<[u8; 32]>::from(*spk_i));
 
         let k = hs.mix_key_dh(&config.private_key, &spk_i);
-        let timestamp = self.static_key.decrypt_and_hash(&mut hs, &k)?;
+        let timestamp = *self.timestamp.decrypt_and_hash(hs, &k)?;
 
-        let Some(peer) = config.peers.get(&spk_i) else {
+        // check if we know this peer
+        let Some(peer) = config.peers.get_mut(&spk_i) else {
             return Err(Error::Rejected);
         };
+        // todo: check ip
+
+        // check for potential replay attack
+        if timestamp < peer.latest_ts {
+            return Err(Error::Rejected);
+        }
+
+        peer.latest_ts = timestamp;
 
         let esk_r = StaticSecret::random_from_rng(OsRng);
         let epk_r = PublicKey::from(&esk_r);
@@ -343,7 +375,7 @@ impl FirstMessage {
         hs.mix_dh(&esk_r, &epk_i);
         let q = peer.preshared_key;
         let k = hs.mix_key2(&q);
-        let empty = Encrypted::encrypt_and_hash(GenericArray::<u8, U0>::default(), &mut hs, &k);
+        let empty = Encrypted::encrypt_and_hash(GenericArray::<u8, U0>::default(), hs, &k);
 
         let second = SecondMessage {
             receiver: sender,
@@ -351,7 +383,7 @@ impl FirstMessage {
             empty,
         };
 
-        Ok((hs, second))
+        Ok(second)
     }
 }
 
@@ -361,45 +393,6 @@ struct SecondMessage {
     receiver: LEU32,
     ephemeral_key: [u8; 32],
     empty: Encrypted<U0>,
-}
-
-impl SecondMessage {
-    fn construct(
-        config: &Config,
-        first_message: &FirstMessage,
-        c: GenericArray<u8, U32>,
-        h: GenericArray<u8, U32>,
-    ) -> Result<(GenericArray<u8, U32>, GenericArray<u8, U32>), Error> {
-        let esk = EphemeralSecret::random();
-        let epk = PublicKey::from(&esk);
-
-        let [c] = hkdf(&c, [epk.as_bytes()]);
-
-        // let c = GenericArray::from(CONSTRUCTION_HASH);
-        // let h = GenericArray::from(IDENTIFIER_HASH);
-        // let h = hash([&h, config.public_key.as_ref()]);
-        // let [c] = hkdf(&c, [&self.ephemeral_key]);
-        // let h = hash([&h, &self.ephemeral_key]);
-
-        // let [c, k] = kdf_dh(&config.private_key, self.ephemeral_key, &c)?;
-
-        // let aad = Aad::from(h);
-        // let h = hash([&h, &self.static_key]);
-
-        // let peer_static_key = opening_key(k, 0)?
-        //     .open_in_place(aad, &mut self.static_key)
-        //     .map_err(|_: aws_lc_rs::error::Unspecified| Error::Unspecified)?;
-        // let [c, k] = kdf_dh(&config.private_key, peer_static_key, &c)?;
-
-        // let aad = Aad::from(h);
-        // let h = hash([&h, &self.timestamp]);
-
-        // opening_key(k, 0)?
-        //     .open_in_place(aad, &mut self.timestamp)
-        //     .map_err(|_: aws_lc_rs::error::Unspecified| Error::Unspecified)?;
-
-        Ok((c, h))
-    }
 }
 
 #[cfg(test)]
