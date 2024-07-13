@@ -2,12 +2,12 @@ use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use std::{borrow::Borrow, collections::HashMap, hash::BuildHasher};
 
-use blake2::digest::consts::{U12, U16, U32};
+use blake2::digest::consts::{U0, U12, U16, U32};
 use blake2::digest::generic_array::GenericArray;
 use bytemuck::{offset_of, Pod, Zeroable};
 use chacha20poly1305::XNonce;
 use ipnet::IpNet;
-use rand::rngs::StdRng;
+use rand::rngs::{OsRng, StdRng};
 use rand::RngCore;
 use utils::{hash, hkdf, mac, Bytes, Encrypted, HandshakeState, LEU32};
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
@@ -38,7 +38,12 @@ pub struct Config {
     public_key: PublicKey,
     mac1_key: GenericArray<u8, U32>,
     mac2_key: GenericArray<u8, U32>,
-    peers: HashMap<PublicKey, Vec<IpNet>, SipHasher24>,
+    peers: HashMap<PublicKey, Peer2, SipHasher24>,
+}
+
+struct Peer2 {
+    ips: Vec<IpNet>,
+    preshared_key: GenericArray<u8, U32>,
 }
 
 pub struct Peer {
@@ -62,7 +67,8 @@ enum Session {
 struct HandshakeState2 {
     sender: LEU32,
 }
-struct CipherState;
+
+struct CipherState {}
 
 pub enum Error {
     InvalidMessage,
@@ -136,13 +142,21 @@ impl Sessions {
                     return Ok(Message::Response(&*cookie_msg));
                 }
                 ControlFlow::Continue((sender, first)) => {
-                    let hs = first.process(&self.config)?;
+                    let (_hs, response) = first.process(sender, &self.config)?;
                     let sender_static_key = first.static_key.assumed_decrypted();
                     let sender_static_key = PublicKey::from(<[u8; 32]>::from(*sender_static_key));
 
-                    if !self.config.peers.contains_key(&sender_static_key) {
-                        return Err(Error::Rejected);
-                    }
+                    // TODO: derive cipher keys from hs
+                    self.sessions.insert(
+                        PublicKeyWrapper(sender_static_key),
+                        Session::Completed(CipherState {}),
+                    );
+
+                    let resp = MacProtected::new(LEU32::new(0), response, None, &self.config);
+
+                    let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
+                    resp_msg.copy_from_slice(bytemuck::bytes_of(&resp));
+                    return Ok(Message::Response(&*resp_msg));
                 }
             },
             // Second Message
@@ -220,6 +234,25 @@ impl<T> MacProtected<T>
 where
     Self: Pod,
 {
+    pub fn new(
+        sender: LEU32,
+        msg: T,
+        cookie: Option<&GenericArray<u8, U16>>,
+        config: &Config,
+    ) -> Self {
+        let mut mac = Self {
+            sender,
+            inner: msg,
+            mac1: Bytes(GenericArray::default()),
+            mac2: Bytes(GenericArray::default()),
+        };
+        mac.mac1.0 = mac.mac1(&config.mac1_key);
+        if let Some(cookie) = cookie {
+            mac.mac2.0 = mac.mac2(cookie);
+        }
+        mac
+    }
+
     pub fn verify<'m>(
         msg: &'m mut [u8],
         state: &mut Sessions,
@@ -279,7 +312,11 @@ fn mac2_key(spk: &PublicKey) -> GenericArray<u8, U32> {
 }
 
 impl FirstMessage {
-    fn process(&mut self, config: &Config) -> Result<HandshakeState, Error> {
+    fn process(
+        &mut self,
+        sender: LEU32,
+        config: &Config,
+    ) -> Result<(HandshakeState, SecondMessage), Error> {
         let mut hs = HandshakeState::default();
         hs.mix_hash(config.public_key.as_bytes());
         hs.mix_chain(&self.ephemeral_key);
@@ -294,11 +331,27 @@ impl FirstMessage {
         let k = hs.mix_key_dh(&config.private_key, &spk_i);
         let timestamp = self.static_key.decrypt_and_hash(&mut hs, &k)?;
 
-        if !config.peers.contains_key(&spk_i) {
+        let Some(peer) = config.peers.get(&spk_i) else {
             return Err(Error::Rejected);
-        }
+        };
 
-        Ok(hs)
+        let esk_r = StaticSecret::random_from_rng(OsRng);
+        let epk_r = PublicKey::from(&esk_r);
+        hs.mix_chain(epk_r.as_bytes());
+        hs.mix_hash(epk_r.as_bytes());
+        hs.mix_dh(&esk_r, &epk_i);
+        hs.mix_dh(&esk_r, &epk_i);
+        let q = peer.preshared_key;
+        let k = hs.mix_key2(&q);
+        let empty = Encrypted::encrypt_and_hash(GenericArray::<u8, U0>::default(), &mut hs, &k);
+
+        let second = SecondMessage {
+            receiver: sender,
+            ephemeral_key: epk_r.to_bytes(),
+            empty,
+        };
+
+        Ok((hs, second))
     }
 }
 
@@ -307,7 +360,7 @@ impl FirstMessage {
 struct SecondMessage {
     receiver: LEU32,
     ephemeral_key: [u8; 32],
-    empty: [u8; 16],
+    empty: Encrypted<U0>,
 }
 
 impl SecondMessage {

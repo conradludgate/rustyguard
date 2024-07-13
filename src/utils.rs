@@ -88,10 +88,23 @@ impl HandshakeState {
         self.chain = c;
     }
 
+    pub fn mix_dh(&mut self, sk: &StaticSecret, pk: &PublicKey) {
+        let prk = sk.diffie_hellman(pk);
+        let [c] = hkdf(&self.chain, [prk.as_bytes()]);
+        self.chain = c;
+    }
+
     pub fn mix_key_dh(&mut self, sk: &StaticSecret, pk: &PublicKey) -> Key {
         let prk = sk.diffie_hellman(pk);
         let [c, k] = hkdf(&self.chain, [prk.as_bytes()]);
         self.chain = c;
+        k
+    }
+
+    pub fn mix_key2(&mut self, b: &[u8]) -> Key {
+        let [c, t, k] = hkdf(&self.chain, [b]);
+        self.chain = c;
+        self.mix_hash(&t);
         k
     }
 
@@ -148,6 +161,24 @@ where
             .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, &self.tag)
             .map_err(|_| crate::Error::Unspecified)?;
         Ok(&mut self.msg)
+    }
+
+    pub(crate) fn encrypt_and_hash(
+        mut msg: GenericArray<u8, U>,
+        state: &mut HandshakeState,
+        key: &Key,
+    ) -> Self {
+        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
+
+        let aad = state.hash;
+        let tag = ChaCha20Poly1305::new(key)
+            .encrypt_in_place_detached(&nonce(0), &aad, &mut msg)
+            .expect("message should not be larger than max message size");
+
+        let out = Encrypted { msg, tag };
+        state.mix_hash(bytes_of(&out));
+
+        out
     }
 
     pub(crate) fn decrypt_cookie(
