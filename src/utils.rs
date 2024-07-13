@@ -4,16 +4,12 @@ use blake2::digest::generic_array::GenericArray;
 use blake2::digest::{Digest, Output};
 use blake2::Blake2s256;
 use bytemuck::bytes_of;
-use bytemuck::CheckedBitPattern;
-use bytemuck::NoUninit;
 use bytemuck::{Pod, TransparentWrapper, Zeroable};
 use chacha20poly1305::consts::U16;
-use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::Key;
 use chacha20poly1305::Nonce;
 use chacha20poly1305::XNonce;
 use hkdf::hmac::SimpleHmac;
-use std::ops::Add;
 use x25519_dalek::PublicKey;
 use x25519_dalek::StaticSecret;
 
@@ -49,32 +45,6 @@ fn hmac<const M: usize>(key: &GenericArray<u8, U32>, msg: [&[u8]; M]) -> Output<
     }
     hmac.finalize().into_bytes()
 }
-
-// fn hmac<const M: usize>(key: &GenericArray<u8, U32>, msg: [&[u8]; M]) -> Output<Blake2s256> {
-//     const IPAD: u8 = 0x36;
-//     const OPAD: u8 = 0x5C;
-
-//     let mut buf = Block::<Blake2s256>::default();
-//     buf[..32].copy_from_slice(key);
-//     for b in buf.iter_mut() {
-//         *b ^= IPAD;
-//     }
-//     let mut digest = Blake2s256::default();
-//     digest.update(&buf);
-
-//     for b in buf.iter_mut() {
-//         *b ^= IPAD ^ OPAD;
-//     }
-
-//     let mut opad_digest = Blake2s256::default();
-//     opad_digest.update(&buf);
-
-//     for msg in msg {
-//         digest.update(msg);
-//     }
-
-//     opad_digest.chain_update(digest.finalize()).finalize()
-// }
 
 pub(crate) fn hkdf<const N: usize, const M: usize>(
     key: &GenericArray<u8, U32>,
@@ -174,7 +144,7 @@ where
         let aad = state.hash;
         state.mix_hash(bytes_of(&*self));
 
-        ChaCha20Poly1305::new(&key)
+        ChaCha20Poly1305::new(key)
             .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, &self.tag)
             .map_err(|_| crate::Error::Unspecified)?;
         Ok(&mut self.msg)
@@ -188,8 +158,8 @@ where
     ) -> Result<&mut GenericArray<u8, U>, crate::Error> {
         use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
 
-        XChaCha20Poly1305::new(&key)
-            .decrypt_in_place_detached(nonce, &aad, &mut self.msg, &self.tag)
+        XChaCha20Poly1305::new(key)
+            .decrypt_in_place_detached(nonce, aad, &mut self.msg, &self.tag)
             .map_err(|_| crate::Error::Unspecified)?;
 
         Ok(&mut self.msg)
@@ -203,8 +173,8 @@ where
     ) -> Self {
         use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
 
-        let tag = XChaCha20Poly1305::new(&key)
-            .encrypt_in_place_detached(nonce, &aad, &mut cookie)
+        let tag = XChaCha20Poly1305::new(key)
+            .encrypt_in_place_detached(nonce, aad, &mut cookie)
             .expect("cookie message should not be larger than max message size");
 
         Encrypted { msg: cookie, tag }
@@ -223,47 +193,3 @@ impl LEU32 {
         Self(n.to_le())
     }
 }
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub(crate) struct TaggedMessage<T, const N: u8> {
-    tag: MessageType<N>,
-    pub(crate) msg: T,
-}
-
-unsafe impl<T: Pod, const N: u8> CheckedBitPattern for TaggedMessage<T, N> {
-    type Bits = <MessageType<N> as CheckedBitPattern>::Bits;
-
-    fn is_valid_bit_pattern(bits: &Self::Bits) -> bool {
-        <MessageType<N> as CheckedBitPattern>::is_valid_bit_pattern(bits)
-    }
-}
-unsafe impl<T: NoUninit, const N: u8> NoUninit for TaggedMessage<T, N> {}
-
-impl<T, const N: u8> TaggedMessage<T, N> {
-    pub fn new(t: T) -> Self {
-        Self {
-            tag: MessageType::default(),
-            msg: t,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-#[repr(transparent)]
-pub(crate) struct MessageType<const N: u8>(u32);
-
-impl<const N: u8> Default for MessageType<N> {
-    fn default() -> Self {
-        Self(u32::from_le_bytes([N, 0, 0, 0]))
-    }
-}
-
-unsafe impl<const N: u8> CheckedBitPattern for MessageType<N> {
-    type Bits = u32;
-
-    fn is_valid_bit_pattern(bits: &Self::Bits) -> bool {
-        *bits == Self::default().0
-    }
-}
-unsafe impl<const N: u8> NoUninit for MessageType<N> {}

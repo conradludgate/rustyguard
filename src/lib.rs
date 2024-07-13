@@ -3,13 +3,13 @@ use std::ops::ControlFlow;
 use std::{borrow::Borrow, collections::HashMap, hash::BuildHasher};
 
 use blake2::digest::consts::{U12, U16, U32};
-use blake2::digest::generic_array::{sequence::Split, GenericArray};
-use bytemuck::{bytes_of, offset_of, NoUninit, Pod, Zeroable};
-use chacha20poly1305::aead::rand_core::{CryptoRng, RngCore};
-use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Tag, XNonce};
+use blake2::digest::generic_array::GenericArray;
+use bytemuck::{offset_of, Pod, Zeroable};
+use chacha20poly1305::XNonce;
 use ipnet::IpNet;
 use rand::rngs::StdRng;
-use utils::{hash, hkdf, mac, nonce, Bytes, Encrypted, HandshakeState, TaggedMessage, LEU32};
+use rand::RngCore;
+use utils::{hash, hkdf, mac, Bytes, Encrypted, HandshakeState, LEU32};
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 
 mod utils;
@@ -129,30 +129,31 @@ impl Sessions {
 
         match msg_type {
             // First Message
-            MSG_FIRST => {
-                let mac: &mut MacProtected<FirstMessage> =
-                    bytemuck::try_from_bytes_mut(rest).map_err(|_| Error::InvalidMessage)?;
-
-                mac.verify_mac1(&self.config)?;
-                if self.overloaded() && mac.verify_mac2(self, socket).is_err() {
-                    let cookie = CookieMessage::new(mac.inner.sender, self, socket, &mac.mac1.0);
+            MSG_FIRST => match MacProtected::<FirstMessage>::verify(rest, self, socket)? {
+                ControlFlow::Break(cookie) => {
                     let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
                     cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-
-                    // return cookie
                     return Ok(Message::Response(&*cookie_msg));
                 }
+                ControlFlow::Continue((sender, first)) => {
+                    let hs = first.process(&self.config)?;
+                    let sender_static_key = first.static_key.assumed_decrypted();
+                    let sender_static_key = PublicKey::from(<[u8; 32]>::from(*sender_static_key));
 
-                let hs = mac.inner.process(&self.config)?;
-                let sender_static_key = mac.inner.static_key.assumed_decrypted();
-                let sender_static_key = PublicKey::from(<[u8; 32]>::from(*sender_static_key));
-
-                if !self.config.peers.contains_key(&sender_static_key) {
-                    return Err(Error::Rejected);
+                    if !self.config.peers.contains_key(&sender_static_key) {
+                        return Err(Error::Rejected);
+                    }
                 }
-            }
+            },
             // Second Message
-            MSG_SECOND => {}
+            MSG_SECOND => match MacProtected::<SecondMessage>::verify(rest, self, socket)? {
+                ControlFlow::Break(cookie) => {
+                    let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
+                    cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
+                    return Ok(Message::Response(&*cookie_msg));
+                }
+                ControlFlow::Continue((sender, second)) => {}
+            },
             // Data Message
             MSG_DATA => {}
             // Cookie
@@ -168,7 +169,6 @@ impl Sessions {
 #[derive(Pod, Zeroable, Clone, Copy)]
 #[repr(C)]
 struct FirstMessage {
-    sender: LEU32,
     ephemeral_key: [u8; 32],
     static_key: Encrypted<U32>,
     timestamp: Encrypted<U12>,
@@ -192,7 +192,7 @@ impl CookieMessage {
         let t = state.cookie(socket);
         let mut nonce = XNonce::default();
         state.rng.fill_bytes(&mut nonce);
-        let cookie = Encrypted::encrypt_cookie(t, &state.config.mac2_key, &nonce, &mac1);
+        let cookie = Encrypted::encrypt_cookie(t, &state.config.mac2_key, &nonce, mac1);
 
         Self {
             receiver,
@@ -205,6 +205,7 @@ impl CookieMessage {
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct MacProtected<T> {
+    sender: LEU32,
     inner: T,
     mac1: Bytes<U16>,
     mac2: Bytes<U16>,
@@ -219,18 +220,22 @@ impl<T> MacProtected<T>
 where
     Self: Pod,
 {
-    // pub fn verify(&mut self, overloaded: bool, config: &Config) -> Result<ControlFlow<Message, &mut T>, Error> {
-    //     self.verify_mac1(config)?;
-    //     if overloaded && !self.verify_mac2() {
-    //         let bytes = bytemuck::bytes_of_mut(&mut self.inner);
+    pub fn verify<'m>(
+        msg: &'m mut [u8],
+        state: &mut Sessions,
+        socket: SocketAddr,
+    ) -> Result<ControlFlow<CookieMessage, (LEU32, &'m mut T)>, Error> {
+        let mac: &'m mut MacProtected<T> =
+            bytemuck::try_from_bytes_mut(msg).map_err(|_| Error::InvalidMessage)?;
 
-    //         Ok(ControlFlow::Break(Message::Response(
-
-    //         )))
-    //     } else {
-    //         Ok(ControlFlow::Continue(&mut self.inner))
-    //     }
-    // }
+        mac.verify_mac1(&state.config)?;
+        if state.overloaded() && mac.verify_mac2(state, socket).is_err() {
+            let cookie = CookieMessage::new(mac.sender, state, socket, &mac.mac1.0);
+            Ok(ControlFlow::Break(cookie))
+        } else {
+            Ok(ControlFlow::Continue((mac.sender, &mut mac.inner)))
+        }
+    }
 
     fn verify_mac1(&self, config: &Config) -> Result<(), Error> {
         use subtle::ConstantTimeEq;
@@ -300,7 +305,6 @@ impl FirstMessage {
 #[derive(Pod, Zeroable, Clone, Copy)]
 #[repr(C)]
 struct SecondMessage {
-    sender: LEU32,
     receiver: LEU32,
     ephemeral_key: [u8; 32],
     empty: [u8; 16],
@@ -349,7 +353,7 @@ impl SecondMessage {
 mod tests {
     use blake2::Digest;
 
-    use crate::{utils::TaggedMessage, CookieMessage, FirstMessage, MacProtected, SecondMessage};
+    use crate::{CookieMessage, FirstMessage, MacProtected, SecondMessage};
 
     #[test]
     fn construction_identifier() {
