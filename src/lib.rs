@@ -5,11 +5,11 @@ use std::{borrow::Borrow, collections::HashMap, hash::BuildHasher};
 use blake2::digest::consts::{U0, U12, U16, U32};
 use blake2::digest::generic_array::GenericArray;
 use bytemuck::{offset_of, Pod, Zeroable};
-use chacha20poly1305::XNonce;
+use chacha20poly1305::{KeyInit, XNonce};
 use ipnet::IpNet;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, RngCore};
-use tai64::Tai64N;
+use slotmap::{DefaultKey, SlotMap};
 use utils::{hash, mac, Bytes, Encrypted, HandshakeState, LEU32};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -40,7 +40,8 @@ pub struct Config {
     public_key: PublicKey,
     mac1_key: GenericArray<u8, U32>,
     mac2_key: GenericArray<u8, U32>,
-    peers: HashMap<PublicKey, Peer2, SipHasher24>,
+    peers: HashMap<PublicKey, DefaultKey, SipHasher24>,
+    peer_slots: SlotMap<DefaultKey, Peer2>,
 }
 
 struct Peer2 {
@@ -63,6 +64,8 @@ pub struct Sessions {
     random_secret: GenericArray<u8, U32>,
     sessions: HashMap<u32, Box<CipherState>, SipHasher24>,
     handshakes: HashMap<u32, Box<InitiatedHandshakes>, SipHasher24>,
+    // virtual_ips: HashMap<SocketAddr, >
+    // endpoints:
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -96,6 +99,7 @@ pub enum Message<'a> {
     Write(&'a [u8]),
     // This can be processed appropriately
     Read(&'a [u8]),
+    Noop,
 }
 
 const MSG_FIRST: u32 = 1;
@@ -136,113 +140,159 @@ impl Sessions {
         )
     }
 
-    pub fn initialise_session(&mut self) {
+    pub fn initialise_session(&mut self) {}
 
-    }
-
-    // TODO(conrad): enforce the msg is 4 byte aligned.
+    // TODO(conrad): enforce the msg is 16 byte aligned.
     pub fn recv_message<'m>(
         &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<Message<'m>, Error> {
-        if !msg.as_ptr().cast::<u32>().is_aligned() {
+        if msg.as_ptr().align_offset(16) != 0 {
             return Err(Error::Unaligned);
         }
 
-        let Some((msg_type, rest)) = msg.split_first_chunk_mut() else {
-            return Err(Error::InvalidMessage);
+        let (msg_type, _) = msg.split_first_chunk_mut().ok_or(Error::InvalidMessage)?;
+        match u32::from_le_bytes(*msg_type) {
+            MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
+            MSG_SECOND => self.handle_handshake_resp(socket, msg),
+            MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
+            MSG_DATA => self.decrypt_packet(msg).map(Message::Read),
+            _ => Err(Error::InvalidMessage),
+        }
+    }
+
+    #[inline(never)]
+    fn handle_handshake_init<'m>(
+        &mut self,
+        socket: SocketAddr,
+        msg: &'m mut [u8],
+    ) -> Result<&'m [u8], Error> {
+        let (sender, first_message) = match MacProtected::<FirstMessage>::verify(msg, self, socket)?
+        {
+            ControlFlow::Break(cookie) => {
+                // cookie message is always smaller than the initial message
+                let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
+                cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
+                return Ok(&*cookie_msg);
+            }
+            ControlFlow::Continue(MacProtected { sender, inner, .. }) => (*sender, inner),
         };
-        let msg_type = u32::from_le_bytes(*msg_type);
 
-        match msg_type {
-            // First Message
-            MSG_FIRST => {
-                let (sender, first_message) =
-                    match MacProtected::<FirstMessage>::verify(rest, self, socket)? {
-                        ControlFlow::Break(cookie) => {
-                            // cookie message is always smaller than the initial message
-                            let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
-                            cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                            return Ok(Message::Write(&*cookie_msg));
-                        }
-                        ControlFlow::Continue(MacProtected { sender, inner, .. }) => {
-                            (*sender, inner)
-                        }
-                    };
+        let mut hs = HandshakeState::default();
+        let response = first_message.process(&mut hs, sender, &mut self.config)?;
 
-                let mut hs = HandshakeState::default();
-                let response = first_message.process(&mut hs, sender, &mut self.config)?;
-
-                // we are the receiver for now
-                let mut receiver = self.rng.gen();
-                let vacant = loop {
-                    use std::collections::hash_map::Entry;
-                    match self.sessions.entry(receiver) {
-                        Entry::Occupied(_) => receiver = self.rng.gen(),
-                        Entry::Vacant(v) => break v,
-                    }
-                };
-
-                let (initiator, responder) = hs.split();
-                vacant.insert(Box::new(CipherState {
-                    // messages we send will be received by the client who sent this message.
-                    receiver: sender.get(),
-                    nonce: 0,
-                    encrypt: responder,
-                    decrypt: initiator,
-                }));
-
-                let resp = MacProtected::new(LEU32::new(receiver), response, None, &self.config);
-
-                // response message is always smaller than the initial message
-                let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
-                resp_msg.copy_from_slice(bytemuck::bytes_of(&resp));
-                return Ok(Message::Write(&*resp_msg));
+        // we are the receiver for now
+        let mut receiver = self.rng.gen();
+        let vacant = loop {
+            use std::collections::hash_map::Entry;
+            match self.sessions.entry(receiver) {
+                Entry::Occupied(_) => receiver = self.rng.gen(),
+                Entry::Vacant(v) => break v,
             }
-            // Second Message
-            MSG_SECOND => {
-                let (sender, second_message) =
-                    match MacProtected::<SecondMessage>::verify(rest, self, socket)? {
-                        ControlFlow::Break(cookie) => {
-                            // cookie message is always smaller than the response message
-                            let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
-                            cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                            return Ok(Message::Write(&*cookie_msg));
-                        }
-                        ControlFlow::Continue(MacProtected { sender, inner, .. }) => {
-                            (*sender, inner)
-                        }
-                    };
+        };
 
-                let receiver = second_message.receiver.get();
-                // check for a session expecting this handshake response
-                let Some(mut ihs) = self.handshakes.remove(&receiver) else {
-                    return Err(Error::Rejected);
-                };
+        let (initiator, responder) = hs.split();
+        vacant.insert(Box::new(CipherState {
+            // messages we send will be received by the client who sent this message.
+            receiver: sender.get(),
+            nonce: 0,
+            encrypt: responder,
+            decrypt: initiator,
+        }));
 
-                second_message.process(&mut ihs, &self.config)?;
+        let resp = MacProtected::new(
+            LEU32::new(MSG_SECOND),
+            LEU32::new(receiver),
+            response,
+            None,
+            &self.config,
+        );
 
-                let (initiator, responder) = ihs.state.split();
-                self.sessions.insert(
-                    receiver,
-                    Box::new(CipherState {
-                        receiver: sender.get(),
-                        nonce: 0,
-                        encrypt: initiator,
-                        decrypt: responder,
-                    }),
-                );
-            }
-            // Data Message
-            MSG_DATA => {}
-            // Cookie
-            MSG_COOKIE => {}
-            // Unknown
-            _ => return Err(Error::InvalidMessage),
+        // response message is always smaller than the initial message
+        let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
+        resp_msg.copy_from_slice(bytemuck::bytes_of(&resp));
+        Ok(&*resp_msg)
+    }
+
+    #[inline(never)]
+    fn handle_handshake_resp<'m>(
+        &mut self,
+        socket: SocketAddr,
+        msg: &'m mut [u8],
+    ) -> Result<Message<'m>, Error> {
+        let (sender, second_message) =
+            match MacProtected::<SecondMessage>::verify(msg, self, socket)? {
+                ControlFlow::Break(cookie) => {
+                    // cookie message is always smaller than the response message
+                    let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
+                    cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
+                    return Ok(Message::Write(&*cookie_msg));
+                }
+                ControlFlow::Continue(MacProtected { sender, inner, .. }) => (*sender, inner),
+            };
+
+        let receiver = second_message.receiver.get();
+        // check for a session expecting this handshake response
+        let mut ihs = self.handshakes.remove(&receiver).ok_or(Error::Rejected)?;
+
+        second_message.process(&mut ihs, &self.config)?;
+
+        let (initiator, responder) = ihs.state.split();
+        self.sessions.insert(
+            receiver,
+            Box::new(CipherState {
+                receiver: sender.get(),
+                nonce: 0,
+                encrypt: initiator,
+                decrypt: responder,
+            }),
+        );
+
+        Ok(Message::Noop)
+    }
+
+    #[inline(never)]
+    fn handle_cookie(&mut self, _msg: &mut [u8]) -> Result<(), Error> {
+        todo!()
+    }
+
+    #[inline(never)]
+    fn decrypt_packet<'m>(&mut self, msg: &'m mut [u8]) -> Result<&'m [u8], Error> {
+        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce, Tag};
+        const HEADER_LEN: usize = std::mem::size_of::<DataHeader>();
+
+        if msg.as_ptr().align_offset(16) != 0 {
+            return Err(Error::Unaligned);
         }
 
-        todo!()
+        if msg.len() % 16 != 0 || msg.len() < HEADER_LEN + 16 {
+            return Err(Error::InvalidMessage);
+        }
+
+        let (header, payload) = msg
+            .split_first_chunk_mut::<HEADER_LEN>()
+            .ok_or(Error::InvalidMessage)?;
+        let (payload, tag) = payload
+            .split_last_chunk_mut::<16>()
+            .ok_or(Error::InvalidMessage)?;
+
+        let header: &mut DataHeader =
+            bytemuck::try_from_bytes_mut(header).map_err(|_| Error::InvalidMessage)?;
+
+        let session = self
+            .sessions
+            .get_mut(&header.receiver.get())
+            .ok_or(Error::Rejected)?;
+
+        let mut nonce = Nonce::default();
+        nonce[4..12].copy_from_slice(&header.counter.to_le_bytes());
+
+        ChaCha20Poly1305::new(&session.decrypt)
+            .decrypt_in_place_detached(&nonce, &[], payload, Tag::from_slice(tag))
+            .map_err(|_| Error::Rejected)?;
+
+        Ok(&*payload)
     }
 }
 
@@ -257,6 +307,7 @@ struct FirstMessage {
 #[derive(Pod, Zeroable, Clone, Copy)]
 #[repr(C)]
 struct CookieMessage {
+    _type: LEU32,
     receiver: LEU32,
     nonce: Bytes<chacha20poly1305::consts::U24>,
     cookie: Encrypted<U16>,
@@ -272,6 +323,7 @@ struct CookieMessage {
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct MacProtected<T> {
+    _type: LEU32,
     sender: LEU32,
     inner: T,
     mac1: Bytes<U16>,
@@ -288,12 +340,14 @@ where
     Self: Pod,
 {
     pub fn new(
+        _type: LEU32,
         sender: LEU32,
         msg: T,
         cookie: Option<&GenericArray<u8, U16>>,
         config: &Config,
     ) -> Self {
         let mut mac = Self {
+            _type,
             sender,
             inner: msg,
             mac1: Bytes(GenericArray::default()),
@@ -323,6 +377,7 @@ where
                     Encrypted::encrypt_cookie(cookie, &state.config.mac2_key, &nonce, &this.mac1.0);
 
                 let msg = CookieMessage {
+                    _type: LEU32::new(MSG_COOKIE),
                     receiver: this.sender,
                     nonce: Bytes(nonce),
                     cookie,
@@ -396,9 +451,8 @@ impl FirstMessage {
         let timestamp = *self.timestamp.decrypt_and_hash(hs, &k)?;
 
         // check if we know this peer
-        let Some(peer) = config.peers.get_mut(&spk_i) else {
-            return Err(Error::Rejected);
-        };
+        let slot = config.peers.get(&spk_i).ok_or(Error::Rejected)?;
+        let peer = config.peer_slots.get_mut(*slot).ok_or(Error::Rejected)?;
         // todo: check ip
 
         // check for potential replay attack
@@ -452,11 +506,19 @@ impl SecondMessage {
     }
 }
 
+#[derive(Pod, Zeroable, Clone, Copy)]
+#[repr(C)]
+struct DataHeader {
+    _type: LEU32,
+    receiver: LEU32,
+    counter: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use blake2::Digest;
 
-    use crate::{CookieMessage, FirstMessage, MacProtected, SecondMessage};
+    use crate::{CookieMessage, DataHeader, FirstMessage, MacProtected, SecondMessage};
 
     #[test]
     fn construction_identifier() {
@@ -474,13 +536,16 @@ mod tests {
 
     #[test]
     fn test_size_align() {
-        assert_eq!(core::mem::size_of::<MacProtected<FirstMessage>>(), 144);
+        assert_eq!(core::mem::size_of::<MacProtected<FirstMessage>>(), 148);
         assert_eq!(core::mem::align_of::<MacProtected<FirstMessage>>(), 4);
 
-        assert_eq!(core::mem::size_of::<MacProtected<SecondMessage>>(), 88);
+        assert_eq!(core::mem::size_of::<MacProtected<SecondMessage>>(), 92);
         assert_eq!(core::mem::align_of::<MacProtected<SecondMessage>>(), 4);
 
-        assert_eq!(core::mem::size_of::<CookieMessage>(), 60);
+        assert_eq!(core::mem::size_of::<CookieMessage>(), 64);
         assert_eq!(core::mem::align_of::<CookieMessage>(), 4);
+
+        assert_eq!(core::mem::size_of::<DataHeader>(), 16);
+        assert_eq!(core::mem::align_of::<DataHeader>(), 8);
     }
 }
