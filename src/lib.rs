@@ -6,11 +6,10 @@ use blake2::digest::consts::{U0, U12, U16, U32};
 use blake2::digest::generic_array::GenericArray;
 use bytemuck::{offset_of, Pod, Zeroable};
 use chacha20poly1305::{KeyInit, XNonce};
-use ipnet::IpNet;
 use rand::rngs::{OsRng, StdRng};
-use rand::{Rng, RngCore};
+use rand::{Rng, RngCore, SeedableRng};
 use slotmap::{DefaultKey, SlotMap};
-use tai64::{Tai64, Tai64N};
+use tai64::Tai64N;
 use utils::{hash, mac, Bytes, Encrypted, HandshakeState, LEU32};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -48,11 +47,34 @@ pub struct Config {
     mac1_key: GenericArray<u8, U32>,
     mac2_key: GenericArray<u8, U32>,
     peers: HashMap<PublicKey, DefaultKey, SipHasher24>,
-    peer_slots: SlotMap<DefaultKey, Peer2>,
+    peer_slots: SlotMap<DefaultKey, Peer>,
+}
+
+impl Config {
+    pub fn new(private_key: StaticSecret, peers: impl IntoIterator<Item = Peer>) -> Self {
+        let mut peer_slots = SlotMap::new();
+        let mut map = HashMap::with_hasher(SipHasher24::default());
+        for peer in peers {
+            let pk = peer.key;
+            let key = peer_slots.insert(peer);
+            map.insert(pk, key);
+        }
+
+        let public_key = PublicKey::from(&private_key);
+
+        Config {
+            mac1_key: mac1_key(&public_key),
+            mac2_key: mac2_key(&public_key),
+            private_key,
+            public_key,
+            peers: map,
+            peer_slots,
+        }
+    }
 }
 
 #[derive(Debug)]
-struct Peer2 {
+pub struct Peer {
     key: PublicKey,
     // ips: Vec<IpNet>,
     preshared_key: GenericArray<u8, U32>,
@@ -60,12 +82,6 @@ struct Peer2 {
 }
 
 type Tai64NBytes = GenericArray<u8, U12>;
-
-pub struct Peer {
-    key: PublicKey,
-    allowed_source_ips: Vec<IpNet>,
-    internet_endpoint: Option<SocketAddr>,
-}
 
 pub struct Sessions {
     config: Config,
@@ -75,6 +91,18 @@ pub struct Sessions {
     handshakes: HashMap<u32, Box<InitiatedHandshakes>, SipHasher24>,
     // virtual_ips: HashMap<SocketAddr, >
     // endpoints:
+}
+
+impl Sessions {
+    pub fn new(config: Config) -> Self {
+        Sessions {
+            config,
+            random_secret: GenericArray::default(),
+            sessions: HashMap::with_hasher(SipHasher24::default()),
+            handshakes: HashMap::with_hasher(SipHasher24::default()),
+            rng: StdRng::from_entropy(),
+        }
+    }
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -382,7 +410,7 @@ where
             mac1: Bytes(GenericArray::default()),
             mac2: Bytes(GenericArray::default()),
         };
-        mac.mac1.0 = mac.mac1(&mac1_key);
+        mac.mac1.0 = mac.mac1(mac1_key);
         if let Some(cookie) = cookie {
             mac.mac2.0 = mac.mac2(cookie);
         }
@@ -460,7 +488,7 @@ fn mac2_key(spk: &PublicKey) -> GenericArray<u8, U32> {
 }
 
 impl FirstMessage {
-    fn new(state: &mut Sessions, to: DefaultKey) -> (u32, Self) {
+    fn new(state: &mut Sessions, to: DefaultKey) -> MacProtected<Self> {
         let peer = state
             .config
             .peer_slots
@@ -507,7 +535,14 @@ impl FirstMessage {
             static_key,
             timestamp,
         };
-        (sender, this)
+
+        MacProtected::new(
+            LEU32::new(MSG_FIRST),
+            LEU32::new(sender),
+            this,
+            None,
+            &mac1_key(&peer.key),
+        )
     }
 
     fn process(
@@ -594,16 +629,15 @@ struct DataHeader {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use blake2::{digest::generic_array::GenericArray, Digest};
-    use rand::{rngs::StdRng, SeedableRng};
-    use slotmap::SlotMap;
+    use chacha20poly1305::consts::U32;
+    use rand::{rngs::OsRng, RngCore};
+    use slotmap::DefaultKey;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use crate::{
-        mac1_key, mac2_key, utils::LEU32, Config, CookieMessage, DataHeader, FirstMessage,
-        MacProtected, Peer2, SecondMessage, Sessions, SipHasher24, Tai64NBytes, MSG_FIRST,
+        Config, CookieMessage, DataHeader, FirstMessage, MacProtected, Peer, SecondMessage,
+        Sessions, Tai64NBytes,
     };
 
     #[test]
@@ -635,72 +669,39 @@ mod tests {
         assert_eq!(core::mem::align_of::<DataHeader>(), 8);
     }
 
+    fn session_with_peer(
+        secret_key: StaticSecret,
+        peer_public_key: PublicKey,
+        preshared_key: GenericArray<u8, U32>,
+    ) -> (DefaultKey, Sessions) {
+        let peer = Peer {
+            key: peer_public_key,
+            preshared_key,
+            latest_ts: Tai64NBytes::default(),
+        };
+        let config = Config::new(secret_key, [peer]);
+        let peer = config.peers[&peer_public_key];
+        let sessions = Sessions::new(config);
+
+        (peer, sessions)
+    }
+
     #[test]
     fn handshake_happy() {
         let ssk_i = StaticSecret::random();
         let ssk_r = StaticSecret::random();
         let spk_i = PublicKey::from(&ssk_i);
         let spk_r = PublicKey::from(&ssk_r);
+        let mut psk = GenericArray::default();
+        OsRng.fill_bytes(&mut psk);
 
-        let mut peer_slots = SlotMap::new();
-        let mut peers = HashMap::with_hasher(SipHasher24::default());
-        let peer_r = peer_slots.insert(Peer2 {
-            key: spk_r,
-            preshared_key: Default::default(),
-            latest_ts: Tai64NBytes::default(),
-        });
-        peers.insert(spk_r, peer_r);
+        let (peer_r, mut sessions_i) = session_with_peer(ssk_i, spk_r, psk);
+        let (_, mut sessions_r) = session_with_peer(ssk_r, spk_i, psk);
 
-        let mut session_i = Sessions {
-            config: Config {
-                mac1_key: mac1_key(&spk_i),
-                mac2_key: mac2_key(&spk_i),
-                private_key: ssk_i,
-                public_key: spk_i,
-                peers,
-                peer_slots,
-            },
-            random_secret: GenericArray::default(),
-            sessions: HashMap::with_hasher(SipHasher24::default()),
-            handshakes: HashMap::with_hasher(SipHasher24::default()),
-            rng: StdRng::from_entropy(),
-        };
-
-        let (sender, handshake_init) = FirstMessage::new(&mut session_i, peer_r);
-        let mut handshake_init = MacProtected::new(
-            LEU32::new(MSG_FIRST),
-            LEU32::new(sender),
-            handshake_init,
-            None,
-            &mac1_key(&spk_r),
-        );
-
-        let mut peer_slots = SlotMap::new();
-        let mut peers = HashMap::with_hasher(SipHasher24::default());
-        let peer_i = peer_slots.insert(Peer2 {
-            key: spk_i,
-            preshared_key: Default::default(),
-            latest_ts: Tai64NBytes::default(),
-        });
-        peers.insert(spk_i, peer_i);
-
-        let mut session_r = Sessions {
-            config: Config {
-                mac1_key: mac1_key(&spk_r),
-                mac2_key: mac2_key(&spk_r),
-                private_key: ssk_r,
-                public_key: spk_r,
-                peers,
-                peer_slots,
-            },
-            random_secret: GenericArray::default(),
-            sessions: HashMap::with_hasher(SipHasher24::default()),
-            handshakes: HashMap::with_hasher(SipHasher24::default()),
-            rng: StdRng::from_entropy(),
-        };
-
+        // send the handshake to the server
+        let mut handshake_init = FirstMessage::new(&mut sessions_i, peer_r);
         let buf = bytemuck::bytes_of_mut(&mut handshake_init);
-        let buf = match session_r
+        let buf = match sessions_r
             .recv_message("10.0.0.1:1234".parse().unwrap(), buf)
             .unwrap()
         {
@@ -708,12 +709,19 @@ mod tests {
             _ => panic!("expecting write"),
         };
 
-        match session_i
+        // send the handshake response to the client
+        match sessions_i
             .recv_message("10.0.0.2:1234".parse().unwrap(), buf)
             .unwrap()
         {
             crate::Message::Noop => {}
             _ => panic!("expecting noop"),
         };
+
+        // check the session keys
+        let (_, session_r) = sessions_r.sessions.iter().next().unwrap();
+        let (_, session_i) = sessions_i.sessions.iter().next().unwrap();
+        assert_eq!(session_i.decrypt, session_r.encrypt);
+        assert_eq!(session_i.encrypt, session_r.decrypt);
     }
 }
