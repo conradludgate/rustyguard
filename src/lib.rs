@@ -78,7 +78,9 @@ pub struct Peer {
     key: PublicKey,
     // ips: Vec<IpNet>,
     preshared_key: GenericArray<u8, U32>,
+
     latest_ts: Tai64NBytes,
+    cookie: Option<GenericArray<u8, U16>>,
 }
 
 impl Peer {
@@ -87,6 +89,7 @@ impl Peer {
             key,
             preshared_key: preshared_key.unwrap_or_default(),
             latest_ts: Tai64NBytes::default(),
+            cookie: None,
         }
     }
 }
@@ -117,6 +120,8 @@ impl Sessions {
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct InitiatedHandshakes {
+    mac1: GenericArray<u8, U16>,
+    peer_key: PublicKey,
     esk_i: StaticSecret,
     preshared_key: GenericArray<u8, U32>,
     state: HandshakeState,
@@ -124,6 +129,8 @@ struct InitiatedHandshakes {
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct CipherState {
+    mac1: GenericArray<u8, U16>,
+    peer_key: PublicKey,
     /// who will the outgoing messages be received by
     receiver: u32,
     /// key to encrypt the outgoing messages
@@ -152,8 +159,8 @@ pub enum Message<'a> {
 
 const MSG_FIRST: u32 = 1;
 const MSG_SECOND: u32 = 2;
-const MSG_DATA: u32 = 3;
-const MSG_COOKIE: u32 = 4;
+const MSG_DATA: u32 = 4;
+const MSG_COOKIE: u32 = 3;
 
 /// Construction: The UTF-8 string literal “Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s”, 37 bytes of output.
 /// Identifier: The UTF-8 string literal “WireGuard v1 zx2c4 Jason@zx2c4.com”, 34 bytes of output.
@@ -248,6 +255,8 @@ impl Sessions {
         let spk_i = PublicKey::from(<[u8; 32]>::from(
             *first_message.static_key.assumed_decrypted(),
         ));
+        let peer_slot = self.config.peers[&spk_i];
+        let peer = &self.config.peer_slots[peer_slot];
 
         // we are the receiver for now
         let mut receiver = self.rng.gen();
@@ -259,22 +268,24 @@ impl Sessions {
             }
         };
 
+        let resp = MacProtected::new(
+            LEU32::new(MSG_SECOND),
+            LEU32::new(receiver),
+            response,
+            peer.cookie.as_ref(),
+            &mac1_key(&spk_i),
+        );
+
         let (initiator, responder) = hs.split();
         vacant.insert(Box::new(CipherState {
+            mac1: resp.mac1.0,
+            peer_key: spk_i,
             // messages we send will be received by the client who sent the current message.
             receiver: sender.get(),
             nonce: 0,
             encrypt: responder,
             decrypt: initiator,
         }));
-
-        let resp = MacProtected::new(
-            LEU32::new(MSG_SECOND),
-            LEU32::new(receiver),
-            response,
-            None,
-            &mac1_key(&spk_i),
-        );
 
         // response message is always smaller than the initial message
         let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
@@ -309,6 +320,8 @@ impl Sessions {
         self.sessions.insert(
             receiver,
             Box::new(CipherState {
+                mac1: ihs.mac1,
+                peer_key: ihs.peer_key,
                 receiver: sender.get(),
                 nonce: 0,
                 encrypt: initiator,
@@ -320,8 +333,35 @@ impl Sessions {
     }
 
     #[inline(never)]
-    fn handle_cookie(&mut self, _msg: &mut [u8]) -> Result<(), Error> {
-        todo!()
+    fn handle_cookie(&mut self, msg: &mut [u8]) -> Result<(), Error> {
+        dbg!(msg.len());
+        dbg!(std::mem::size_of::<CookieMessage>());
+        let cookie_msg = bytemuck::try_from_bytes_mut::<CookieMessage>(msg)
+            .inspect_err(|e| println!("{e:?}"))
+            .map_err(|_| Error::InvalidMessage)?;
+
+        let (mac1, pk) = if let Some(ihs) = self.handshakes.get(&cookie_msg.receiver.get()) {
+            (ihs.mac1, ihs.peer_key)
+        } else if let Some(cs) = self.sessions.get(&cookie_msg.receiver.get()) {
+            (cs.mac1, cs.peer_key)
+        } else {
+            return Err(Error::Rejected);
+        };
+
+        let cookie =
+            *cookie_msg
+                .cookie
+                .decrypt_cookie(&mac2_key(&pk), &cookie_msg.nonce.0, &mac1)?;
+
+        let slot = self.config.peers.get(&pk).ok_or(Error::Rejected)?;
+        let peer = self
+            .config
+            .peer_slots
+            .get_mut(*slot)
+            .ok_or(Error::Rejected)?;
+        peer.cookie = Some(cookie);
+
+        Ok(())
     }
 
     #[inline(never)]
@@ -519,6 +559,8 @@ impl FirstMessage {
             }
         };
         let ihs = vacant.insert(Box::new(InitiatedHandshakes {
+            mac1: GenericArray::default(),
+            peer_key: peer.key,
             esk_i: StaticSecret::random_from_rng(OsRng),
             preshared_key: peer.preshared_key,
             state: HandshakeState::default(),
@@ -546,13 +588,16 @@ impl FirstMessage {
             timestamp,
         };
 
-        MacProtected::new(
+        let msg = MacProtected::new(
             LEU32::new(MSG_FIRST),
             LEU32::new(sender),
             this,
             None,
             &mac1_key(&peer.key),
-        )
+        );
+        ihs.mac1 = msg.mac1.0;
+
+        msg
     }
 
     fn process(

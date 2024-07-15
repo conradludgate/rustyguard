@@ -69,7 +69,27 @@ fn main() {
         match sessions.recv_message(addr, &mut buf.0[..n]) {
             Err(err) => println!("error: {err:?}"),
             Ok(Message::Noop) => println!("noop"),
-            Ok(Message::Read(buf)) => println!("data: {buf:?}"),
+            Ok(Message::Read(buf)) => {
+                println!("data: {buf:?}");
+                if buf.is_empty() {
+                    continue;
+                }
+                let version = buf[0] >> 4;
+                if version != 4 {
+                    todo!("v={version}");
+                }
+                let header_size = (buf[0] & 0x0f) as usize * 4;
+
+                let protocol = buf[9];
+                if protocol != 6 {
+                    todo!("p={protocol}");
+                }
+
+                let ip_inner = &buf[header_size..];
+                let tcp_inner = &ip_inner[20..];
+
+                println!("data2: {:?}", &tcp_inner);
+            }
             Ok(Message::Write(buf)) => {
                 println!("sending: {buf:?}");
                 endpoint.send_to(buf, addr).unwrap();
