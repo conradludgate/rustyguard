@@ -19,3 +19,4 @@ slotmap = "1.0.7"
 
 [dev-dependencies]
 base64ct = { version = "1", features = ["std"] }
+clap = { version = "4", features = ["derive"] }
