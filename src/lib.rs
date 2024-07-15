@@ -10,6 +10,7 @@ use ipnet::IpNet;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, RngCore};
 use slotmap::{DefaultKey, SlotMap};
+use tai64::{Tai64, Tai64N};
 use utils::{hash, mac, Bytes, Encrypted, HandshakeState, LEU32};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -26,6 +27,12 @@ impl Borrow<[u8]> for PublicKeyWrapper {
 }
 
 struct SipHasher24(u64, u64);
+
+impl Default for SipHasher24 {
+    fn default() -> Self {
+        Self(OsRng.next_u64(), OsRng.next_u64())
+    }
+}
 
 impl BuildHasher for SipHasher24 {
     type Hasher = siphasher::sip::SipHasher24;
@@ -44,8 +51,10 @@ pub struct Config {
     peer_slots: SlotMap<DefaultKey, Peer2>,
 }
 
+#[derive(Debug)]
 struct Peer2 {
-    ips: Vec<IpNet>,
+    key: PublicKey,
+    // ips: Vec<IpNet>,
     preshared_key: GenericArray<u8, U32>,
     latest_ts: Tai64NBytes,
 }
@@ -87,6 +96,7 @@ struct CipherState {
     decrypt: chacha20poly1305::Key,
 }
 
+#[derive(Debug)]
 pub enum Error {
     InvalidMessage,
     Unspecified,
@@ -96,9 +106,9 @@ pub enum Error {
 
 pub enum Message<'a> {
     // This should be sent back to the client
-    Write(&'a [u8]),
+    Write(&'a mut [u8]),
     // This can be processed appropriately
-    Read(&'a [u8]),
+    Read(&'a mut [u8]),
     Noop,
 }
 
@@ -142,6 +152,22 @@ impl Sessions {
 
     pub fn initialise_session(&mut self) {}
 
+    /// Given a packet, and the socket addr it was received from,
+    /// it will be parsed, processed, decrypted and the payload returned.
+    ///
+    /// The buffer the packet is contained within must be 16-byte aligned.
+    ///
+    /// # Returns
+    ///
+    /// * [`Message::Noop`] - The packet was ok, but there is nothing to do right now
+    /// * [`Message::Read`] - The packet was a data packet, the data is decrypted and ready to be read
+    /// * [`Message::Write`] - This is a new packet that must be sent back.
+    ///
+    /// # Errors
+    ///
+    /// * Any invalid messages will be reported as [`Error::InvalidMessage`].
+    /// * Any valid messages that could not be decrypted or processed will be reported as [`Error::Rejected`]
+    ///
     // TODO(conrad): enforce the msg is 16 byte aligned.
     pub fn recv_message<'m>(
         &mut self,
@@ -167,20 +193,23 @@ impl Sessions {
         &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<&'m [u8], Error> {
+    ) -> Result<&'m mut [u8], Error> {
         let (sender, first_message) = match MacProtected::<FirstMessage>::verify(msg, self, socket)?
         {
             ControlFlow::Break(cookie) => {
                 // cookie message is always smaller than the initial message
                 let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
                 cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                return Ok(&*cookie_msg);
+                return Ok(cookie_msg);
             }
             ControlFlow::Continue(MacProtected { sender, inner, .. }) => (*sender, inner),
         };
 
         let mut hs = HandshakeState::default();
         let response = first_message.process(&mut hs, sender, &mut self.config)?;
+        let spk_i = PublicKey::from(<[u8; 32]>::from(
+            *first_message.static_key.assumed_decrypted(),
+        ));
 
         // we are the receiver for now
         let mut receiver = self.rng.gen();
@@ -194,7 +223,7 @@ impl Sessions {
 
         let (initiator, responder) = hs.split();
         vacant.insert(Box::new(CipherState {
-            // messages we send will be received by the client who sent this message.
+            // messages we send will be received by the client who sent the current message.
             receiver: sender.get(),
             nonce: 0,
             encrypt: responder,
@@ -206,13 +235,13 @@ impl Sessions {
             LEU32::new(receiver),
             response,
             None,
-            &self.config,
+            &mac1_key(&spk_i),
         );
 
         // response message is always smaller than the initial message
         let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
         resp_msg.copy_from_slice(bytemuck::bytes_of(&resp));
-        Ok(&*resp_msg)
+        Ok(resp_msg)
     }
 
     #[inline(never)]
@@ -227,7 +256,7 @@ impl Sessions {
                     // cookie message is always smaller than the response message
                     let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
                     cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                    return Ok(Message::Write(&*cookie_msg));
+                    return Ok(Message::Write(cookie_msg));
                 }
                 ControlFlow::Continue(MacProtected { sender, inner, .. }) => (*sender, inner),
             };
@@ -258,7 +287,7 @@ impl Sessions {
     }
 
     #[inline(never)]
-    fn decrypt_packet<'m>(&mut self, msg: &'m mut [u8]) -> Result<&'m [u8], Error> {
+    fn decrypt_packet<'m>(&mut self, msg: &'m mut [u8]) -> Result<&'m mut [u8], Error> {
         use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce, Tag};
         const HEADER_LEN: usize = std::mem::size_of::<DataHeader>();
 
@@ -292,7 +321,7 @@ impl Sessions {
             .decrypt_in_place_detached(&nonce, &[], payload, Tag::from_slice(tag))
             .map_err(|_| Error::Rejected)?;
 
-        Ok(&*payload)
+        Ok(payload)
     }
 }
 
@@ -305,7 +334,7 @@ struct FirstMessage {
 }
 
 #[derive(Pod, Zeroable, Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(16))]
 struct CookieMessage {
     _type: LEU32,
     receiver: LEU32,
@@ -321,7 +350,7 @@ struct CookieMessage {
 /// overloaded and second MAC is invalid, a CookieReply is sent to the client,
 /// which contains an encrypted key that can be used to re-sign the handshake later.
 #[derive(Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(16))]
 struct MacProtected<T> {
     _type: LEU32,
     sender: LEU32,
@@ -344,7 +373,7 @@ where
         sender: LEU32,
         msg: T,
         cookie: Option<&GenericArray<u8, U16>>,
-        config: &Config,
+        mac1_key: &GenericArray<u8, U32>,
     ) -> Self {
         let mut mac = Self {
             _type,
@@ -353,7 +382,7 @@ where
             mac1: Bytes(GenericArray::default()),
             mac2: Bytes(GenericArray::default()),
         };
-        mac.mac1.0 = mac.mac1(&config.mac1_key);
+        mac.mac1.0 = mac.mac1(&mac1_key);
         if let Some(cookie) = cookie {
             mac.mac2.0 = mac.mac2(cookie);
         }
@@ -431,6 +460,56 @@ fn mac2_key(spk: &PublicKey) -> GenericArray<u8, U32> {
 }
 
 impl FirstMessage {
+    fn new(state: &mut Sessions, to: DefaultKey) -> (u32, Self) {
+        let peer = state
+            .config
+            .peer_slots
+            .get(to)
+            .expect("peer should not be missing");
+
+        // we are the receiver for now
+        let mut sender = state.rng.gen();
+        let vacant = loop {
+            use std::collections::hash_map::Entry;
+            if state.sessions.contains_key(&sender) {
+                sender = state.rng.gen()
+            } else {
+                match state.handshakes.entry(sender) {
+                    Entry::Occupied(_) => sender = state.rng.gen(),
+                    Entry::Vacant(v) => break v,
+                }
+            }
+        };
+        let ihs = vacant.insert(Box::new(InitiatedHandshakes {
+            esk_i: StaticSecret::random_from_rng(OsRng),
+            preshared_key: peer.preshared_key,
+            state: HandshakeState::default(),
+        }));
+        let hs = &mut ihs.state;
+        let esk_i = &ihs.esk_i;
+        let epk_i = PublicKey::from(esk_i);
+
+        hs.mix_hash(peer.key.as_bytes());
+        hs.mix_chain(epk_i.as_bytes());
+        hs.mix_hash(epk_i.as_bytes());
+
+        let k = hs.mix_key_dh(esk_i, &peer.key);
+        let spk_i = &state.config.public_key;
+        let static_key = GenericArray::from(spk_i.to_bytes());
+        let static_key = Encrypted::encrypt_and_hash(static_key, hs, &k);
+
+        let k = hs.mix_key_dh(&state.config.private_key, &peer.key);
+        let timestamp = GenericArray::from(Tai64N::now().to_bytes());
+        let timestamp = Encrypted::encrypt_and_hash(timestamp, hs, &k);
+
+        let this = Self {
+            ephemeral_key: epk_i.to_bytes(),
+            static_key,
+            timestamp,
+        };
+        (sender, this)
+    }
+
     fn process(
         &mut self,
         hs: &mut HandshakeState,
@@ -443,7 +522,6 @@ impl FirstMessage {
 
         let epk_i = PublicKey::from(self.ephemeral_key);
         let k = hs.mix_key_dh(&config.private_key, &epk_i);
-
         let spk_i = self.static_key.decrypt_and_hash(hs, &k)?;
         let spk_i = PublicKey::from(<[u8; 32]>::from(*spk_i));
 
@@ -516,9 +594,17 @@ struct DataHeader {
 
 #[cfg(test)]
 mod tests {
-    use blake2::Digest;
+    use std::collections::HashMap;
 
-    use crate::{CookieMessage, DataHeader, FirstMessage, MacProtected, SecondMessage};
+    use blake2::{digest::generic_array::GenericArray, Digest};
+    use rand::{rngs::StdRng, SeedableRng};
+    use slotmap::SlotMap;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    use crate::{
+        mac1_key, mac2_key, utils::LEU32, Config, CookieMessage, DataHeader, FirstMessage,
+        MacProtected, Peer2, SecondMessage, Sessions, SipHasher24, Tai64NBytes, MSG_FIRST,
+    };
 
     #[test]
     fn construction_identifier() {
@@ -547,5 +633,87 @@ mod tests {
 
         assert_eq!(core::mem::size_of::<DataHeader>(), 16);
         assert_eq!(core::mem::align_of::<DataHeader>(), 8);
+    }
+
+    #[test]
+    fn handshake_happy() {
+        let ssk_i = StaticSecret::random();
+        let ssk_r = StaticSecret::random();
+        let spk_i = PublicKey::from(&ssk_i);
+        let spk_r = PublicKey::from(&ssk_r);
+
+        let mut peer_slots = SlotMap::new();
+        let mut peers = HashMap::with_hasher(SipHasher24::default());
+        let peer_r = peer_slots.insert(Peer2 {
+            key: spk_r,
+            preshared_key: Default::default(),
+            latest_ts: Tai64NBytes::default(),
+        });
+        peers.insert(spk_r, peer_r);
+
+        let mut session_i = Sessions {
+            config: Config {
+                mac1_key: mac1_key(&spk_i),
+                mac2_key: mac2_key(&spk_i),
+                private_key: ssk_i,
+                public_key: spk_i,
+                peers,
+                peer_slots,
+            },
+            random_secret: GenericArray::default(),
+            sessions: HashMap::with_hasher(SipHasher24::default()),
+            handshakes: HashMap::with_hasher(SipHasher24::default()),
+            rng: StdRng::from_entropy(),
+        };
+
+        let (sender, handshake_init) = FirstMessage::new(&mut session_i, peer_r);
+        let mut handshake_init = MacProtected::new(
+            LEU32::new(MSG_FIRST),
+            LEU32::new(sender),
+            handshake_init,
+            None,
+            &mac1_key(&spk_r),
+        );
+
+        let mut peer_slots = SlotMap::new();
+        let mut peers = HashMap::with_hasher(SipHasher24::default());
+        let peer_i = peer_slots.insert(Peer2 {
+            key: spk_i,
+            preshared_key: Default::default(),
+            latest_ts: Tai64NBytes::default(),
+        });
+        peers.insert(spk_i, peer_i);
+
+        let mut session_r = Sessions {
+            config: Config {
+                mac1_key: mac1_key(&spk_r),
+                mac2_key: mac2_key(&spk_r),
+                private_key: ssk_r,
+                public_key: spk_r,
+                peers,
+                peer_slots,
+            },
+            random_secret: GenericArray::default(),
+            sessions: HashMap::with_hasher(SipHasher24::default()),
+            handshakes: HashMap::with_hasher(SipHasher24::default()),
+            rng: StdRng::from_entropy(),
+        };
+
+        let buf = bytemuck::bytes_of_mut(&mut handshake_init);
+        let buf = match session_r
+            .recv_message("10.0.0.1:1234".parse().unwrap(), buf)
+            .unwrap()
+        {
+            crate::Message::Write(buf) => buf,
+            _ => panic!("expecting write"),
+        };
+
+        match session_i
+            .recv_message("10.0.0.2:1234".parse().unwrap(), buf)
+            .unwrap()
+        {
+            crate::Message::Noop => {}
+            _ => panic!("expecting noop"),
+        };
     }
 }
