@@ -13,6 +13,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64ct"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
+
+[[package]]
 name = "blake2"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -305,6 +311,7 @@ dependencies = [
 name = "rustyguard"
 version = "0.1.0"
 dependencies = [
+ "base64ct",
  "blake2",
  "bytemuck",
  "chacha20poly1305",

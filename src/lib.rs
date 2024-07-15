@@ -81,6 +81,16 @@ pub struct Peer {
     latest_ts: Tai64NBytes,
 }
 
+impl Peer {
+    pub fn new(key: PublicKey, preshared_key: Option<GenericArray<u8, U32>>) -> Self {
+        Self {
+            key,
+            preshared_key: preshared_key.unwrap_or_default(),
+            latest_ts: Tai64NBytes::default(),
+        }
+    }
+}
+
 type Tai64NBytes = GenericArray<u8, U12>;
 
 pub struct Sessions {
@@ -362,7 +372,7 @@ struct FirstMessage {
 }
 
 #[derive(Pod, Zeroable, Clone, Copy)]
-#[repr(C, align(16))]
+#[repr(C)]
 struct CookieMessage {
     _type: LEU32,
     receiver: LEU32,
@@ -378,7 +388,7 @@ struct CookieMessage {
 /// overloaded and second MAC is invalid, a CookieReply is sent to the client,
 /// which contains an encrypted key that can be used to re-sign the handshake later.
 #[derive(Clone, Copy)]
-#[repr(C, align(16))]
+#[repr(C)]
 struct MacProtected<T> {
     _type: LEU32,
     sender: LEU32,
@@ -637,7 +647,7 @@ mod tests {
 
     use crate::{
         Config, CookieMessage, DataHeader, FirstMessage, MacProtected, Peer, SecondMessage,
-        Sessions, Tai64NBytes,
+        Sessions,
     };
 
     #[test]
@@ -674,17 +684,16 @@ mod tests {
         peer_public_key: PublicKey,
         preshared_key: GenericArray<u8, U32>,
     ) -> (DefaultKey, Sessions) {
-        let peer = Peer {
-            key: peer_public_key,
-            preshared_key,
-            latest_ts: Tai64NBytes::default(),
-        };
+        let peer = Peer::new(peer_public_key, Some(preshared_key));
         let config = Config::new(secret_key, [peer]);
         let peer = config.peers[&peer_public_key];
         let sessions = Sessions::new(config);
 
         (peer, sessions)
     }
+
+    #[repr(align(16))]
+    struct AlignedPacket([u8; 2048]);
 
     #[test]
     fn handshake_happy() {
@@ -698,11 +707,15 @@ mod tests {
         let (peer_r, mut sessions_i) = session_with_peer(ssk_i, spk_r, psk);
         let (_, mut sessions_r) = session_with_peer(ssk_r, spk_i, psk);
 
+        let mut buf = Box::new(AlignedPacket([0; 2048]));
+
         // send the handshake to the server
-        let mut handshake_init = FirstMessage::new(&mut sessions_i, peer_r);
-        let buf = bytemuck::bytes_of_mut(&mut handshake_init);
+        let handshake_init = FirstMessage::new(&mut sessions_i, peer_r);
+        let hs = bytemuck::bytes_of(&handshake_init);
+        buf.0[..hs.len()].copy_from_slice(hs);
+
         let buf = match sessions_r
-            .recv_message("10.0.0.1:1234".parse().unwrap(), buf)
+            .recv_message("10.0.0.1:1234".parse().unwrap(), &mut buf.0[..hs.len()])
             .unwrap()
         {
             crate::Message::Write(buf) => buf,
