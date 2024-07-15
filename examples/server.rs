@@ -86,7 +86,9 @@ fn main() {
                 }
 
                 let ip_inner = &buf[header_size..];
-                let tcp_inner = &ip_inner[20..];
+                let data_offset = (ip_inner[12] >> 4) as usize * 4;
+
+                let tcp_inner = &ip_inner[data_offset..];
 
                 println!("data2: {:?}", &tcp_inner);
             }
