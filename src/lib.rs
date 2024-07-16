@@ -1,4 +1,5 @@
 use core::fmt;
+use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use std::{borrow::Borrow, collections::HashMap, hash::BuildHasher};
@@ -7,9 +8,11 @@ use blake2::digest::consts::{U0, U12, U16, U32};
 use blake2::digest::generic_array::GenericArray;
 use bytemuck::{offset_of, Pod, Zeroable};
 use chacha20poly1305::{KeyInit, XNonce};
+use hashbrown::hash_table::Entry;
+use hashbrown::HashTable;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, RngCore, SeedableRng};
-use rustc_hash::FxHashMap;
+use rustc_hash::FxHasher;
 use tai64::Tai64N;
 use utils::{hash, mac, Bytes, Encrypted, HandshakeState, LEU32};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -52,15 +55,26 @@ pub struct Config {
     // PublicKeys are assumed to be random, thus we
     // would think the hash quality would be decent.
     // TODO(conrad): reduce the cost of publickey hashing through canonicalisation
-    peers: FxHashMap<PublicKey, Peer>,
+    hasher: BuildHasherDefault<FxHasher>,
+    // hashtable removes the need for the duplicate key inside the peer.
+    peers: HashTable<Peer>,
 }
 
 impl Config {
     pub fn new(private_key: StaticSecret, peers: impl IntoIterator<Item = Peer>) -> Self {
-        let mut map = FxHashMap::default();
+        let mut map = HashTable::<Peer>::default();
+        let hasher = BuildHasherDefault::<FxHasher>::default();
         for peer in peers {
-            let pk = peer.key;
-            map.insert(pk, peer);
+            match map.entry(
+                hasher.hash_one(peer.key),
+                |p| p.key == peer.key,
+                |p| hasher.hash_one(p.key),
+            ) {
+                Entry::Occupied(_) => {}
+                Entry::Vacant(v) => {
+                    v.insert(peer);
+                }
+            }
         }
 
         let public_key = PublicKey::from(&private_key);
@@ -70,9 +84,19 @@ impl Config {
             mac2_key: mac2_key(&public_key),
             private_key,
             public_key,
+            hasher,
             peers: map,
             // peer_slots,
         }
+    }
+
+    fn get_peer(&self, pk: &PublicKey) -> Option<&Peer> {
+        self.peers.find(self.hasher.hash_one(pk), |p| p.key == *pk)
+    }
+
+    fn get_peer_mut(&mut self, pk: &PublicKey) -> Option<&mut Peer> {
+        self.peers
+            .find_mut(self.hasher.hash_one(pk), |p| p.key == *pk)
     }
 }
 
@@ -80,6 +104,9 @@ impl Config {
 pub struct Peer {
     // static state
     key: PublicKey,
+    mac1_key: GenericArray<u8, U32>,
+    mac2_key: GenericArray<u8, U32>,
+
     // ips: Vec<IpNet>,
     preshared_key: GenericArray<u8, U32>,
 
@@ -92,6 +119,8 @@ pub struct Peer {
 impl Peer {
     pub fn new(key: PublicKey, preshared_key: Option<GenericArray<u8, U32>>) -> Self {
         Self {
+            mac1_key: mac1_key(&key),
+            mac2_key: mac2_key(&key),
             key,
             preshared_key: preshared_key.unwrap_or_default(),
             latest_ts: Tai64NBytes::default(),
@@ -267,11 +296,7 @@ impl Sessions {
         };
 
         let mut hs = HandshakeState::default();
-        let response = first_message.process(&mut hs, sender, &mut self.config)?;
-        let spk_i = PublicKey::from(<[u8; 32]>::from(
-            *first_message.static_key.assumed_decrypted(),
-        ));
-        let peer = &self.config.peers[&spk_i];
+        let (peer, response) = first_message.process(&mut hs, sender, &mut self.config)?;
 
         // we are the receiver for now
         let mut receiver = self.rng.gen();
@@ -288,13 +313,13 @@ impl Sessions {
             LEU32::new(receiver),
             response,
             peer.cookie.as_ref(),
-            &mac1_key(&spk_i),
+            &peer.mac1_key,
         );
 
         let (initiator, responder) = hs.split();
         vacant.insert(Box::new(CipherState {
             mac1: resp.mac1.0,
-            peer_key: spk_i,
+            peer_key: peer.key,
             // messages we send will be received by the client who sent the current message.
             receiver: sender.get(),
             nonce: 0,
@@ -355,7 +380,7 @@ impl Sessions {
             .inspect_err(|e| println!("{e:?}"))
             .map_err(|_| Error::InvalidMessage)?;
 
-        let (mac1, pk) = if let Some(ihs) = self.handshakes.get(&cookie_msg.receiver.get()) {
+        let (mac1, peer_key) = if let Some(ihs) = self.handshakes.get(&cookie_msg.receiver.get()) {
             (ihs.mac1, ihs.peer_key)
         } else if let Some(cs) = self.sessions.get(&cookie_msg.receiver.get()) {
             (cs.mac1, cs.peer_key)
@@ -363,12 +388,13 @@ impl Sessions {
             return Err(Error::Rejected);
         };
 
+        let peer = self.config.get_peer_mut(&peer_key).ok_or(Error::Rejected)?;
+
         let cookie =
             *cookie_msg
                 .cookie
-                .decrypt_cookie(&mac2_key(&pk), &cookie_msg.nonce.0, &mac1)?;
+                .decrypt_cookie(&peer.mac2_key, &cookie_msg.nonce.0, &mac1)?;
 
-        let peer = self.config.peers.get_mut(&pk).ok_or(Error::Rejected)?;
         peer.cookie = Some(cookie);
 
         Ok(())
@@ -555,8 +581,7 @@ impl FirstMessage {
     fn new(state: &mut Sessions, to: &PublicKey) -> MacProtected<Self> {
         let peer = state
             .config
-            .peers
-            .get(to)
+            .get_peer(to)
             .expect("peer should not be missing");
 
         // we are the receiver for now
@@ -614,12 +639,12 @@ impl FirstMessage {
         msg
     }
 
-    fn process(
+    fn process<'c>(
         &mut self,
         hs: &mut HandshakeState,
         sender: LEU32,
-        config: &mut Config,
-    ) -> Result<SecondMessage, Error> {
+        config: &'c mut Config,
+    ) -> Result<(&'c mut Peer, SecondMessage), Error> {
         hs.mix_hash(config.public_key.as_bytes());
         hs.mix_chain(&self.ephemeral_key);
         hs.mix_hash(&self.ephemeral_key);
@@ -633,7 +658,7 @@ impl FirstMessage {
         let timestamp = *self.timestamp.decrypt_and_hash(hs, &k)?;
 
         // check if we know this peer
-        let peer = config.peers.get_mut(&spk_i).ok_or(Error::Rejected)?;
+        let peer = config.get_peer_mut(&spk_i).ok_or(Error::Rejected)?;
 
         // check for potential replay attack
         if timestamp < peer.latest_ts {
@@ -658,7 +683,7 @@ impl FirstMessage {
             empty,
         };
 
-        Ok(second)
+        Ok((peer, second))
     }
 }
 

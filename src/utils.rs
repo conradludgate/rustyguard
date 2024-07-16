@@ -151,10 +151,6 @@ impl<U: ArrayLength<u8>> Encrypted<U>
 where
     GenericArray<u8, U>: Copy,
 {
-    pub(crate) fn assumed_decrypted(&self) -> &GenericArray<u8, U> {
-        &self.msg
-    }
-
     pub(crate) fn decrypt_and_hash(
         &mut self,
         state: &mut HandshakeState,
