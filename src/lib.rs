@@ -1,3 +1,4 @@
+use core::fmt;
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use std::{borrow::Borrow, collections::HashMap, hash::BuildHasher};
@@ -8,7 +9,7 @@ use bytemuck::{offset_of, Pod, Zeroable};
 use chacha20poly1305::{KeyInit, XNonce};
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, RngCore, SeedableRng};
-use slotmap::{DefaultKey, SlotMap};
+use rustc_hash::FxHashMap;
 use tai64::Tai64N;
 use utils::{hash, mac, Bytes, Encrypted, HandshakeState, LEU32};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -46,18 +47,20 @@ pub struct Config {
     public_key: PublicKey,
     mac1_key: GenericArray<u8, U32>,
     mac2_key: GenericArray<u8, U32>,
-    peers: HashMap<PublicKey, DefaultKey, SipHasher24>,
-    peer_slots: SlotMap<DefaultKey, Peer>,
+    // fx-hash is ok since a third-party cannot
+    // insert elements, thus this is hashdos safe.
+    // PublicKeys are assumed to be random, thus we
+    // would think the hash quality would be decent.
+    // TODO(conrad): reduce the cost of publickey hashing through canonicalisation
+    peers: FxHashMap<PublicKey, Peer>,
 }
 
 impl Config {
     pub fn new(private_key: StaticSecret, peers: impl IntoIterator<Item = Peer>) -> Self {
-        let mut peer_slots = SlotMap::new();
-        let mut map = HashMap::with_hasher(SipHasher24::default());
+        let mut map = FxHashMap::default();
         for peer in peers {
             let pk = peer.key;
-            let key = peer_slots.insert(peer);
-            map.insert(pk, key);
+            map.insert(pk, peer);
         }
 
         let public_key = PublicKey::from(&private_key);
@@ -68,19 +71,22 @@ impl Config {
             private_key,
             public_key,
             peers: map,
-            peer_slots,
+            // peer_slots,
         }
     }
 }
 
 #[derive(Debug)]
 pub struct Peer {
+    // static state
     key: PublicKey,
     // ips: Vec<IpNet>,
     preshared_key: GenericArray<u8, U32>,
 
+    // dynamic state
     latest_ts: Tai64NBytes,
     cookie: Option<GenericArray<u8, U16>>,
+    // session: u32,
 }
 
 impl Peer {
@@ -90,6 +96,7 @@ impl Peer {
             preshared_key: preshared_key.unwrap_or_default(),
             latest_ts: Tai64NBytes::default(),
             cookie: None,
+            // session: 0,
         }
     }
 }
@@ -149,11 +156,20 @@ pub enum Error {
     Rejected,
 }
 
+#[derive(Clone, Copy, Hash, PartialEq, PartialOrd)]
+pub struct SessionId(u32);
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:16X}", self.0)
+    }
+}
+
 pub enum Message<'a> {
     // This should be sent back to the client
     Write(&'a mut [u8]),
     // This can be processed appropriately
-    Read(&'a mut [u8]),
+    Read(SessionId, &'a mut [u8]),
     Noop,
 }
 
@@ -228,7 +244,7 @@ impl Sessions {
             MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
             MSG_SECOND => self.handle_handshake_resp(socket, msg),
             MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
-            MSG_DATA => self.decrypt_packet(msg).map(Message::Read),
+            MSG_DATA => self.decrypt_packet(msg).map(|(id, m)| Message::Read(id, m)),
             _ => Err(Error::InvalidMessage),
         }
     }
@@ -255,8 +271,7 @@ impl Sessions {
         let spk_i = PublicKey::from(<[u8; 32]>::from(
             *first_message.static_key.assumed_decrypted(),
         ));
-        let peer_slot = self.config.peers[&spk_i];
-        let peer = &self.config.peer_slots[peer_slot];
+        let peer = &self.config.peers[&spk_i];
 
         // we are the receiver for now
         let mut receiver = self.rng.gen();
@@ -353,19 +368,17 @@ impl Sessions {
                 .cookie
                 .decrypt_cookie(&mac2_key(&pk), &cookie_msg.nonce.0, &mac1)?;
 
-        let slot = self.config.peers.get(&pk).ok_or(Error::Rejected)?;
-        let peer = self
-            .config
-            .peer_slots
-            .get_mut(*slot)
-            .ok_or(Error::Rejected)?;
+        let peer = self.config.peers.get_mut(&pk).ok_or(Error::Rejected)?;
         peer.cookie = Some(cookie);
 
         Ok(())
     }
 
     #[inline(never)]
-    fn decrypt_packet<'m>(&mut self, msg: &'m mut [u8]) -> Result<&'m mut [u8], Error> {
+    fn decrypt_packet<'m>(
+        &mut self,
+        msg: &'m mut [u8],
+    ) -> Result<(SessionId, &'m mut [u8]), Error> {
         use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce, Tag};
         const HEADER_LEN: usize = std::mem::size_of::<DataHeader>();
 
@@ -399,7 +412,7 @@ impl Sessions {
             .decrypt_in_place_detached(&nonce, &[], payload, Tag::from_slice(tag))
             .map_err(|_| Error::Rejected)?;
 
-        Ok(payload)
+        Ok((SessionId(header.receiver.get()), payload))
     }
 }
 
@@ -538,10 +551,11 @@ fn mac2_key(spk: &PublicKey) -> GenericArray<u8, U32> {
 }
 
 impl FirstMessage {
-    fn new(state: &mut Sessions, to: DefaultKey) -> MacProtected<Self> {
+    #[allow(dead_code)]
+    fn new(state: &mut Sessions, to: &PublicKey) -> MacProtected<Self> {
         let peer = state
             .config
-            .peer_slots
+            .peers
             .get(to)
             .expect("peer should not be missing");
 
@@ -619,9 +633,7 @@ impl FirstMessage {
         let timestamp = *self.timestamp.decrypt_and_hash(hs, &k)?;
 
         // check if we know this peer
-        let slot = config.peers.get(&spk_i).ok_or(Error::Rejected)?;
-        let peer = config.peer_slots.get_mut(*slot).ok_or(Error::Rejected)?;
-        // todo: check ip
+        let peer = config.peers.get_mut(&spk_i).ok_or(Error::Rejected)?;
 
         // check for potential replay attack
         if timestamp < peer.latest_ts {
@@ -687,7 +699,6 @@ mod tests {
     use blake2::{digest::generic_array::GenericArray, Digest};
     use chacha20poly1305::consts::U32;
     use rand::{rngs::OsRng, RngCore};
-    use slotmap::DefaultKey;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use crate::{
@@ -728,13 +739,10 @@ mod tests {
         secret_key: StaticSecret,
         peer_public_key: PublicKey,
         preshared_key: GenericArray<u8, U32>,
-    ) -> (DefaultKey, Sessions) {
+    ) -> Sessions {
         let peer = Peer::new(peer_public_key, Some(preshared_key));
         let config = Config::new(secret_key, [peer]);
-        let peer = config.peers[&peer_public_key];
-        let sessions = Sessions::new(config);
-
-        (peer, sessions)
+        Sessions::new(config)
     }
 
     #[repr(align(16))]
@@ -749,13 +757,13 @@ mod tests {
         let mut psk = GenericArray::default();
         OsRng.fill_bytes(&mut psk);
 
-        let (peer_r, mut sessions_i) = session_with_peer(ssk_i, spk_r, psk);
-        let (_, mut sessions_r) = session_with_peer(ssk_r, spk_i, psk);
+        let mut sessions_i = session_with_peer(ssk_i, spk_r, psk);
+        let mut sessions_r = session_with_peer(ssk_r, spk_i, psk);
 
         let mut buf = Box::new(AlignedPacket([0; 2048]));
 
         // send the handshake to the server
-        let handshake_init = FirstMessage::new(&mut sessions_i, peer_r);
+        let handshake_init = FirstMessage::new(&mut sessions_i, &spk_r);
         let hs = bytemuck::bytes_of(&handshake_init);
         buf.0[..hs.len()].copy_from_slice(hs);
 

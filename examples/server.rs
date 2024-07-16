@@ -69,8 +69,8 @@ fn main() {
         match sessions.recv_message(addr, &mut buf.0[..n]) {
             Err(err) => println!("error: {err:?}"),
             Ok(Message::Noop) => println!("noop"),
-            Ok(Message::Read(buf)) => {
-                println!("data: {buf:?}");
+            Ok(Message::Read(session, buf)) => {
+                println!("data ({session:?}): {buf:?}");
                 if buf.is_empty() {
                     continue;
                 }
@@ -90,7 +90,7 @@ fn main() {
 
                 let tcp_inner = &ip_inner[data_offset..];
 
-                println!("data2: {:?}", &tcp_inner);
+                println!("tcp_data: {:?}", &tcp_inner);
             }
             Ok(Message::Write(buf)) => {
                 println!("sending: {buf:?}");
