@@ -132,6 +132,7 @@ pub struct Sessions {
     rng: StdRng,
     random_secret: GenericArray<u8, U32>,
 
+    last_reseed: Tai64N,
     now: Tai64N,
 
     // session IDs are chosen randomly, and not by external users,
@@ -153,6 +154,7 @@ impl Sessions {
         Sessions {
             config,
             random_secret,
+            last_reseed: now,
             now,
             rng: StdRng::from_seed(seed),
             sessions: HashMap::default(),
@@ -160,13 +162,19 @@ impl Sessions {
         }
     }
 
-    /// Must be called every 120 seconds
-    pub fn reseed(&mut self, rng: &mut (impl CryptoRng + RngCore)) {
-        rng.fill_bytes(&mut self.random_secret[..]);
+    /// Must be called regularly
+    pub fn reseed(&mut self, now: Tai64N, rng: &mut (impl CryptoRng + RngCore)) {
+        if now < self.now {
+            return;
+        }
+        if now.duration_since(&self.last_reseed).unwrap() > Duration::from_secs(120) {
+            rng.fill_bytes(&mut self.random_secret[..]);
 
-        let mut seed = <StdRng as rand::SeedableRng>::Seed::default();
-        rng.fill_bytes(&mut seed);
-        self.rng = StdRng::from_seed(seed);
+            let mut seed = <StdRng as rand::SeedableRng>::Seed::default();
+            rng.fill_bytes(&mut seed);
+            self.rng = StdRng::from_seed(seed);
+            self.last_reseed = now;
+        }
     }
 }
 
@@ -915,7 +923,7 @@ mod tests {
 
                     buf.0[..16].copy_from_slice(header.as_ref());
                     buf.0[16..32].copy_from_slice(&msg);
-                    buf.0[32..48].copy_from_slice(&tag);
+                    buf.0[32..48].copy_from_slice(&tag[..]);
                     &mut buf.0[..48]
                 }
             }

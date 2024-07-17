@@ -1,9 +1,14 @@
-use std::net::UdpSocket;
+use std::{
+    net::UdpSocket,
+    ops::{Deref, DerefMut},
+};
 
 use base64ct::{Base64, Encoding};
 use clap::Parser;
+use packet::{Builder, Packet};
 use rand::rngs::OsRng;
 use rustyguard::{Config, Message, Peer, Sessions};
+use tai64::Tai64N;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 /// 16-byte aligned packet of 2048 bytes.
@@ -58,46 +63,215 @@ fn main() {
     }
 
     let config = Config::new(private_key, peers);
-    let mut sessions = Sessions::new(config, &mut OsRng);
+    let mut sessions = Sessions::new(config, Tai64N::now(), &mut OsRng);
 
     let endpoint = UdpSocket::bind(("0.0.0.0", args.port)).unwrap();
     println!("addr: {:?}", endpoint.local_addr());
 
     let mut buf: Box<AlignedPacket> = Box::new(AlignedPacket([0; 2048]));
+    let mut reply_buf = vec![0; 2048];
+
     loop {
         let (n, addr) = endpoint.recv_from(&mut buf.0).unwrap();
+        sessions.reseed(Tai64N::now(), &mut OsRng);
+
         println!("packet from {addr:?}: {:?}", &buf.0[..n]);
         match sessions.recv_message(addr, &mut buf.0[..n]) {
             Err(err) => println!("error: {err:?}"),
             Ok(Message::Noop) => println!("noop"),
             Ok(Message::HandshakeComplete(_peer)) => {}
             Ok(Message::Read(peer, buf)) => {
-                println!("data ({peer:?}): {buf:?}");
                 if buf.is_empty() {
                     continue;
                 }
-                let version = buf[0] >> 4;
-                if version != 4 {
-                    todo!("v={version}");
+
+                let inner_reply_buf = &mut reply_buf[16..];
+                let ip = packet::ip::Packet::unchecked(buf);
+                match ip {
+                    packet::ip::Packet::V4(v4) => {
+                        let builder = packet::ip::v4::Builder::with(SliceBuf::new(inner_reply_buf))
+                            .unwrap()
+                            .destination(v4.source())
+                            .unwrap()
+                            .source(v4.destination())
+                            .unwrap();
+
+                        match v4.protocol() {
+                            packet::ip::Protocol::Tcp => todo!(),
+                            packet::ip::Protocol::Icmp => {
+                                let icmp_builder = builder.icmp().unwrap();
+
+                                let icmp = packet::icmp::Packet::unchecked(v4.payload());
+                                if let Ok(e) = icmp.echo() {
+                                    if e.is_request() {
+                                        let reply = icmp_builder
+                                            .echo()
+                                            .unwrap()
+                                            .reply()
+                                            .unwrap()
+                                            .sequence(e.sequence())
+                                            .unwrap()
+                                            .identifier(e.identifier())
+                                            .unwrap()
+                                            .payload(e.payload())
+                                            .unwrap()
+                                            .build()
+                                            .unwrap();
+
+                                        // pad up to 16
+                                        let reply_len = reply.len().next_multiple_of(16);
+
+                                        match sessions
+                                            .send_message(&peer, &mut inner_reply_buf[..reply_len])
+                                            .unwrap()
+                                        {
+                                            rustyguard::SendMessage::Maintenance(_) => todo!(),
+                                            rustyguard::SendMessage::Data(_, header, tag) => {
+                                                inner_reply_buf[reply_len..reply_len + 16]
+                                                    .copy_from_slice(&tag[..]);
+                                                reply_buf[..16].copy_from_slice(header.as_ref());
+                                                endpoint
+                                                    .send_to(&reply_buf[..reply_len + 32], addr)
+                                                    .unwrap();
+                                            }
+                                        }
+                                    } else {
+                                        todo!()
+                                    }
+                                } else {
+                                    todo!()
+                                }
+                            }
+                            _ => todo!(),
+                        }
+                    }
+                    packet::ip::Packet::V6(_) => todo!(),
                 }
-                let header_size = (buf[0] & 0x0f) as usize * 4;
-
-                let protocol = buf[9];
-                if protocol != 6 {
-                    todo!("p={protocol}");
-                }
-
-                let ip_inner = &buf[header_size..];
-                let data_offset = (ip_inner[12] >> 4) as usize * 4;
-
-                let tcp_inner = &ip_inner[data_offset..];
-
-                println!("tcp_data: {:?}", &tcp_inner);
             }
             Ok(Message::Write(buf)) => {
                 println!("sending: {buf:?}");
                 endpoint.send_to(buf, addr).unwrap();
             }
         }
+    }
+}
+
+/// A static buffer.
+#[derive(Eq, PartialEq, Debug)]
+pub struct SliceBuf<'a> {
+    inner: &'a mut [u8],
+
+    offset: usize,
+    length: usize,
+    used: usize,
+}
+
+impl<'a> SliceBuf<'a> {
+    /// Create a new static buffer wrapping the given slice.
+    pub fn new(slice: &mut [u8]) -> SliceBuf<'_> {
+        SliceBuf {
+            inner: slice,
+
+            offset: 0,
+            length: 0,
+            used: 0,
+        }
+    }
+}
+
+impl<'a> packet::Buffer for SliceBuf<'a> {
+    type Inner = &'a mut [u8];
+
+    fn into_inner(self) -> Self::Inner {
+        &mut self.inner[0..self.used]
+    }
+
+    fn next(&mut self, size: usize) -> packet::Result<()> {
+        if self.inner.len() < self.used + size {
+            Err(packet::Error::SmallBuffer)?
+        }
+
+        self.offset = self.used;
+        self.length = size;
+        self.used += size;
+
+        for byte in self.data_mut() {
+            *byte = 0;
+        }
+
+        Ok(())
+    }
+
+    fn more(&mut self, size: usize) -> packet::Result<()> {
+        if self.inner.len() < self.used + size {
+            Err(packet::Error::SmallBuffer)?
+        }
+
+        // self.offset  = self.used;
+        self.length += size;
+        self.used += size;
+
+        let length = self.length;
+        for byte in &mut self.data_mut()[length - size..] {
+            *byte = 0;
+        }
+
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        self.offset = 0;
+        self.length = 0;
+        self.used = 0;
+    }
+
+    fn used(&self) -> usize {
+        self.used
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    fn length(&self) -> usize {
+        self.length
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.inner[self.offset..self.offset + self.length]
+    }
+
+    fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.inner[self.offset..self.offset + self.length]
+    }
+}
+
+impl<'a> AsRef<[u8]> for SliceBuf<'a> {
+    fn as_ref(&self) -> &[u8] {
+        use packet::Buffer;
+        self.data()
+    }
+}
+
+impl<'a> AsMut<[u8]> for SliceBuf<'a> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        use packet::Buffer;
+        self.data_mut()
+    }
+}
+
+impl<'a> Deref for SliceBuf<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        use packet::Buffer;
+        self.data()
+    }
+}
+
+impl<'a> DerefMut for SliceBuf<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        use packet::Buffer;
+        self.data_mut()
     }
 }

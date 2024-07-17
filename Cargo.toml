@@ -22,3 +22,4 @@ base64ct = { version = "1", features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 tai64 = { version = "4.0", features = ["std"] }
 rand = { version = "0.8", features = ["getrandom"] }
+packet = "0.1"
