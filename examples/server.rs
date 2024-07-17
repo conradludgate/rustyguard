@@ -125,7 +125,7 @@ fn main() {
                                             .send_message(&peer, &mut inner_reply_buf[..reply_len])
                                             .unwrap()
                                         {
-                                            rustyguard::SendMessage::Maintenance(_) => todo!(),
+                                            rustyguard::SendMessage::Maintenance(_, _) => todo!(),
                                             rustyguard::SendMessage::Data(_, header, tag) => {
                                                 inner_reply_buf[reply_len..reply_len + 16]
                                                     .copy_from_slice(&tag[..]);

@@ -19,7 +19,17 @@ zeroize = "1.8"
 
 [dev-dependencies]
 base64ct = { version = "1", features = ["std"] }
-clap = { version = "4", features = ["derive"] }
 tai64 = { version = "4.0", features = ["std"] }
 rand = { version = "0.8", features = ["getrandom"] }
+
+# server example
+clap = { version = "4", features = ["derive"] }
 packet = "0.1"
+
+# tun example
+tun = { version = "0.6", features = ["async"], git = "https://github.com/conradludgate/rust-tun" }
+tokio = { version = "1", features = ["full"] }
+knuffel = { version = "3.2.0" }
+miette = { version="5.10", features=["fancy"] }
+ipnet = { version = "2.9" }
+iptrie = "0.8"

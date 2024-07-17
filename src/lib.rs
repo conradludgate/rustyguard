@@ -229,7 +229,7 @@ pub enum Message<'a> {
 
 pub enum SendMessage {
     // This handshake message should be sent
-    Maintenance(MaintenanceMsg),
+    Maintenance(Option<SocketAddr>, MaintenanceMsg),
     Data(Option<SocketAddr>, DataHeader, Tag),
 }
 
@@ -294,9 +294,10 @@ impl Sessions {
 
         let peer = self.config.get_peer(pk).ok_or(Error::Rejected)?;
         let Some(session) = peer.session.and_then(|s| self.sessions.get_mut(&s)) else {
-            return Ok(SendMessage::Maintenance(MaintenanceMsg(
-                HandshakeRepr::Init(FirstMessage::new(self, pk)),
-            )));
+            return Ok(SendMessage::Maintenance(
+                peer.endpoint,
+                MaintenanceMsg(HandshakeRepr::Init(FirstMessage::new(self, pk))),
+            ));
         };
 
         let n = session.nonce;
@@ -349,7 +350,9 @@ impl Sessions {
             MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
             MSG_SECOND => self.handle_handshake_resp(socket, msg),
             MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
-            MSG_DATA => self.decrypt_packet(msg).map(|(id, m)| Message::Read(id, m)),
+            MSG_DATA => self
+                .decrypt_packet(socket, msg)
+                .map(|(id, m)| Message::Read(id, m)),
             _ => Err(Error::InvalidMessage),
         }
     }
@@ -388,10 +391,9 @@ impl Sessions {
             }
         };
 
-        self.config
-            .get_peer_mut(&peer_key)
-            .ok_or(Error::Rejected)?
-            .session = Some(receiver);
+        let peer = self.config.get_peer_mut(&peer_key).ok_or(Error::Rejected)?;
+        peer.endpoint = Some(socket);
+        peer.session = Some(receiver);
 
         let resp = MacProtected::new(
             LEU32::new(MSG_SECOND),
@@ -440,6 +442,7 @@ impl Sessions {
         let mut ihs = self.handshakes.remove(&receiver).ok_or(Error::Rejected)?;
 
         second_message.process(&mut ihs, &self.config)?;
+        self.config.get_peer_mut(&ihs.peer_key).unwrap().endpoint = Some(socket);
 
         let (initiator, responder) = ihs.state.split();
         self.sessions.insert(
@@ -486,6 +489,7 @@ impl Sessions {
     #[inline(never)]
     fn decrypt_packet<'m>(
         &mut self,
+        socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<(PublicKey, &'m mut [u8]), Error> {
         use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce, Tag};
@@ -511,6 +515,10 @@ impl Sessions {
 
         let receiver = NonZeroU32::new(header.receiver.get()).ok_or(Error::Rejected)?;
         let session = self.sessions.get_mut(&receiver).ok_or(Error::Rejected)?;
+        self.config
+            .get_peer_mut(&session.peer_key)
+            .unwrap()
+            .endpoint = Some(socket);
 
         let mut nonce = Nonce::default();
         nonce[4..12].copy_from_slice(&header.counter.get().to_le_bytes());
@@ -886,7 +894,7 @@ mod tests {
 
         // try wrap the message - get back handshake message to send
         let m = match sessions_i.send_message(&spk_r, &mut msg).unwrap() {
-            crate::SendMessage::Maintenance(m) => m,
+            crate::SendMessage::Maintenance(_, m) => m,
             crate::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
         };
 
@@ -917,7 +925,7 @@ mod tests {
         // wrap the messasge and encode into buffer
         let data_msg = {
             match sessions_i.send_message(&spk_r, &mut msg).unwrap() {
-                crate::SendMessage::Maintenance(_) => panic!("session should be valid"),
+                crate::SendMessage::Maintenance(_, _) => panic!("session should be valid"),
                 crate::SendMessage::Data(_socket, header, tag) => {
                     // assert_eq!(socket, Some(server_addr));
 
