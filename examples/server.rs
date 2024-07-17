@@ -2,6 +2,7 @@ use std::net::UdpSocket;
 
 use base64ct::{Base64, Encoding};
 use clap::Parser;
+use rand::rngs::OsRng;
 use rustyguard::{Config, Message, Peer, Sessions};
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -36,7 +37,7 @@ fn main() {
             private_key
         }
         None => {
-            let private_key = StaticSecret::random();
+            let private_key = StaticSecret::random_from_rng(OsRng);
             println!(
                 "private key: {}",
                 Base64::encode_string(private_key.as_bytes())
@@ -53,11 +54,11 @@ fn main() {
     for peer in args.peer {
         let pk = Base64::decode_vec(&peer).unwrap();
         let peer_pk = PublicKey::from(<[u8; 32]>::try_from(pk).unwrap());
-        peers.push(Peer::new(peer_pk, None));
+        peers.push(Peer::new(peer_pk, None, None));
     }
 
     let config = Config::new(private_key, peers);
-    let mut sessions = Sessions::new(config);
+    let mut sessions = Sessions::new(config, &mut OsRng);
 
     let endpoint = UdpSocket::bind(("0.0.0.0", args.port)).unwrap();
     println!("addr: {:?}", endpoint.local_addr());
@@ -69,8 +70,9 @@ fn main() {
         match sessions.recv_message(addr, &mut buf.0[..n]) {
             Err(err) => println!("error: {err:?}"),
             Ok(Message::Noop) => println!("noop"),
-            Ok(Message::Read(session, buf)) => {
-                println!("data ({session:?}): {buf:?}");
+            Ok(Message::HandshakeComplete(_peer)) => {}
+            Ok(Message::Read(peer, buf)) => {
+                println!("data ({peer:?}): {buf:?}");
                 if buf.is_empty() {
                     continue;
                 }

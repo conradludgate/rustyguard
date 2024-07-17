@@ -9,7 +9,7 @@ use chacha20poly1305::consts::U16;
 use chacha20poly1305::Key;
 use chacha20poly1305::Nonce;
 use chacha20poly1305::XNonce;
-use hkdf::hmac::SimpleHmac;
+use hmac::SimpleHmac;
 use x25519_dalek::PublicKey;
 use x25519_dalek::StaticSecret;
 use zeroize::Zeroize;
@@ -39,7 +39,7 @@ pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> GenericArray<u
 }
 
 fn hmac<const M: usize>(key: &GenericArray<u8, U32>, msg: [&[u8]; M]) -> Output<Blake2s256> {
-    use hkdf::hmac::Mac;
+    use hmac::Mac;
     let mut hmac = <SimpleHmac<Blake2s256> as Mac>::new_from_slice(key).unwrap();
     for msg in msg {
         hmac.update(msg);
@@ -225,6 +225,19 @@ impl LEU32 {
         u32::from_le(self.0)
     }
     pub(crate) fn new(n: u32) -> Self {
+        Self(n.to_le())
+    }
+}
+
+#[derive(Pod, Zeroable, Clone, Copy, Default)]
+#[repr(C)]
+pub(crate) struct LEU64(u64);
+
+impl LEU64 {
+    pub(crate) fn get(self) -> u64 {
+        u64::from_le(self.0)
+    }
+    pub(crate) fn new(n: u64) -> Self {
         Self(n.to_le())
     }
 }
