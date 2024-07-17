@@ -15,28 +15,18 @@ async fn main() {
 
     let config = Config::new(args.key(), args.peers());
     let mut sessions = Sessions::new(config, Tai64N::now(), &mut OsRng);
-    let endpoint = UdpSocket::bind(args.interface.addr).await.unwrap();
+    let endpoint = UdpSocket::bind(args.interface.host).await.unwrap();
 
     let mut buf: Box<AlignedPacket> = Box::new(AlignedPacket([0; 2048]));
     let mut reply_buf = vec![0; 2048];
 
     let mut config = tun::Configuration::default();
     config
-        .address((10, 0, 0, 2))
-        .netmask((255, 255, 255, 255))
+        .address(args.interface.addr.addr())
+        .netmask(args.interface.addr.netmask())
         .up();
 
     let mut dev = tun::create_as_async(&config).unwrap();
-
-    // buf.clear();
-    // poll_fn::<Result<Infallible, Box<dyn std::error::Error>>, _>(|cx| loop {
-    //     match endpoint.poll_recv_from(cx, &mut buf)? {
-    //         Poll::Ready(addr) => return Poll::Ready(State::FromEndpoint(addr))
-    //         Poll::Pending => {}
-    //     }
-    // })
-    // .await
-    // .unwrap();
 
     const H: usize = std::mem::size_of::<DataHeader>();
     loop {
@@ -47,7 +37,7 @@ async fn main() {
                 let addr = res.unwrap().1;
 
                 sessions.reseed(Tai64N::now(), &mut OsRng);
-                println!("packet from {addr:?}: {:?}", &ep_buf.filled());
+                // println!("packet from {addr:?}: {:?}", &ep_buf.filled());
                 match sessions.recv_message(addr, ep_buf.filled_mut()) {
                     Err(e) => println!("error: {e:?}"),
                     Ok(Message::Noop) => println!("noop"),
@@ -56,11 +46,15 @@ async fn main() {
                         if buf.is_empty() {
                             continue;
                         }
-                        println!("wg->tun {buf:02X?}");
+                        // println!("wg->tun {buf:02X?}");
+                        // let Ok(ipv4) = packet::ip::v4::Packet::new(&*buf) else {
+                        //     continue;
+                        // };
+                        // println!("{ipv4:?}");
                         dev.write_all(buf).await.unwrap();
                     }
                     Ok(Message::Write(buf)) => {
-                        println!("sending: {buf:?}");
+                        // println!("sending: {buf:?}");
                         endpoint.send_to(buf, addr).await.unwrap();
                     }
                 }
@@ -68,11 +62,11 @@ async fn main() {
             res = dev.read_buf(&mut tun_buf) => {
                 let n = res.unwrap();
 
-                println!("tun->wg {:02X?}", tun_buf.filled());
+                // println!("tun->wg {:02X?}", tun_buf.filled());
                 let Ok(ipv4) = packet::ip::v4::Packet::new(tun_buf.filled()) else {
                     continue;
                 };
-                println!("{ipv4:?}");
+                // println!("{ipv4:?}");
                 let dest = ipv4.destination();
                 let (_, Some(pk)) = peer_net.lookup(&dest) else {
                     continue;
@@ -96,53 +90,6 @@ async fn main() {
             }
         }
     }
-
-    // match
-
-    // sessions.reseed(Tai64N::now(), &mut OsRng);
-    // println!("packet from {addr:?}: {:?}", &buf.filled());
-    // match sessions.recv_message(addr, &mut buf.filled_mut()) {
-    //     Err(e) => println!("error: {err:?}"),
-    //     Ok(Message::Noop) => println!("noop"),
-    //     Ok(Message::HandshakeComplete(_peer)) => {}
-    //     Ok(Message::Read(peer, buf)) => {
-    //         if buf.is_empty() {
-    //             continue;
-    //         }
-    //     }
-    //     Ok(Message::Write(buf)) => {
-    //         println!("sending: {buf:?}");
-    //         endpoint.send_to(buf, addr).unwrap();
-    //     }
-    // }
-
-    // poll_fn::<Result<Infallible, Box<dyn std::error::Error>>, _>(|cx| loop {
-    //     buf.clear();
-    //     match endpoint.poll_recv_from(cx, &mut buf)? {
-    //         Poll::Ready(addr) => {
-    //             sessions.reseed(Tai64N::now(), &mut OsRng);
-    //             println!("packet from {addr:?}: {:?}", &buf.filled());
-    //             match sessions.recv_message(addr, &mut buf.filled_mut()) {
-    //                 Err(e) => println!("error: {err:?}"),
-    //                 Ok(Message::Noop) => println!("noop"),
-    //                 Ok(Message::HandshakeComplete(_peer)) => {}
-    //                 Ok(Message::Read(peer, buf)) => {
-    //                     if buf.is_empty() {
-    //                         continue;
-    //                     }
-    //                 }
-    //                 Ok(Message::Write(buf)) => {
-    //                     println!("sending: {buf:?}");
-    //                     endpoint.send_to(buf, addr).unwrap();
-    //                 }
-    //             }
-    //             continue;
-    //         }
-    //         Poll::Pending => {}
-    //     }
-    // })
-    // .await
-    // .unwrap();
 }
 
 /// 16-byte aligned packet of 2048 bytes.
@@ -165,7 +112,10 @@ struct TunInterface {
     key: Option<Vec<u8>>,
 
     #[knuffel(child, unwrap(argument))]
-    addr: String,
+    host: String,
+
+    #[knuffel(child, unwrap(argument, str))]
+    addr: ipnet::Ipv4Net,
 }
 
 #[derive(knuffel::Decode)]
@@ -185,11 +135,6 @@ impl TunConfig {
         let config = std::fs::read_to_string("./examples/tun.kdl")
             .expect("examples/tun.kdl file should not be missing");
         knuffel::parse("examples/tun.kdl", &config).unwrap()
-        // let doc = KdlDocument::from_str(&config).unwrap();
-
-        // let int = doc.get("interface").expect("tun.kdl should contain an interface node");
-        // let addr = int.get("addr").unwrap().value().as_string().unwrap();
-        // let addr = int.get("key").unwrap().value().as_string().unwrap();
     }
 
     fn key(&self) -> StaticSecret {
