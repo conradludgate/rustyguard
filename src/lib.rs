@@ -10,6 +10,7 @@ use core::ops::ControlFlow;
 use core::time::Duration;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use blake2::digest::consts::{U0, U12, U16, U32};
 use blake2::digest::generic_array::GenericArray;
@@ -29,7 +30,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 mod utils;
 
 const REKEY_AFTER_MESSAGES: u64 = 1 << 60; // 2^60
-const REJECT_AFTER_MESSAGES: u64 = u64::MAX - 1 << 13; // 2^64 - 2^13 - 1
+const REJECT_AFTER_MESSAGES: u64 = u64::MAX - (1 << 13); // 2^64 - 2^13 - 1
 const REKEY_AFTER_TIME: Duration = Duration::from_secs(120);
 const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
 const REKEY_ATTEMPT_TIME: Duration = Duration::from_secs(90);
@@ -47,23 +48,27 @@ pub struct Config {
     // would think the hash quality would be decent.
     hasher: FxBuildHasher,
     // hashtable removes the need for the duplicate key inside the peer.
-    peers: HashTable<Peer>,
+    peers_by_pubkey: HashTable<usize>,
+
+    peers: Vec<Peer>,
 }
 
 impl Config {
     pub fn new(private_key: StaticSecret, peers: impl IntoIterator<Item = Peer>) -> Self {
-        let mut map = HashTable::<Peer>::default();
+        let peers = peers.into_iter().collect::<Vec<_>>();
+
+        let mut map = HashTable::<usize>::default();
         let hasher = FxBuildHasher;
-        for peer in peers {
+        for (i, peer) in peers.iter().enumerate() {
             use hashbrown::hash_table::Entry;
             match map.entry(
                 hasher.hash_one(peer.key),
-                |p| p.key == peer.key,
-                |p| hasher.hash_one(p.key),
+                |&i| peers[i].key == peer.key,
+                |&i| hasher.hash_one(peers[i].key),
             ) {
                 Entry::Occupied(_) => {}
                 Entry::Vacant(v) => {
-                    v.insert(peer);
+                    v.insert(i);
                 }
             }
         }
@@ -76,21 +81,24 @@ impl Config {
             private_key,
             public_key,
             hasher,
-            peers: map,
+            peers_by_pubkey: map,
+            peers,
         }
     }
 
-    fn get_peer(&self, pk: &PublicKey) -> Option<&Peer> {
-        self.peers.find(self.hasher.hash_one(pk), |p| p.key == *pk)
+    fn get_peer_idx(&self, pk: &PublicKey) -> Option<usize> {
+        let peers = &self.peers;
+        self.peers_by_pubkey
+            .find(self.hasher.hash_one(pk), |&i| peers[i].key == *pk)
+            .copied()
     }
 
-    fn get_peer_mut(&mut self, pk: &PublicKey) -> Option<&mut Peer> {
-        self.peers
-            .find_mut(self.hasher.hash_one(pk), |p| p.key == *pk)
-    }
+    // fn get_peer_mut(&mut self, pk: &PublicKey) -> Option<&mut Peer> {
+    //     self.peers_by_pubkey
+    //         .find_mut(self.hasher.hash_one(pk), |&i| peers[i].key == *pk)
+    // }
 }
 
-#[derive(Debug)]
 pub struct Peer {
     // static state
     key: PublicKey,
@@ -104,6 +112,27 @@ pub struct Peer {
     latest_ts: Tai64NBytes,
     cookie: Option<GenericArray<u8, U16>>,
     session: Option<NonZeroU32>,
+
+    handshake: PeerHandshake,
+    ciphers: PeerCipherState,
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct PeerHandshake {
+    esk_i: StaticSecret,
+    state: HandshakeState,
+}
+
+#[derive(Zeroize, ZeroizeOnDrop, Default)]
+struct PeerCipherState {
+    /// who will the outgoing messages be received by
+    receiver: u32,
+    /// key to encrypt the outgoing messages
+    encrypt: chacha20poly1305::Key,
+    /// counter for newly encrypted messages
+    nonce: u64,
+    /// key to decrypt incoming messages
+    decrypt: chacha20poly1305::Key,
 }
 
 impl Peer {
@@ -121,6 +150,11 @@ impl Peer {
             latest_ts: Tai64NBytes::default(),
             cookie: None,
             session: None,
+            handshake: PeerHandshake {
+                esk_i: StaticSecret::from([0; 32]),
+                state: HandshakeState::default(),
+            },
+            ciphers: PeerCipherState::default(),
         }
     }
 }
@@ -292,7 +326,8 @@ impl Sessions {
     ) -> Result<SendMessage, Error> {
         use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce};
 
-        let peer = self.config.get_peer(pk).ok_or(Error::Rejected)?;
+        let peer = self.config.get_peer_idx(pk).ok_or(Error::Rejected)?;
+        let peer = &self.config.peers[peer];
         let Some(session) = peer.session.and_then(|s| self.sessions.get_mut(&s)) else {
             return Ok(SendMessage::Maintenance(
                 peer.endpoint,
@@ -391,7 +426,8 @@ impl Sessions {
             }
         };
 
-        let peer = self.config.get_peer_mut(&peer_key).ok_or(Error::Rejected)?;
+        let peer = self.config.get_peer_idx(&peer_key).ok_or(Error::Rejected)?;
+        let peer = &mut self.config.peers[peer];
         peer.endpoint = Some(socket);
         peer.session = Some(receiver);
 
@@ -442,7 +478,8 @@ impl Sessions {
         let mut ihs = self.handshakes.remove(&receiver).ok_or(Error::Rejected)?;
 
         second_message.process(&mut ihs, &self.config)?;
-        self.config.get_peer_mut(&ihs.peer_key).unwrap().endpoint = Some(socket);
+        let peer = self.config.get_peer_idx(&ihs.peer_key).unwrap();
+        self.config.peers[peer].endpoint = Some(socket);
 
         let (initiator, responder) = ihs.state.split();
         self.sessions.insert(
@@ -474,7 +511,8 @@ impl Sessions {
             return Err(Error::Rejected);
         };
 
-        let peer = self.config.get_peer_mut(&peer_key).ok_or(Error::Rejected)?;
+        let peer = self.config.get_peer_idx(&peer_key).ok_or(Error::Rejected)?;
+        let peer = &mut self.config.peers[peer];
 
         let cookie =
             *cookie_msg
@@ -515,10 +553,12 @@ impl Sessions {
 
         let receiver = NonZeroU32::new(header.receiver.get()).ok_or(Error::Rejected)?;
         let session = self.sessions.get_mut(&receiver).ok_or(Error::Rejected)?;
-        self.config
-            .get_peer_mut(&session.peer_key)
-            .unwrap()
-            .endpoint = Some(socket);
+
+        let peer = self
+            .config
+            .get_peer_idx(&session.peer_key)
+            .ok_or(Error::Rejected)?;
+        self.config.peers[peer].endpoint = Some(socket);
 
         let mut nonce = Nonce::default();
         nonce[4..12].copy_from_slice(&header.counter.get().to_le_bytes());
@@ -670,9 +710,9 @@ impl FirstMessage {
     fn new(state: &mut Sessions, to: &PublicKey) -> MacProtected<Self> {
         let peer = state
             .config
-            .peers
-            .find_mut(state.config.hasher.hash_one(to), |p| p.key == *to)
+            .get_peer_idx(to)
             .expect("peer should not be missing");
+        let peer = &mut state.config.peers[peer];
 
         // we are the receiver for now
         let mut sender = state.rng.gen();
@@ -749,7 +789,8 @@ impl FirstMessage {
         let timestamp = *self.timestamp.decrypt_and_hash(hs, &k)?;
 
         // check if we know this peer
-        let peer = state.config.get_peer_mut(&spk_i).ok_or(Error::Rejected)?;
+        let peer = state.config.get_peer_idx(&spk_i).ok_or(Error::Rejected)?;
+        let peer = &mut state.config.peers[peer];
 
         // check for potential replay attack
         if timestamp < peer.latest_ts {
@@ -859,6 +900,8 @@ mod tests {
 
         assert_eq!(core::mem::size_of::<DataHeader>(), 16);
         assert_eq!(core::mem::align_of::<DataHeader>(), 8);
+
+        assert_eq!(core::mem::size_of::<Peer>(), 376);
     }
 
     fn session_with_peer(
