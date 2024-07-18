@@ -117,6 +117,7 @@ pub struct Peer {
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PeerHandshake {
+    started: Tai64N,
     sent: Tai64N,
     esk_i: StaticSecret,
     state: HandshakeState,
@@ -124,6 +125,7 @@ pub struct PeerHandshake {
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct PeerCipherState {
+    started: Tai64N,
     sent: Tai64N,
     /// who will the outgoing messages be received by
     receiver: u32,
@@ -146,11 +148,13 @@ impl Peer {
             latest_ts: Tai64NBytes::default(),
             cookie: None,
             handshake: PeerHandshake {
+                started: Tai64N(Tai64(0), 0),
                 sent: Tai64N(Tai64(0), 0),
                 esk_i: StaticSecret::from([0; 32]),
                 state: HandshakeState::default(),
             },
             ciphers: PeerCipherState {
+                started: Tai64N(Tai64(0), 0),
                 sent: Tai64N(Tai64(0), 0),
                 receiver: Default::default(),
                 encrypt: Default::default(),
@@ -161,11 +165,17 @@ impl Peer {
         }
     }
 
-    fn encrypt_message(&mut self, payload: &mut [u8]) -> Option<(DataHeader, Tag)> {
+    fn encrypt_message(&mut self, payload: &mut [u8], now: Tai64N) -> Option<(DataHeader, Tag)> {
         use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce};
 
         let session = &mut self.ciphers;
         if session.sent.0 .0 == 0 {
+            return None;
+        }
+        if session.sent + REJECT_AFTER_TIME < now {
+            return None;
+        }
+        if session.nonce >= REJECT_AFTER_MESSAGES {
             return None;
         }
 
@@ -179,6 +189,7 @@ impl Peer {
             .encrypt_in_place_detached(&nonce, &[], payload)
             .expect("message to large to encrypt");
 
+        session.sent = now;
         let header = DataHeader {
             _type: LEU32::new(MSG_DATA),
             receiver: LEU32::new(session.receiver),
@@ -228,7 +239,9 @@ impl Ord for TimerEntry {
     }
 }
 
+#[derive(Debug)]
 enum TimerEntryType {
+    InitAttempt { peer_idx: usize },
     RekeyAttempt { peer_idx: usize },
     Keepalive { peer_idx: usize },
 }
@@ -265,25 +278,41 @@ impl Sessions {
         now: Tai64N,
         rng: &mut (impl CryptoRng + RngCore),
     ) -> Option<MaintenanceMsg> {
-        if now < self.now {
-            return None;
-        }
-        self.now = now;
-        if now.duration_since(&self.last_reseed).unwrap() > Duration::from_secs(120) {
-            rng.fill_bytes(&mut self.random_secret[..]);
+        if now > self.now {
+            self.now = now;
+            if now.duration_since(&self.last_reseed).unwrap() > Duration::from_secs(120) {
+                rng.fill_bytes(&mut self.random_secret[..]);
 
-            let mut seed = <StdRng as rand::SeedableRng>::Seed::default();
-            rng.fill_bytes(&mut seed);
-            self.rng = StdRng::from_seed(seed);
-            self.last_reseed = now;
+                let mut seed = <StdRng as rand::SeedableRng>::Seed::default();
+                rng.fill_bytes(&mut seed);
+                self.rng = StdRng::from_seed(seed);
+                self.last_reseed = now;
+            }
         }
 
-        while self.timers.peek().is_some_and(|t| t.time < now) {
+        while self.timers.peek().is_some_and(|t| t.time < self.now) {
             let entry = self.timers.pop().unwrap().kind;
             match entry {
+                TimerEntryType::InitAttempt { peer_idx } => {
+                    let peer = &mut self.config.peers[peer_idx];
+                    // only re-init if
+                    // 1. it's been REKEY_TIMEOUT seconds since our last attempt
+                    // 2. it's not been more than REKEY_ATTEMPT_TIME seconds since we started
+                    // 3. the session needs to be re-init
+                    if peer.handshake.sent + REKEY_TIMEOUT < self.now
+                        && self.now < peer.handshake.started + REKEY_ATTEMPT_TIME
+                        && (peer.ciphers.started + REKEY_AFTER_TIME < self.now
+                            || peer.ciphers.nonce >= REKEY_AFTER_MESSAGES)
+                    {
+                        return Some(MaintenanceMsg {
+                            socket: peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before"),
+                            data: MaintenanceRepr::Init(HandshakeInit::new(self, peer_idx)),
+                        });
+                    }
+                }
                 TimerEntryType::RekeyAttempt { peer_idx } => {
                     let peer = &mut self.config.peers[peer_idx];
-                    if peer.handshake.sent + REKEY_TIMEOUT < now {
+                    if peer.handshake.sent + REKEY_AFTER_TIME < self.now {
                         return Some(MaintenanceMsg {
                             socket: peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before"),
                             data: MaintenanceRepr::Init(HandshakeInit::new(self, peer_idx)),
@@ -292,11 +321,10 @@ impl Sessions {
                 }
                 TimerEntryType::Keepalive { peer_idx } => {
                     let peer = &mut self.config.peers[peer_idx];
-                    if peer.ciphers.sent + KEEPALIVE_TIMEOUT < now {
-                        let (header, tag) = peer.encrypt_message(&mut []).expect(
+                    if peer.ciphers.sent + KEEPALIVE_TIMEOUT < self.now {
+                        let (header, tag) = peer.encrypt_message(&mut [], self.now).expect(
                             "a keepalive should only be scheduled if the data keys are set",
                         );
-                        peer.ciphers.sent = now;
                         return Some(MaintenanceMsg {
                             socket: peer.endpoint.expect("a keepalive event should not be scheduled if we've never seen this endpoint before"),
                             data: MaintenanceRepr::Data(Keepalive { header, tag }),
@@ -416,9 +444,14 @@ impl Sessions {
         let Some(ep) = peer.endpoint else {
             return Err(Error::Rejected);
         };
-        match peer.encrypt_message(payload) {
+        match peer.encrypt_message(payload, self.now) {
             Some((header, tag)) => {
-                peer.ciphers.sent = self.now;
+                if peer.ciphers.nonce >= REKEY_AFTER_MESSAGES {
+                    self.timers.push(TimerEntry {
+                        time: self.now,
+                        kind: TimerEntryType::RekeyAttempt { peer_idx },
+                    });
+                }
                 Ok(SendMessage::Data(ep, header, tag))
             }
             None => Ok(SendMessage::Maintenance(MaintenanceMsg {
@@ -499,6 +532,7 @@ impl Sessions {
 
         let (initiator, responder) = hs.split();
         peer.ciphers = PeerCipherState {
+            started: self.now,
             sent: self.now,
             receiver: init_msg.sender.get(),
             nonce: 0,
@@ -559,6 +593,7 @@ impl Sessions {
 
         session.insert(SessionType::Cipher(peer_idx));
         peer.ciphers = PeerCipherState {
+            started: self.now,
             sent: self.now,
             receiver: resp_msg.sender.get(),
             nonce: 0,
@@ -814,6 +849,7 @@ impl HandshakeInit {
 
         vacant.insert(SessionType::Handshake(peer_idx));
         peer.handshake = PeerHandshake {
+            started: peer.handshake.started,
             sent: state.now,
             esk_i: StaticSecret::random_from_rng(&mut state.rng),
             state: HandshakeState::default(),
@@ -850,7 +886,7 @@ impl HandshakeInit {
 
         state.timers.push(TimerEntry {
             time: state.now + REKEY_TIMEOUT,
-            kind: TimerEntryType::RekeyAttempt { peer_idx },
+            kind: TimerEntryType::InitAttempt { peer_idx },
         });
 
         msg
