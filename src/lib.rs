@@ -142,7 +142,6 @@ impl Peer {
             preshared_key: preshared_key.unwrap_or_default(),
             latest_ts: Tai64NBytes::default(),
             cookie: None,
-            // session: None,
             handshake: PeerHandshake {
                 esk_i: StaticSecret::from([0; 32]),
                 state: HandshakeState::default(),
@@ -196,6 +195,7 @@ impl Sessions {
         if now < self.now {
             return;
         }
+        self.now = now;
         if now.duration_since(&self.last_reseed).unwrap() > Duration::from_secs(120) {
             rng.fill_bytes(&mut self.random_secret[..]);
 
@@ -228,9 +228,9 @@ pub enum Message<'a> {
     // This should be sent back to the client
     Write(&'a mut [u8]),
     // This can be processed appropriately
-    Read(PublicKey, &'a mut [u8]),
+    Read(usize, &'a mut [u8]),
     Noop,
-    HandshakeComplete(PublicKey),
+    HandshakeComplete(usize),
 }
 
 pub enum SendMessage {
@@ -293,13 +293,12 @@ impl Sessions {
 
     pub fn send_message(
         &mut self,
-        pk: &PublicKey,
+        peer_idx: usize,
         payload: &mut [u8],
     ) -> Result<SendMessage, Error> {
         use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce};
 
-        let peer_idx = self.config.get_peer_idx(pk).ok_or(Error::Rejected)?;
-        let peer = &mut self.config.peers[peer_idx];
+        let peer = &mut self.config.peers.get_mut(peer_idx).ok_or(Error::Rejected)?;
         let session = &mut peer.ciphers;
         if !session.init {
             return Ok(SendMessage::Maintenance(
@@ -470,7 +469,7 @@ impl Sessions {
             decrypt: responder,
         };
 
-        Ok(Message::HandshakeComplete(peer.key))
+        Ok(Message::HandshakeComplete(peer_idx))
     }
 
     #[inline(never)]
@@ -500,7 +499,7 @@ impl Sessions {
         &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<(PublicKey, &'m mut [u8]), Error> {
+    ) -> Result<(usize, &'m mut [u8]), Error> {
         use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce, Tag};
         const HEADER_LEN: usize = core::mem::size_of::<DataHeader>();
 
@@ -538,7 +537,7 @@ impl Sessions {
             .decrypt_in_place_detached(&nonce, &[], payload, Tag::from_slice(tag))
             .map_err(|_| Error::Rejected)?;
 
-        Ok((peer.key, payload))
+        Ok((*peer_idx, payload))
     }
 }
 
@@ -898,7 +897,7 @@ mod tests {
         let mut msg = *b"Hello, World!\0\0\0";
 
         // try wrap the message - get back handshake message to send
-        let m = match sessions_i.send_message(&spk_r, &mut msg).unwrap() {
+        let m = match sessions_i.send_message(0, &mut msg).unwrap() {
             crate::SendMessage::Maintenance(_, m) => m,
             crate::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
         };
@@ -916,7 +915,7 @@ mod tests {
         // send the handshake response to the client
         {
             match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-                crate::Message::HandshakeComplete(pk) => assert_eq!(pk, spk_r),
+                crate::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, 0),
                 _ => panic!("expecting noop"),
             };
         }
@@ -929,7 +928,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            match sessions_i.send_message(&spk_r, &mut msg).unwrap() {
+            match sessions_i.send_message(0, &mut msg).unwrap() {
                 crate::SendMessage::Maintenance(_, _) => panic!("session should be valid"),
                 crate::SendMessage::Data(_socket, header, tag) => {
                     // assert_eq!(socket, Some(server_addr));
@@ -945,8 +944,8 @@ mod tests {
         // send the buffer to the server
         {
             match sessions_r.recv_message(client_addr, data_msg).unwrap() {
-                crate::Message::Read(pk, data) => {
-                    assert_eq!(pk, spk_i);
+                crate::Message::Read(peer_idx, data) => {
+                    assert_eq!(peer_idx, 0);
                     assert_eq!(data, b"Hello, World!\0\0\0")
                 }
                 _ => panic!("expecting read"),

@@ -122,7 +122,7 @@ fn main() {
                                         let reply_len = reply.len().next_multiple_of(16);
 
                                         match sessions
-                                            .send_message(&peer, &mut inner_reply_buf[..reply_len])
+                                            .send_message(peer, &mut inner_reply_buf[..reply_len])
                                             .unwrap()
                                         {
                                             rustyguard::SendMessage::Maintenance(_, _) => todo!(),

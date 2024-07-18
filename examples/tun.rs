@@ -68,15 +68,13 @@ async fn main() {
                 };
                 // println!("{ipv4:?}");
                 let dest = ipv4.destination();
-                let (_, Some(pk)) = peer_net.lookup(&dest) else {
-                    continue;
-                };
+                let (_, peer_idx) = peer_net.lookup(&dest);
 
                 let pad_to = n.next_multiple_of(16);
                 tun_buf.put_slice(&[0; 16][..pad_to-n]);
 
                 sessions.reseed(Tai64N::now(), &mut OsRng);
-                match sessions.send_message(pk, tun_buf.filled_mut()).unwrap() {
+                match sessions.send_message(*peer_idx, tun_buf.filled_mut()).unwrap() {
                     rustyguard::SendMessage::Maintenance(Some(ep), msg) => {
                         endpoint.send_to(msg.as_ref(), ep).await.unwrap();
                     },
@@ -175,12 +173,11 @@ impl TunConfig {
         peers
     }
 
-    fn iptrie(&self) -> iptrie::LCTrieMap<ipnet::Ipv4Net, Option<PublicKey>> {
-        let mut peers = iptrie::RTrieMap::new();
-        for peer in &self.peers {
-            let peer_pk = PublicKey::from(<[u8; 32]>::try_from(&*peer.key).unwrap());
+    fn iptrie(&self) -> iptrie::LCTrieMap<ipnet::Ipv4Net, usize> {
+        let mut peers = iptrie::RTrieMap::with_root(usize::MAX);
+        for (peer_idx, peer) in self.peers.iter().enumerate() {
             for addr in &peer.addrs {
-                peers.insert(*addr, Some(peer_pk));
+                peers.insert(*addr, peer_idx);
             }
         }
         peers.compress()
