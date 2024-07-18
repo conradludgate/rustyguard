@@ -133,75 +133,102 @@ unsafe impl<U: ArrayLength<u8>> Zeroable for Bytes<U> {}
 
 // pub(crate) type Encrypted<U> = <U as Add<U16>>::Output;
 
-#[derive(Clone)]
-#[repr(C)]
-pub(crate) struct Encrypted<U: ArrayLength<u8>> {
-    msg: GenericArray<u8, U>,
-    tag: chacha20poly1305::Tag,
+#[derive(Clone, Copy, Pod, Zeroable, TransparentWrapper)]
+#[repr(transparent)]
+pub struct Cookie(pub(crate) [u8; 16]);
+
+#[derive(Clone, Copy, Pod, Zeroable, TransparentWrapper)]
+#[repr(transparent)]
+pub struct Tag([u8; 16]);
+
+impl Tag {
+    fn as_tag(&self) -> &chacha20poly1305::Tag {
+        (&self.0).into()
+    }
+    fn from_tag(tag: chacha20poly1305::Tag) -> Self {
+        Self(tag.into())
+    }
 }
 
-impl<U: ArrayLength<u8>> Copy for Encrypted<U> where GenericArray<u8, U>: Copy {}
+macro_rules! encrypted {
+    ($i:ident, $n:literal) => {
+        #[derive(Clone, Copy, Pod, Zeroable)]
+        #[repr(C)]
+        pub(crate) struct $i {
+            msg: [u8; $n],
+            tag: Tag,
+        }
 
-// SAFETY: bytes are plain-old-data
-unsafe impl<U: ArrayLength<u8>> Pod for Encrypted<U> where GenericArray<u8, U>: Copy {}
-// SAFETY: bytes are zeroable
-unsafe impl<U: ArrayLength<u8>> Zeroable for Encrypted<U> {}
+        impl $i {
+            pub(crate) fn decrypt_and_hash(
+                &mut self,
+                state: &mut HandshakeState,
+                key: &Key,
+            ) -> Result<&mut [u8; $n], crate::Error> {
+                use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 
-impl<U: ArrayLength<u8>> Encrypted<U>
-where
-    GenericArray<u8, U>: Copy,
-{
-    pub(crate) fn decrypt_and_hash(
-        &mut self,
-        state: &mut HandshakeState,
-        key: &Key,
-    ) -> Result<&mut GenericArray<u8, U>, crate::Error> {
-        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
+                let aad = state.hash;
+                state.mix_hash(bytes_of(&*self));
 
-        let aad = state.hash;
-        state.mix_hash(bytes_of(&*self));
+                ChaCha20Poly1305::new(key)
+                    .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, self.tag.as_tag())
+                    .map_err(|_| crate::Error::Unspecified)?;
+                Ok(&mut self.msg)
+            }
 
-        ChaCha20Poly1305::new(key)
-            .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, &self.tag)
-            .map_err(|_| crate::Error::Unspecified)?;
-        Ok(&mut self.msg)
-    }
+            pub(crate) fn encrypt_and_hash(
+                mut msg: [u8; $n],
+                state: &mut HandshakeState,
+                key: &Key,
+            ) -> Self {
+                use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 
-    pub(crate) fn encrypt_and_hash(
-        mut msg: GenericArray<u8, U>,
-        state: &mut HandshakeState,
-        key: &Key,
-    ) -> Self {
-        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
+                let aad = state.hash;
+                let tag = ChaCha20Poly1305::new(key)
+                    .encrypt_in_place_detached(&nonce(0), &aad, &mut msg)
+                    .expect("message should not be larger than max message size");
 
-        let aad = state.hash;
-        let tag = ChaCha20Poly1305::new(key)
-            .encrypt_in_place_detached(&nonce(0), &aad, &mut msg)
-            .expect("message should not be larger than max message size");
+                let out = Self {
+                    msg,
+                    tag: Tag::from_tag(tag),
+                };
+                state.mix_hash(bytes_of(&out));
 
-        let out = Encrypted { msg, tag };
-        state.mix_hash(bytes_of(&out));
+                out
+            }
+        }
+    };
+}
 
-        out
-    }
+encrypted!(Encrypted0, 0);
+encrypted!(Encrypted12, 12);
+encrypted!(Encrypted32, 32);
 
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub(crate) struct EncryptedCookie {
+    msg: Cookie,
+    tag: Tag,
+}
+
+impl EncryptedCookie {
     pub(crate) fn decrypt_cookie(
         &mut self,
         key: &Key,
         nonce: &XNonce,
         aad: &[u8],
-    ) -> Result<&mut GenericArray<u8, U>, crate::Error> {
+    ) -> Result<&mut Cookie, crate::Error> {
         use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
 
         XChaCha20Poly1305::new(key)
-            .decrypt_in_place_detached(nonce, aad, &mut self.msg, &self.tag)
+            .decrypt_in_place_detached(nonce, aad, &mut self.msg.0, self.tag.as_tag())
             .map_err(|_| crate::Error::Unspecified)?;
 
         Ok(&mut self.msg)
     }
 
     pub(crate) fn encrypt_cookie(
-        mut cookie: GenericArray<u8, U>,
+        mut cookie: Cookie,
         key: &Key,
         nonce: &XNonce,
         aad: &[u8],
@@ -209,10 +236,13 @@ where
         use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
 
         let tag = XChaCha20Poly1305::new(key)
-            .encrypt_in_place_detached(nonce, aad, &mut cookie)
+            .encrypt_in_place_detached(nonce, aad, &mut cookie.0)
             .expect("cookie message should not be larger than max message size");
 
-        Encrypted { msg: cookie, tag }
+        Self {
+            msg: cookie,
+            tag: Tag::from_tag(tag),
+        }
     }
 }
 

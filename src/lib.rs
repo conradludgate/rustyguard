@@ -10,7 +10,7 @@ use core::time::Duration;
 
 use alloc::vec::Vec;
 
-use blake2::digest::consts::{U0, U12, U16, U32};
+use blake2::digest::consts::{U16, U32};
 use blake2::digest::generic_array::GenericArray;
 use bytemuck::{offset_of, Pod, Zeroable};
 use chacha20poly1305::{KeyInit, Tag, XNonce};
@@ -21,7 +21,10 @@ use rand::CryptoRng;
 use rand::{Rng, RngCore, SeedableRng};
 use rustc_hash::FxBuildHasher;
 use tai64::Tai64N;
-use utils::{hash, mac, Bytes, Encrypted, HandshakeState, LEU32, LEU64};
+use utils::{
+    hash, mac, Bytes, Cookie, Encrypted0, Encrypted12, Encrypted32, EncryptedCookie,
+    HandshakeState, LEU32, LEU64,
+};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -103,7 +106,7 @@ pub struct Peer {
     // dynamic state
     endpoint: Option<SocketAddr>,
     latest_ts: Tai64NBytes,
-    cookie: Option<GenericArray<u8, U16>>,
+    cookie: Option<Cookie>,
     handshake: PeerHandshake,
     ciphers: PeerCipherState,
     last_sent_mac1: GenericArray<u8, U16>,
@@ -152,7 +155,7 @@ impl Peer {
     }
 }
 
-type Tai64NBytes = GenericArray<u8, U12>;
+type Tai64NBytes = [u8; 12];
 
 pub struct Sessions {
     config: Config,
@@ -273,8 +276,6 @@ const IDENTIFIER_HASH: [u8; 32] = [
 const LABEL_MAC1: [u8; 8] = *b"mac1----";
 const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
-type Cookie = GenericArray<u8, U16>;
-
 impl Sessions {
     fn overloaded(&self) -> bool {
         false
@@ -285,9 +286,12 @@ impl Sessions {
             core::net::IpAddr::V4(ipv4) => &ipv4.octets()[..],
             core::net::IpAddr::V6(ipv6) => &ipv6.octets()[..],
         };
-        mac(
-            &self.random_secret,
-            [ip_bytes, &socket.port().to_be_bytes()[..]],
+        Cookie(
+            mac(
+                &self.random_secret,
+                [ip_bytes, &socket.port().to_be_bytes()[..]],
+            )
+            .into(),
         )
     }
 
@@ -545,8 +549,8 @@ impl Sessions {
 #[repr(C)]
 struct FirstMessage {
     ephemeral_key: [u8; 32],
-    static_key: Encrypted<U32>,
-    timestamp: Encrypted<U12>,
+    static_key: Encrypted32,
+    timestamp: Encrypted12,
 }
 
 #[derive(Pod, Zeroable, Clone, Copy)]
@@ -555,7 +559,7 @@ struct CookieMessage {
     _type: LEU32,
     receiver: LEU32,
     nonce: Bytes<chacha20poly1305::consts::U24>,
-    cookie: Encrypted<U16>,
+    cookie: EncryptedCookie,
 }
 
 /// Both handshake messages are protected via MACs which can quickly be used
@@ -588,7 +592,7 @@ where
         _type: LEU32,
         sender: LEU32,
         msg: T,
-        cookie: Option<&GenericArray<u8, U16>>,
+        cookie: Option<&Cookie>,
         mac1_key: &GenericArray<u8, U32>,
     ) -> Self {
         let mut mac = Self {
@@ -618,8 +622,12 @@ where
             if let Err(cookie) = this.verify_mac2(state, socket) {
                 let mut nonce = XNonce::default();
                 state.rng.fill_bytes(&mut nonce);
-                let cookie =
-                    Encrypted::encrypt_cookie(cookie, &state.config.mac2_key, &nonce, &this.mac1.0);
+                let cookie = EncryptedCookie::encrypt_cookie(
+                    cookie,
+                    &state.config.mac2_key,
+                    &nonce,
+                    &this.mac1.0,
+                );
 
                 let msg = CookieMessage {
                     _type: LEU32::new(MSG_COOKIE),
@@ -661,10 +669,10 @@ where
         mac(mac1_key, [&bytes[..offset]])
     }
 
-    fn mac2(&self, cookie: &GenericArray<u8, U16>) -> GenericArray<u8, U16> {
+    fn mac2(&self, cookie: &Cookie) -> GenericArray<u8, U16> {
         let offset = offset_of!(self, MacProtected<T>, mac2);
         let bytes = bytemuck::bytes_of(self);
-        mac(cookie, [&bytes[..offset]])
+        mac(&cookie.0, [&bytes[..offset]])
     }
 }
 
@@ -706,12 +714,10 @@ impl FirstMessage {
 
         let k = hs.mix_key_dh(&ihs.esk_i, &peer.key);
         let spk_i = &state.config.public_key;
-        let static_key = GenericArray::from(spk_i.to_bytes());
-        let static_key = Encrypted::encrypt_and_hash(static_key, hs, &k);
+        let static_key = Encrypted32::encrypt_and_hash(spk_i.to_bytes(), hs, &k);
 
         let k = hs.mix_key_dh(&state.config.private_key, &peer.key);
-        let timestamp = GenericArray::from(state.now.to_bytes());
-        let timestamp = Encrypted::encrypt_and_hash(timestamp, hs, &k);
+        let timestamp = Encrypted12::encrypt_and_hash(state.now.to_bytes(), hs, &k);
 
         let this = Self {
             ephemeral_key: epk_i.to_bytes(),
@@ -744,7 +750,7 @@ impl FirstMessage {
         let epk_i = PublicKey::from(self.ephemeral_key);
         let k = hs.mix_key_dh(&state.config.private_key, &epk_i);
         let spk_i = self.static_key.decrypt_and_hash(hs, &k)?;
-        let spk_i = PublicKey::from(<[u8; 32]>::from(*spk_i));
+        let spk_i = PublicKey::from(*spk_i);
 
         let k = hs.mix_key_dh(&state.config.private_key, &spk_i);
         let timestamp = *self.timestamp.decrypt_and_hash(hs, &k)?;
@@ -768,7 +774,7 @@ impl FirstMessage {
         hs.mix_dh(&esk_r, &spk_i);
         let q = peer.preshared_key;
         let k = hs.mix_key2(&q);
-        let empty = Encrypted::encrypt_and_hash(GenericArray::<u8, U0>::default(), hs, &k);
+        let empty = Encrypted0::encrypt_and_hash([], hs, &k);
 
         let second = SecondMessage {
             receiver: sender,
@@ -785,7 +791,7 @@ impl FirstMessage {
 struct SecondMessage {
     receiver: LEU32,
     ephemeral_key: [u8; 32],
-    empty: Encrypted<U0>,
+    empty: Encrypted0,
 }
 
 impl SecondMessage {
