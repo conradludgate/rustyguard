@@ -1,5 +1,3 @@
-use blake2::digest::consts::U32;
-use blake2::digest::generic_array::ArrayLength;
 use blake2::digest::generic_array::GenericArray;
 use blake2::digest::{Digest, Output};
 use blake2::Blake2s256;
@@ -15,6 +13,8 @@ use x25519_dalek::StaticSecret;
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
+use crate::Mac;
+
 pub(crate) fn nonce(counter: u64) -> Nonce {
     let mut n = Nonce::default();
     n[4..].copy_from_slice(&u64::to_le_bytes(counter));
@@ -29,16 +29,16 @@ pub(crate) fn hash<const M: usize>(msg: [&[u8]; M]) -> Output<Blake2s256> {
     digest.finalize()
 }
 
-pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> GenericArray<u8, U16> {
+pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> crate::Mac {
     use blake2::digest::Mac;
     let mut mac = blake2::Blake2sMac::<U16>::new_from_slice(key).unwrap();
     for msg in msg {
         mac.update(msg);
     }
-    mac.finalize().into_bytes()
+    mac.finalize().into_bytes().into()
 }
 
-fn hmac<const M: usize>(key: &GenericArray<u8, U32>, msg: [&[u8]; M]) -> Output<Blake2s256> {
+fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Output<Blake2s256> {
     use hmac::Mac;
     let mut hmac = <SimpleHmac<Blake2s256> as Mac>::new_from_slice(key).unwrap();
     for msg in msg {
@@ -48,7 +48,7 @@ fn hmac<const M: usize>(key: &GenericArray<u8, U32>, msg: [&[u8]; M]) -> Output<
 }
 
 pub(crate) fn hkdf<const N: usize, const M: usize>(
-    key: &GenericArray<u8, U32>,
+    key: &Key,
     msg: [&[u8]; M],
 ) -> [Output<Blake2s256>; N] {
     assert!(N <= 255);
@@ -72,8 +72,8 @@ pub(crate) fn hkdf<const N: usize, const M: usize>(
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct HandshakeState {
-    hash: GenericArray<u8, U32>,
-    chain: GenericArray<u8, U32>,
+    hash: Key,
+    chain: Key,
 }
 
 impl Default for HandshakeState {
@@ -121,21 +121,9 @@ impl HandshakeState {
     }
 }
 
-#[derive(Clone, TransparentWrapper)]
-#[repr(transparent)]
-pub(crate) struct Bytes<U: ArrayLength<u8>>(pub GenericArray<u8, U>);
-impl<U: ArrayLength<u8>> Copy for Bytes<U> where GenericArray<u8, U>: Copy {}
-
-// SAFETY: bytes are plain-old-data
-unsafe impl<U: ArrayLength<u8>> Pod for Bytes<U> where GenericArray<u8, U>: Copy {}
-// SAFETY: bytes are zeroable
-unsafe impl<U: ArrayLength<u8>> Zeroable for Bytes<U> {}
-
-// pub(crate) type Encrypted<U> = <U as Add<U16>>::Output;
-
 #[derive(Clone, Copy, Pod, Zeroable, TransparentWrapper)]
 #[repr(transparent)]
-pub struct Cookie(pub(crate) [u8; 16]);
+pub struct Cookie(pub(crate) Mac);
 
 #[derive(Clone, Copy, Pod, Zeroable, TransparentWrapper)]
 #[repr(transparent)]

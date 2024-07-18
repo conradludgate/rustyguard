@@ -10,9 +10,9 @@ use core::time::Duration;
 
 use alloc::vec::Vec;
 
-use blake2::digest::consts::{U16, U32};
 use blake2::digest::generic_array::GenericArray;
 use bytemuck::{offset_of, Pod, Zeroable};
+use chacha20poly1305::Key;
 use chacha20poly1305::{KeyInit, Tag, XNonce};
 use hashbrown::HashMap;
 use hashbrown::HashTable;
@@ -22,8 +22,8 @@ use rand::{Rng, RngCore, SeedableRng};
 use rustc_hash::FxBuildHasher;
 use tai64::Tai64N;
 use utils::{
-    hash, mac, Bytes, Cookie, Encrypted0, Encrypted12, Encrypted32, EncryptedCookie,
-    HandshakeState, LEU32, LEU64,
+    hash, mac, Cookie, Encrypted0, Encrypted12, Encrypted32, EncryptedCookie, HandshakeState,
+    LEU32, LEU64,
 };
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -41,8 +41,8 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Config {
     private_key: StaticSecret,
     public_key: PublicKey,
-    mac1_key: GenericArray<u8, U32>,
-    mac2_key: GenericArray<u8, U32>,
+    mac1_key: Key,
+    mac2_key: Key,
 
     // fx-hash is ok since a third-party cannot
     // insert elements, thus this is hashdos safe.
@@ -99,9 +99,9 @@ impl Config {
 pub struct Peer {
     // static state
     key: PublicKey,
-    mac1_key: GenericArray<u8, U32>,
-    mac2_key: GenericArray<u8, U32>,
-    preshared_key: GenericArray<u8, U32>,
+    mac1_key: Key,
+    mac2_key: Key,
+    preshared_key: Key,
 
     // dynamic state
     endpoint: Option<SocketAddr>,
@@ -109,7 +109,7 @@ pub struct Peer {
     cookie: Option<Cookie>,
     handshake: PeerHandshake,
     ciphers: PeerCipherState,
-    last_sent_mac1: GenericArray<u8, U16>,
+    last_sent_mac1: Mac,
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -132,11 +132,7 @@ struct PeerCipherState {
 }
 
 impl Peer {
-    pub fn new(
-        key: PublicKey,
-        preshared_key: Option<GenericArray<u8, U32>>,
-        endpoint: Option<SocketAddr>,
-    ) -> Self {
+    pub fn new(key: PublicKey, preshared_key: Option<Key>, endpoint: Option<SocketAddr>) -> Self {
         Self {
             mac1_key: mac1_key(&key),
             mac2_key: mac2_key(&key),
@@ -150,7 +146,7 @@ impl Peer {
                 state: HandshakeState::default(),
             },
             ciphers: PeerCipherState::default(),
-            last_sent_mac1: GenericArray::default(),
+            last_sent_mac1: [0; 16],
         }
     }
 }
@@ -160,7 +156,7 @@ type Tai64NBytes = [u8; 12];
 pub struct Sessions {
     config: Config,
     rng: StdRng,
-    random_secret: GenericArray<u8, U32>,
+    random_secret: Key,
 
     last_reseed: Tai64N,
     now: Tai64N,
@@ -286,13 +282,10 @@ impl Sessions {
             core::net::IpAddr::V4(ipv4) => &ipv4.octets()[..],
             core::net::IpAddr::V6(ipv6) => &ipv6.octets()[..],
         };
-        Cookie(
-            mac(
-                &self.random_secret,
-                [ip_bytes, &socket.port().to_be_bytes()[..]],
-            )
-            .into(),
-        )
+        Cookie(mac(
+            &self.random_secret,
+            [ip_bytes, &socket.port().to_be_bytes()[..]],
+        ))
     }
 
     pub fn send_message(
@@ -419,7 +412,7 @@ impl Sessions {
             &peer.mac1_key,
         );
 
-        peer.last_sent_mac1 = resp.mac1.0;
+        peer.last_sent_mac1 = resp.mac1;
 
         // response message is always smaller than the initial message
         let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
@@ -489,7 +482,7 @@ impl Sessions {
 
         let cookie = *cookie_msg.cookie.decrypt_cookie(
             &peer.mac2_key,
-            &cookie_msg.nonce.0,
+            (&cookie_msg.nonce).into(),
             &peer.last_sent_mac1,
         )?;
 
@@ -558,7 +551,7 @@ struct FirstMessage {
 struct CookieMessage {
     _type: LEU32,
     receiver: LEU32,
-    nonce: Bytes<chacha20poly1305::consts::U24>,
+    nonce: [u8; 24],
     cookie: EncryptedCookie,
 }
 
@@ -575,14 +568,16 @@ struct MacProtected<T> {
     _type: LEU32,
     sender: LEU32,
     inner: T,
-    mac1: Bytes<U16>,
-    mac2: Bytes<U16>,
+    mac1: Mac,
+    mac2: Mac,
 }
 
 unsafe impl Pod for MacProtected<FirstMessage> {}
 unsafe impl Zeroable for MacProtected<FirstMessage> {}
 unsafe impl Pod for MacProtected<SecondMessage> {}
 unsafe impl Zeroable for MacProtected<SecondMessage> {}
+
+type Mac = [u8; 16];
 
 impl<T> MacProtected<T>
 where
@@ -593,18 +588,18 @@ where
         sender: LEU32,
         msg: T,
         cookie: Option<&Cookie>,
-        mac1_key: &GenericArray<u8, U32>,
+        mac1_key: &Key,
     ) -> Self {
         let mut mac = Self {
             _type,
             sender,
             inner: msg,
-            mac1: Bytes(GenericArray::default()),
-            mac2: Bytes(GenericArray::default()),
+            mac1: [0; 16],
+            mac2: [0; 16],
         };
-        mac.mac1.0 = mac.mac1(mac1_key);
+        mac.mac1 = mac.mac1(mac1_key);
         if let Some(cookie) = cookie {
-            mac.mac2.0 = mac.mac2(cookie);
+            mac.mac2 = mac.mac2(cookie);
         }
         mac
     }
@@ -626,13 +621,13 @@ where
                     cookie,
                     &state.config.mac2_key,
                     &nonce,
-                    &this.mac1.0,
+                    &this.mac1,
                 );
 
                 let msg = CookieMessage {
                     _type: LEU32::new(MSG_COOKIE),
                     receiver: this.sender,
-                    nonce: Bytes(nonce),
+                    nonce: nonce.into(),
                     cookie,
                 };
                 return Ok(ControlFlow::Break(msg));
@@ -645,7 +640,7 @@ where
     fn verify_mac1(&self, config: &Config) -> Result<(), Error> {
         use subtle::ConstantTimeEq;
         let actual_mac1 = self.mac1(&config.mac1_key);
-        if actual_mac1.ct_ne(&self.mac1.0).into() {
+        if actual_mac1.ct_ne(&self.mac1).into() {
             Err(Error::Rejected)
         } else {
             Ok(())
@@ -656,30 +651,30 @@ where
         use subtle::ConstantTimeEq;
         let cookie = state.cookie(socket);
         let actual_mac2 = self.mac2(&cookie);
-        if actual_mac2.ct_ne(&self.mac2.0).into() {
+        if actual_mac2.ct_ne(&self.mac2).into() {
             Err(cookie)
         } else {
             Ok(())
         }
     }
 
-    fn mac1(&self, mac1_key: &GenericArray<u8, U32>) -> GenericArray<u8, U16> {
+    fn mac1(&self, mac1_key: &Key) -> Mac {
         let offset = offset_of!(self, MacProtected<T>, mac1);
         let bytes = bytemuck::bytes_of(self);
         mac(mac1_key, [&bytes[..offset]])
     }
 
-    fn mac2(&self, cookie: &Cookie) -> GenericArray<u8, U16> {
+    fn mac2(&self, cookie: &Cookie) -> Mac {
         let offset = offset_of!(self, MacProtected<T>, mac2);
         let bytes = bytemuck::bytes_of(self);
         mac(&cookie.0, [&bytes[..offset]])
     }
 }
 
-fn mac1_key(spk: &PublicKey) -> GenericArray<u8, U32> {
+fn mac1_key(spk: &PublicKey) -> Key {
     hash([&LABEL_MAC1, spk.as_bytes()])
 }
-fn mac2_key(spk: &PublicKey) -> GenericArray<u8, U32> {
+fn mac2_key(spk: &PublicKey) -> Key {
     hash([&LABEL_COOKIE, spk.as_bytes()])
 }
 
@@ -732,7 +727,7 @@ impl FirstMessage {
             None,
             &mac1_key(&peer.key),
         );
-        peer.last_sent_mac1 = msg.mac1.0;
+        peer.last_sent_mac1 = msg.mac1;
 
         msg
     }
@@ -830,7 +825,7 @@ mod tests {
 
     use alloc::boxed::Box;
     use blake2::{digest::generic_array::GenericArray, Digest};
-    use chacha20poly1305::consts::U32;
+    use chacha20poly1305::Key;
     use rand::{rngs::OsRng, RngCore};
     use tai64::Tai64N;
     use x25519_dalek::{PublicKey, StaticSecret};
@@ -874,7 +869,7 @@ mod tests {
     fn session_with_peer(
         secret_key: StaticSecret,
         peer_public_key: PublicKey,
-        preshared_key: GenericArray<u8, U32>,
+        preshared_key: Key,
     ) -> Sessions {
         let peer = Peer::new(peer_public_key, Some(preshared_key), None);
         let config = Config::new(secret_key, [peer]);
