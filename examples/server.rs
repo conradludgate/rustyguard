@@ -73,7 +73,9 @@ fn main() {
 
     loop {
         let (n, addr) = endpoint.recv_from(&mut buf.0).unwrap();
-        sessions.reseed(Tai64N::now(), &mut OsRng);
+        while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng) {
+            endpoint.send_to(msg.data(), msg.to()).unwrap();
+        }
 
         println!("packet from {addr:?}: {:?}", &buf.0[..n]);
         match sessions.recv_message(addr, &mut buf.0[..n]) {
@@ -125,7 +127,7 @@ fn main() {
                                             .send_message(peer, &mut inner_reply_buf[..reply_len])
                                             .unwrap()
                                         {
-                                            rustyguard::SendMessage::Maintenance(_, _) => todo!(),
+                                            rustyguard::SendMessage::Maintenance(_) => todo!(),
                                             rustyguard::SendMessage::Data(_, header, tag) => {
                                                 inner_reply_buf[reply_len..reply_len + 16]
                                                     .copy_from_slice(&tag[..]);

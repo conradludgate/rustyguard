@@ -29,14 +29,19 @@ async fn main() {
     let mut dev = tun::create_as_async(&config).unwrap();
 
     const H: usize = std::mem::size_of::<DataHeader>();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
         let mut ep_buf = ReadBuf::new(&mut buf.0);
         let mut tun_buf = ReadBuf::new(&mut reply_buf[H..]);
         tokio::select! {
+            _ = tick.tick() => {
+                while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng) {
+                    endpoint.send_to(msg.data(), msg.to()).await.unwrap();
+                }
+            }
             res = endpoint.recv_buf_from(&mut ep_buf) => {
                 let addr = res.unwrap().1;
 
-                sessions.reseed(Tai64N::now(), &mut OsRng);
                 // println!("packet from {addr:?}: {:?}", &ep_buf.filled());
                 match sessions.recv_message(addr, ep_buf.filled_mut()) {
                     Err(e) => println!("error: {e:?}"),
@@ -73,17 +78,15 @@ async fn main() {
                 let pad_to = n.next_multiple_of(16);
                 tun_buf.put_slice(&[0; 16][..pad_to-n]);
 
-                sessions.reseed(Tai64N::now(), &mut OsRng);
                 match sessions.send_message(*peer_idx, tun_buf.filled_mut()).unwrap() {
-                    rustyguard::SendMessage::Maintenance(Some(ep), msg) => {
-                        endpoint.send_to(msg.as_ref(), ep).await.unwrap();
+                    rustyguard::SendMessage::Maintenance(msg) => {
+                        endpoint.send_to(msg.data(), msg.to()).await.unwrap();
                     },
-                    rustyguard::SendMessage::Data(Some(ep), header, tag) => {
+                    rustyguard::SendMessage::Data(ep, header, tag) => {
                         tun_buf.put_slice(&tag[..]);
                         reply_buf[..H].copy_from_slice(header.as_ref());
                         endpoint.send_to(&reply_buf[..pad_to + H + 16], ep).await.unwrap();
                     }
-                    _ => {}
                 }
             }
         }

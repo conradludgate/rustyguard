@@ -129,11 +129,18 @@ pub struct Cookie(pub(crate) Mac);
 #[repr(transparent)]
 pub struct Tag([u8; 16]);
 
+impl core::ops::Deref for Tag {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl Tag {
     fn as_tag(&self) -> &chacha20poly1305::Tag {
         (&self.0).into()
     }
-    fn from_tag(tag: chacha20poly1305::Tag) -> Self {
+    pub(crate) fn from_tag(tag: chacha20poly1305::Tag) -> Self {
         Self(tag.into())
     }
 }
