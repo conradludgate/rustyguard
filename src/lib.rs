@@ -1,4 +1,5 @@
 #![no_std]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -166,6 +167,7 @@ pub struct Sessions {
     peers_by_session: HashMap<u32, SessionType, FxBuildHasher>,
 }
 
+#[derive(Debug)]
 enum SessionType {
     Handshake(usize),
     Cipher(usize),
@@ -249,7 +251,7 @@ impl AsRef<[u8]> for MaintenanceMsg {
 }
 
 enum HandshakeRepr {
-    Init(MacProtected<FirstMessage>),
+    Init(HandshakeInit),
 }
 
 const MSG_FIRST: u32 = 1;
@@ -300,7 +302,7 @@ impl Sessions {
         if !session.init {
             return Ok(SendMessage::Maintenance(
                 peer.endpoint,
-                MaintenanceMsg(HandshakeRepr::Init(FirstMessage::new(self, peer_idx))),
+                MaintenanceMsg(HandshakeRepr::Init(HandshakeInit::new(self, peer_idx))),
             ));
         }
 
@@ -367,19 +369,18 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<&'m mut [u8], Error> {
-        let (sender, first_message) = match MacProtected::<FirstMessage>::verify(msg, self, socket)?
-        {
+        let init_msg = match HandshakeInit::verify(msg, self, socket)? {
             ControlFlow::Break(cookie) => {
                 // cookie message is always smaller than the initial message
                 let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
                 cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
                 return Ok(cookie_msg);
             }
-            ControlFlow::Continue(MacProtected { sender, inner, .. }) => (*sender, inner),
+            ControlFlow::Continue(msg) => msg,
         };
 
         let mut hs = HandshakeState::default();
-        let (peer_idx, response) = first_message.process(&mut hs, sender, self)?;
+        let (peer_idx, mut response) = init_msg.process(&mut hs, self)?;
         let peer = &mut self.config.peers[peer_idx];
         peer.endpoint = Some(socket);
 
@@ -396,7 +397,7 @@ impl Sessions {
         let (initiator, responder) = hs.split();
         peer.ciphers = PeerCipherState {
             init: true,
-            receiver: sender.get(),
+            receiver: init_msg.sender.get(),
             nonce: 0,
             encrypt: responder,
             decrypt: initiator,
@@ -404,19 +405,16 @@ impl Sessions {
 
         vacant.insert(SessionType::Cipher(peer_idx));
 
-        let resp = MacProtected::new(
-            LEU32::new(MSG_SECOND),
-            LEU32::new(receiver),
-            response,
-            peer.cookie.as_ref(),
-            &peer.mac1_key,
-        );
-
-        peer.last_sent_mac1 = resp.mac1;
+        response.sender = LEU32::new(receiver);
+        response.mac1 = response.compute_mac1(&peer.mac1_key);
+        peer.last_sent_mac1 = response.mac1;
+        if let Some(cookie) = peer.cookie.as_ref() {
+            response.mac2 = response.compute_mac2(cookie);
+        }
 
         // response message is always smaller than the initial message
-        let resp_msg = &mut msg[..core::mem::size_of::<MacProtected<SecondMessage>>()];
-        resp_msg.copy_from_slice(bytemuck::bytes_of(&resp));
+        let resp_msg = &mut msg[..core::mem::size_of::<HandshakeResp>()];
+        resp_msg.copy_from_slice(bytemuck::bytes_of(&response));
         Ok(resp_msg)
     }
 
@@ -426,20 +424,19 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<Message<'m>, Error> {
-        let (sender, second_message) =
-            match MacProtected::<SecondMessage>::verify(msg, self, socket)? {
-                ControlFlow::Break(cookie) => {
-                    // cookie message is always smaller than the response message
-                    let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
-                    cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                    return Ok(Message::Write(cookie_msg));
-                }
-                ControlFlow::Continue(MacProtected { sender, inner, .. }) => (*sender, inner),
-            };
+        let resp_msg = match HandshakeResp::verify(msg, self, socket)? {
+            ControlFlow::Break(cookie) => {
+                // cookie message is always smaller than the response message
+                let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
+                cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
+                return Ok(Message::Write(cookie_msg));
+            }
+            ControlFlow::Continue(msg) => msg,
+        };
 
         // check for a session expecting this handshake response
         use hashbrown::hash_map::Entry;
-        let mut session = match self.peers_by_session.entry(second_message.receiver.get()) {
+        let mut session = match self.peers_by_session.entry(resp_msg.receiver.get()) {
             // session not found
             Entry::Vacant(_) => return Err(Error::Rejected),
             Entry::Occupied(o) => o,
@@ -451,7 +448,7 @@ impl Sessions {
         };
         let peer = &mut self.config.peers[peer_idx];
 
-        second_message.process(peer, &self.config.private_key)?;
+        resp_msg.process(peer, &self.config.private_key)?;
         peer.endpoint = Some(socket);
 
         let (initiator, responder) = peer.handshake.state.split();
@@ -460,7 +457,7 @@ impl Sessions {
         session.insert(SessionType::Cipher(peer_idx));
         peer.ciphers = PeerCipherState {
             init: true,
-            receiver: sender.get(),
+            receiver: resp_msg.sender.get(),
             nonce: 0,
             encrypt: initiator,
             decrypt: responder,
@@ -540,20 +537,38 @@ impl Sessions {
 
 #[derive(Pod, Zeroable, Clone, Copy)]
 #[repr(C)]
-struct FirstMessage {
-    ephemeral_key: [u8; 32],
-    static_key: Encrypted32,
-    timestamp: Encrypted12,
-}
-
-#[derive(Pod, Zeroable, Clone, Copy)]
-#[repr(C)]
 struct CookieMessage {
     _type: LEU32,
     receiver: LEU32,
     nonce: [u8; 24],
     cookie: EncryptedCookie,
 }
+
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct HandshakeInit {
+    _type: LEU32,
+    sender: LEU32,
+    ephemeral_key: [u8; 32],
+    static_key: Encrypted32,
+    timestamp: Encrypted12,
+    mac1: Mac,
+    mac2: Mac,
+}
+
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct HandshakeResp {
+    _type: LEU32,
+    sender: LEU32,
+    receiver: LEU32,
+    ephemeral_key: [u8; 32],
+    empty: Encrypted0,
+    mac1: Mac,
+    mac2: Mac,
+}
+
+type Mac = [u8; 16];
 
 /// Both handshake messages are protected via MACs which can quickly be used
 /// to rule out invalid messages.
@@ -562,49 +577,8 @@ struct CookieMessage {
 /// The second MAC is only checked if the server is overloaded. If the server is
 /// overloaded and second MAC is invalid, a CookieReply is sent to the client,
 /// which contains an encrypted key that can be used to re-sign the handshake later.
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct MacProtected<T> {
-    _type: LEU32,
-    sender: LEU32,
-    inner: T,
-    mac1: Mac,
-    mac2: Mac,
-}
-
-unsafe impl Pod for MacProtected<FirstMessage> {}
-unsafe impl Zeroable for MacProtected<FirstMessage> {}
-unsafe impl Pod for MacProtected<SecondMessage> {}
-unsafe impl Zeroable for MacProtected<SecondMessage> {}
-
-type Mac = [u8; 16];
-
-impl<T> MacProtected<T>
-where
-    Self: Pod,
-{
-    pub fn new(
-        _type: LEU32,
-        sender: LEU32,
-        msg: T,
-        cookie: Option<&Cookie>,
-        mac1_key: &Key,
-    ) -> Self {
-        let mut mac = Self {
-            _type,
-            sender,
-            inner: msg,
-            mac1: [0; 16],
-            mac2: [0; 16],
-        };
-        mac.mac1 = mac.mac1(mac1_key);
-        if let Some(cookie) = cookie {
-            mac.mac2 = mac.mac2(cookie);
-        }
-        mac
-    }
-
-    pub fn verify<'m>(
+trait HasMac: Pod {
+    fn verify<'m>(
         msg: &'m mut [u8],
         state: &mut Sessions,
         socket: SocketAddr,
@@ -621,12 +595,12 @@ where
                     cookie,
                     &state.config.mac2_key,
                     &nonce,
-                    &this.mac1,
+                    this.get_mac1(),
                 );
 
                 let msg = CookieMessage {
                     _type: LEU32::new(MSG_COOKIE),
-                    receiver: this.sender,
+                    receiver: this.sender(),
                     nonce: nonce.into(),
                     cookie,
                 };
@@ -639,8 +613,8 @@ where
 
     fn verify_mac1(&self, config: &Config) -> Result<(), Error> {
         use subtle::ConstantTimeEq;
-        let actual_mac1 = self.mac1(&config.mac1_key);
-        if actual_mac1.ct_ne(&self.mac1).into() {
+        let actual_mac1 = self.compute_mac1(&config.mac1_key);
+        if actual_mac1.ct_ne(self.get_mac1()).into() {
             Err(Error::Rejected)
         } else {
             Ok(())
@@ -650,26 +624,53 @@ where
     fn verify_mac2(&self, state: &Sessions, socket: SocketAddr) -> Result<(), Cookie> {
         use subtle::ConstantTimeEq;
         let cookie = state.cookie(socket);
-        let actual_mac2 = self.mac2(&cookie);
-        if actual_mac2.ct_ne(&self.mac2).into() {
+        let actual_mac2 = self.compute_mac2(&cookie);
+        if actual_mac2.ct_ne(self.get_mac2()).into() {
             Err(cookie)
         } else {
             Ok(())
         }
     }
 
-    fn mac1(&self, mac1_key: &Key) -> Mac {
-        let offset = offset_of!(self, MacProtected<T>, mac1);
-        let bytes = bytemuck::bytes_of(self);
-        mac(mac1_key, [&bytes[..offset]])
-    }
-
-    fn mac2(&self, cookie: &Cookie) -> Mac {
-        let offset = offset_of!(self, MacProtected<T>, mac2);
-        let bytes = bytemuck::bytes_of(self);
-        mac(&cookie.0, [&bytes[..offset]])
-    }
+    fn compute_mac1(&self, mac1_key: &Key) -> Mac;
+    fn compute_mac2(&self, cookie: &Cookie) -> Mac;
+    fn get_mac1(&self) -> &Mac;
+    fn get_mac2(&self) -> &Mac;
+    fn sender(&self) -> LEU32;
 }
+
+macro_rules! mac_protected {
+    ($i:ident, $t:ident) => {
+        impl HasMac for $i {
+            fn sender(&self) -> LEU32 {
+                self.sender
+            }
+
+            fn compute_mac1(&self, mac1_key: &Key) -> Mac {
+                let offset = offset_of!(self, $i, mac1);
+                let bytes = bytemuck::bytes_of(self);
+                mac(mac1_key, [&bytes[..offset]])
+            }
+
+            fn compute_mac2(&self, cookie: &Cookie) -> Mac {
+                let offset = offset_of!(self, $i, mac2);
+                let bytes = bytemuck::bytes_of(self);
+                mac(&cookie.0, [&bytes[..offset]])
+            }
+
+            fn get_mac1(&self) -> &Mac {
+                &self.mac1
+            }
+
+            fn get_mac2(&self) -> &Mac {
+                &self.mac2
+            }
+        }
+    };
+}
+
+mac_protected!(HandshakeInit, MSG_FIRST);
+mac_protected!(HandshakeResp, MSG_SECOND);
 
 fn mac1_key(spk: &PublicKey) -> Key {
     hash([&LABEL_MAC1, spk.as_bytes()])
@@ -678,9 +679,9 @@ fn mac2_key(spk: &PublicKey) -> Key {
     hash([&LABEL_COOKIE, spk.as_bytes()])
 }
 
-impl FirstMessage {
+impl HandshakeInit {
     #[allow(dead_code)]
-    fn new(state: &mut Sessions, peer_idx: usize) -> MacProtected<Self> {
+    fn new(state: &mut Sessions, peer_idx: usize) -> Self {
         let peer = &mut state.config.peers[peer_idx];
 
         // we are the receiver for now
@@ -714,20 +715,20 @@ impl FirstMessage {
         let k = hs.mix_key_dh(&state.config.private_key, &peer.key);
         let timestamp = Encrypted12::encrypt_and_hash(state.now.to_bytes(), hs, &k);
 
-        let this = Self {
+        let mut msg = Self {
+            _type: LEU32::new(MSG_FIRST),
+            sender: LEU32::new(sender),
             ephemeral_key: epk_i.to_bytes(),
             static_key,
             timestamp,
+            mac1: [0; 16],
+            mac2: [0; 16],
         };
-
-        let msg = MacProtected::new(
-            LEU32::new(MSG_FIRST),
-            LEU32::new(sender),
-            this,
-            None,
-            &mac1_key(&peer.key),
-        );
+        msg.mac1 = msg.compute_mac1(&peer.mac1_key);
         peer.last_sent_mac1 = msg.mac1;
+        if let Some(cookie) = peer.cookie.as_ref() {
+            msg.mac2 = msg.compute_mac2(cookie);
+        }
 
         msg
     }
@@ -735,9 +736,8 @@ impl FirstMessage {
     fn process(
         &mut self,
         hs: &mut HandshakeState,
-        sender: LEU32,
         state: &mut Sessions,
-    ) -> Result<(usize, SecondMessage), Error> {
+    ) -> Result<(usize, HandshakeResp), Error> {
         hs.mix_hash(state.config.public_key.as_bytes());
         hs.mix_chain(&self.ephemeral_key);
         hs.mix_hash(&self.ephemeral_key);
@@ -771,25 +771,21 @@ impl FirstMessage {
         let k = hs.mix_key2(&q);
         let empty = Encrypted0::encrypt_and_hash([], hs, &k);
 
-        let second = SecondMessage {
-            receiver: sender,
+        let second = HandshakeResp {
+            _type: LEU32::new(MSG_SECOND),
+            sender: LEU32::new(0),
+            receiver: self.sender,
             ephemeral_key: epk_r.to_bytes(),
             empty,
+            mac1: [0; 16],
+            mac2: [0; 16],
         };
 
         Ok((peer_idx, second))
     }
 }
 
-#[derive(Pod, Zeroable, Clone, Copy)]
-#[repr(C)]
-struct SecondMessage {
-    receiver: LEU32,
-    ephemeral_key: [u8; 32],
-    empty: Encrypted0,
-}
-
-impl SecondMessage {
+impl HandshakeResp {
     fn process(&mut self, peer: &mut Peer, private_key: &StaticSecret) -> Result<(), Error> {
         let hs = &mut peer.handshake.state;
         let epk_r = PublicKey::from(self.ephemeral_key);
@@ -830,10 +826,7 @@ mod tests {
     use tai64::Tai64N;
     use x25519_dalek::{PublicKey, StaticSecret};
 
-    use crate::{
-        Config, CookieMessage, DataHeader, FirstMessage, MacProtected, Peer, SecondMessage,
-        Sessions,
-    };
+    use crate::{Config, CookieMessage, DataHeader, HandshakeInit, HandshakeResp, Peer, Sessions};
 
     #[test]
     fn construction_identifier() {
@@ -851,11 +844,11 @@ mod tests {
 
     #[test]
     fn test_size_align() {
-        assert_eq!(core::mem::size_of::<MacProtected<FirstMessage>>(), 148);
-        assert_eq!(core::mem::align_of::<MacProtected<FirstMessage>>(), 4);
+        assert_eq!(core::mem::size_of::<HandshakeInit>(), 148);
+        assert_eq!(core::mem::align_of::<HandshakeInit>(), 4);
 
-        assert_eq!(core::mem::size_of::<MacProtected<SecondMessage>>(), 92);
-        assert_eq!(core::mem::align_of::<MacProtected<SecondMessage>>(), 4);
+        assert_eq!(core::mem::size_of::<HandshakeResp>(), 92);
+        assert_eq!(core::mem::align_of::<HandshakeResp>(), 4);
 
         assert_eq!(core::mem::size_of::<CookieMessage>(), 64);
         assert_eq!(core::mem::align_of::<CookieMessage>(), 4);
