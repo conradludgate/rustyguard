@@ -17,7 +17,6 @@ macro_rules! unsafe_log {
 
 extern crate alloc;
 
-use core::fmt;
 use core::hash::BuildHasher;
 use core::net::SocketAddr;
 use core::ops::ControlFlow;
@@ -374,15 +373,6 @@ pub enum Error {
     Rejected,
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, PartialOrd)]
-pub struct SessionId(u32);
-
-impl fmt::Debug for SessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:16X}", self.0)
-    }
-}
-
 pub enum Message<'a> {
     // This should be sent back to the client
     Write(&'a mut [u8]),
@@ -452,14 +442,14 @@ impl Sessions {
     }
 
     fn cookie(&self, socket: SocketAddr) -> Cookie {
-        let ip_bytes = match socket.ip() {
-            core::net::IpAddr::V4(ipv4) => &ipv4.octets()[..],
-            core::net::IpAddr::V6(ipv6) => &ipv6.octets()[..],
-        };
-        Cookie(mac(
-            &self.random_secret,
-            [ip_bytes, &socket.port().to_be_bytes()[..]],
-        ))
+        // there's no specified encoding here - it just needs to contain the IP address and port :shrug:
+        let mut a = [0; 20];
+        match socket.ip() {
+            core::net::IpAddr::V4(ipv4) => a[..4].copy_from_slice(&ipv4.octets()[..]),
+            core::net::IpAddr::V6(ipv6) => a[..16].copy_from_slice(&ipv6.octets()[..]),
+        }
+        a[16..].copy_from_slice(&socket.port().to_le_bytes()[..]);
+        Cookie(mac(&self.random_secret, &a))
     }
 
     pub fn send_message(
