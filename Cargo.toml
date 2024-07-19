@@ -17,6 +17,7 @@ x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 zeroize = "1.8"
 
 [dev-dependencies]
+divan = "0.1.14"
 base64ct = { version = "1", features = ["std"] }
 tai64 = { version = "4.0", features = ["std"] }
 rand = { version = "0.8", features = ["getrandom"] }
@@ -32,3 +33,11 @@ knuffel = { version = "3.2.0" }
 miette = { version="5.10", features=["fancy"] }
 ipnet = { version = "2.9" }
 iptrie = "0.8"
+
+[[bench]]
+name = "mac"
+harness = false
+
+[[bench]]
+name = "cookie"
+harness = false

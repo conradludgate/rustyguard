@@ -426,11 +426,14 @@ impl Sessions {
     ) -> Result<SendMessage, Error> {
         let peer = self.config.peers.get_mut(peer_idx).ok_or(Error::Rejected)?;
         let Some(ep) = peer.endpoint else {
-            return Err(Error::Rejected);
+            return Err(Error::Rejected)
         };
+
         match peer.encrypt_message(payload, self.now) {
+            // we encrypted the message in-place in payload.
             Some((header, tag)) => {
                 if peer.ciphers.encrypt.counter >= REKEY_AFTER_MESSAGES {
+                    // the encryption key needs rotating. schedule a rekey attempt
                     self.timers.push(TimerEntry {
                         time: self.now,
                         kind: TimerEntryType::RekeyAttempt { peer_idx },
@@ -438,6 +441,8 @@ impl Sessions {
                 }
                 Ok(SendMessage::Data(ep, header, tag))
             }
+            // we could not encrypt the message as we don't yet have an active session.
+            // create a handshake init message to be sent.
             None => Ok(SendMessage::Maintenance(MaintenanceMsg {
                 socket: ep,
                 data: MaintenanceRepr::Init(HandshakeInit::new(self, peer_idx)),
@@ -467,10 +472,13 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<Message<'m>, Error> {
+        // For optimisation purposes, we want to assume the message is 16-byte aligned.
         if msg.as_ptr().align_offset(16) != 0 {
             return Err(Error::Unaligned);
         }
 
+        // Every message in wireguard starts with a 1 byte message tag and 3 bytes empty.
+        // This happens to be easy to read as a little-endian u32.
         let (msg_type, _) = msg.split_first_chunk_mut().ok_or(Error::InvalidMessage)?;
         match u32::from_le_bytes(*msg_type) {
             MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
