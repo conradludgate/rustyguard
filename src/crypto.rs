@@ -13,7 +13,20 @@ use x25519_dalek::StaticSecret;
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
-use crate::Mac;
+/// Construction: The UTF-8 string literal “Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s”, 37 bytes of output.
+/// Identifier: The UTF-8 string literal “WireGuard v1 zx2c4 Jason@zx2c4.com”, 34 bytes of output.
+/// Ci := Hash(Construction)
+/// Hi := Hash(Ci || Identifier)
+const CONSTRUCTION_HASH: [u8; 32] = [
+    96, 226, 109, 174, 243, 39, 239, 192, 46, 195, 53, 226, 160, 37, 210, 208, 22, 235, 66, 6, 248,
+    114, 119, 245, 45, 56, 209, 152, 139, 120, 205, 54,
+];
+const IDENTIFIER_HASH: [u8; 32] = [
+    34, 17, 179, 97, 8, 26, 197, 102, 105, 18, 67, 219, 69, 138, 213, 50, 45, 156, 108, 102, 34,
+    147, 232, 183, 14, 225, 156, 101, 186, 7, 158, 243,
+];
+const LABEL_MAC1: [u8; 8] = *b"mac1----";
+const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
 pub(crate) fn nonce(counter: u64) -> Nonce {
     let mut n = Nonce::default();
@@ -29,7 +42,7 @@ pub(crate) fn hash<const M: usize>(msg: [&[u8]; M]) -> Output<Blake2s256> {
     digest.finalize()
 }
 
-pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> crate::Mac {
+pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> Mac {
     use blake2::digest::Mac;
     let mut mac = blake2::Blake2sMac::<U16>::new_from_slice(key).unwrap();
     for msg in msg {
@@ -78,8 +91,8 @@ pub struct HandshakeState {
 
 impl Default for HandshakeState {
     fn default() -> Self {
-        let chain = GenericArray::from(crate::CONSTRUCTION_HASH);
-        let hash = GenericArray::from(crate::IDENTIFIER_HASH);
+        let chain = GenericArray::from(CONSTRUCTION_HASH);
+        let hash = GenericArray::from(IDENTIFIER_HASH);
         Self { chain, hash }
     }
 }
@@ -195,9 +208,9 @@ macro_rules! encrypted {
     };
 }
 
-encrypted!(Encrypted0, 0);
-encrypted!(Encrypted12, 12);
-encrypted!(Encrypted32, 32);
+encrypted!(EncryptedEmpty, 0);
+encrypted!(EncryptedTimestamp, 12);
+encrypted!(EncryptedPublicKey, 32);
 
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
@@ -241,28 +254,30 @@ impl EncryptedCookie {
     }
 }
 
-#[derive(Pod, Zeroable, Clone, Copy, Default)]
-#[repr(C)]
-pub(crate) struct LEU32(u32);
+pub type Mac = [u8; 16];
 
-impl LEU32 {
-    pub(crate) fn get(self) -> u32 {
-        u32::from_le(self.0)
-    }
-    pub(crate) fn new(n: u32) -> Self {
-        Self(n.to_le())
-    }
+pub fn mac1_key(spk: &PublicKey) -> Key {
+    hash([&LABEL_MAC1, spk.as_bytes()])
+}
+pub fn mac2_key(spk: &PublicKey) -> Key {
+    hash([&LABEL_COOKIE, spk.as_bytes()])
 }
 
-#[derive(Pod, Zeroable, Clone, Copy, Default)]
-#[repr(C)]
-pub(crate) struct LEU64(u64);
+#[cfg(test)]
+mod tests {
+    use blake2::Digest;
 
-impl LEU64 {
-    pub(crate) fn get(self) -> u64 {
-        u64::from_le(self.0)
-    }
-    pub(crate) fn new(n: u64) -> Self {
-        Self(n.to_le())
+    #[test]
+    fn construction_identifier() {
+        let c = blake2::Blake2s256::default()
+            .chain_update(b"Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s")
+            .finalize();
+        let h = blake2::Blake2s256::default()
+            .chain_update(c)
+            .chain_update(b"WireGuard v1 zx2c4 Jason@zx2c4.com")
+            .finalize();
+
+        assert_eq!(&*c, &super::CONSTRUCTION_HASH);
+        assert_eq!(&*h, &super::IDENTIFIER_HASH);
     }
 }
