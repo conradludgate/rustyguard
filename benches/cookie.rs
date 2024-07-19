@@ -28,21 +28,6 @@ pub(crate) struct EncryptedCookie {
 }
 
 impl EncryptedCookie {
-    // pub(crate) fn decrypt_cookie(
-    //     &mut self,
-    //     key: &Key,
-    //     nonce: &[u8; 24],
-    //     aad: &[u8],
-    // ) -> Result<&mut [u8; 16], crate::Error> {
-    //     use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
-
-    //     XChaCha20Poly1305::new(key)
-    //         .decrypt_in_place_detached(nonce.into(), aad, &mut self.msg, (&self.tag).into())
-    //         .map_err(|_| crate::Error::Unspecified)?;
-
-    //     Ok(&mut self.msg)
-    // }
-
     pub(crate) fn encrypt_cookie(
         mut cookie: [u8; 16],
         key: &Key,

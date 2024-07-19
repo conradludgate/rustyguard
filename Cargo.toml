@@ -4,18 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# crypto
 blake2s_simd = { version = "1", default-features = false }
-# blake2 = { version = "0.10", default-features = false }
-bytemuck = { version = "1", features = ["derive"] }
 chacha20poly1305 = { version = "0.10", default-features = false }
-hashbrown = { version = "0.14", default-features = false }
 hmac = "0.12"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+
+# crypto adjacent
+zeroize = "1.8"
+subtle = { version = "2.6", default-features = false }
+
+# other helpful things
+bytemuck = { version = "1", features = ["derive"] }
+hashbrown = { version = "0.14", default-features = false }
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 rustc-hash = { version = "2", default-features = false }
-subtle = { version = "2.6", default-features = false }
 tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
-zeroize = "1.8"
 
 [dev-dependencies]
 divan = "0.1.14"
@@ -28,10 +32,12 @@ clap = { version = "4", features = ["derive"] }
 packet = "0.1"
 
 # tun example
-tun = { version = "0.6", features = ["async"], git = "https://github.com/conradludgate/rust-tun" }
+tun = { version = "0.6", features = [
+    "async",
+], git = "https://github.com/conradludgate/rust-tun" }
 tokio = { version = "1", features = ["full"] }
 knuffel = { version = "3.2.0" }
-miette = { version="5.10", features=["fancy"] }
+miette = { version = "5.10", features = ["fancy"] }
 ipnet = { version = "2.9" }
 iptrie = "0.8"
 

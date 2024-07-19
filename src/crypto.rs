@@ -301,30 +301,35 @@ pub type Mac = [u8; 16];
 pub fn mac1_key(spk: &PublicKey) -> Key {
     hash([&LABEL_MAC1, spk.as_bytes()]).into()
 }
-pub fn mac2_key(spk: &PublicKey) -> Key {
+pub fn cookie_key(spk: &PublicKey) -> Key {
     hash([&LABEL_COOKIE, spk.as_bytes()]).into()
 }
 
-#[derive(Default, Zeroize)]
+#[derive(ZeroizeOnDrop)]
 pub struct EncryptionKey {
-    key: chacha20poly1305::Key,
+    key: chacha20poly1305::ChaCha20Poly1305,
     pub(crate) counter: u64,
 }
 
 impl EncryptionKey {
     pub(crate) fn new(key: chacha20poly1305::Key) -> Self {
-        Self { key, counter: 0 }
+        use chacha20poly1305::KeyInit;
+        Self {
+            key: chacha20poly1305::ChaCha20Poly1305::new(&key),
+            counter: 0,
+        }
     }
 
     pub(crate) fn encrypt(&mut self, payload: &mut [u8]) -> Tag {
-        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce};
+        use chacha20poly1305::{AeadInPlace, Nonce};
         let n = self.counter;
         self.counter += 1;
 
         let mut nonce = Nonce::default();
         nonce[4..12].copy_from_slice(&n.to_le_bytes());
 
-        let tag = ChaCha20Poly1305::new(&self.key)
+        let tag = self
+            .key
             .encrypt_in_place_detached(&nonce, &[], payload)
             .expect("message to large to encrypt");
 
@@ -332,13 +337,16 @@ impl EncryptionKey {
     }
 }
 
-#[derive(Default, Zeroize)]
+#[derive(ZeroizeOnDrop)]
 pub struct DecryptionKey {
-    key: chacha20poly1305::Key,
+    key: chacha20poly1305::ChaCha20Poly1305,
 }
 impl DecryptionKey {
     pub(crate) fn new(key: chacha20poly1305::Key) -> Self {
-        Self { key }
+        use chacha20poly1305::KeyInit;
+        Self {
+            key: chacha20poly1305::ChaCha20Poly1305::new(&key),
+        }
     }
 
     pub(crate) fn decrypt(
@@ -347,12 +355,12 @@ impl DecryptionKey {
         payload: &mut [u8],
         tag: Tag,
     ) -> Result<(), Error> {
-        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce};
+        use chacha20poly1305::{AeadInPlace, Nonce};
 
         let mut nonce = Nonce::default();
         nonce[4..12].copy_from_slice(&counter.to_le_bytes());
 
-        ChaCha20Poly1305::new(&self.key)
+        self.key
             .decrypt_in_place_detached(
                 &nonce,
                 &[],

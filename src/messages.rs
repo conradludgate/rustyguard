@@ -135,7 +135,7 @@ pub(crate) trait HasMac: Pod {
                 state.rng.fill_bytes(&mut nonce);
                 let cookie = EncryptedCookie::encrypt_cookie(
                     cookie,
-                    &state.config.mac2_key,
+                    &state.config.cookie_key,
                     &nonce,
                     this.get_mac1(),
                 );
@@ -262,6 +262,7 @@ impl HandshakeInit {
         // payload:
         let timestamp = EncryptedTimestamp::encrypt_and_hash(ph.sent.to_bytes(), hs, &k);
 
+        // build the message and protect with the MACs
         let mut msg = Self {
             _type: LEU32::new(MSG_FIRST),
             sender: LEU32::new(sender),
@@ -349,6 +350,7 @@ impl HandshakeResp {
         // payload:
         let empty = EncryptedEmpty::encrypt_and_hash([], hs, &k);
 
+        // build the message and protect with the MACs
         let mut msg = HandshakeResp {
             _type: LEU32::new(MSG_SECOND),
             sender: LEU32::new(sender),
