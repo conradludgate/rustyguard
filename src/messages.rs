@@ -9,7 +9,8 @@ use crate::{
     crypto::{
         Cookie, EncryptedCookie, EncryptedEmpty, EncryptedPublicKey, EncryptedTimestamp,
         HandshakeState, Mac,
-    }, Config, Error, Peer, PeerHandshake, Sessions
+    },
+    Config, Error, Peer, Sessions,
 };
 
 impl AsRef<[u8]> for DataHeader {
@@ -117,7 +118,7 @@ pub(crate) trait HasMac: Pod {
         this.verify_mac1(&state.config)?;
         if state.overloaded() {
             if let Err(cookie) = this.verify_mac2(state, socket) {
-                let mut nonce = chacha20poly1305::XNonce::default();
+                let mut nonce = [0u8; 24];
                 state.rng.fill_bytes(&mut nonce);
                 let cookie = EncryptedCookie::encrypt_cookie(
                     cookie,
@@ -129,7 +130,7 @@ pub(crate) trait HasMac: Pod {
                 let msg = CookieMessage {
                     _type: LEU32::new(MSG_COOKIE),
                     receiver: this.sender(),
-                    nonce: nonce.into(),
+                    nonce,
                     cookie,
                 };
                 return Ok(ControlFlow::Break(msg));
@@ -201,7 +202,12 @@ mac_protected!(HandshakeInit, MSG_FIRST);
 mac_protected!(HandshakeResp, MSG_SECOND);
 
 impl HandshakeInit {
-    pub(crate) fn encrypt_for(ssk_i: &StaticSecret, spk_i: &PublicKey, peer: &mut Peer, sender: u32) -> Self {
+    pub(crate) fn encrypt_for(
+        ssk_i: &StaticSecret,
+        spk_i: &PublicKey,
+        peer: &mut Peer,
+        sender: u32,
+    ) -> Self {
         let ph = &mut peer.handshake;
         let hs = &mut ph.state;
 
@@ -257,5 +263,79 @@ impl HandshakeInit {
             spk_i,
             timestamp,
         })
+    }
+}
+
+impl HandshakeResp {
+    pub(crate) fn encrypt_for(
+        hs: &mut HandshakeState,
+        data: &HandshakeInitData,
+        esk_r: &StaticSecret,
+        peer: &mut Peer,
+        sender: u32,
+    ) -> Self {
+        let epk_r = PublicKey::from(esk_r);
+        hs.mix_chain(epk_r.as_bytes());
+        hs.mix_hash(epk_r.as_bytes());
+        hs.mix_dh(esk_r, &data.epk_i);
+        hs.mix_dh(esk_r, &data.spk_i);
+        let q = peer.preshared_key;
+        let k = hs.mix_key_and_hash(&q);
+        let empty = EncryptedEmpty::encrypt_and_hash([], hs, &k);
+
+        let mut msg = HandshakeResp {
+            _type: LEU32::new(MSG_SECOND),
+            sender: LEU32::new(sender),
+            receiver: LEU32::new(data.sender),
+            ephemeral_key: epk_r.to_bytes(),
+            empty,
+            mac1: [0; 16],
+            mac2: [0; 16],
+        };
+        msg.mac1 = msg.compute_mac1(&peer.mac1_key);
+        peer.last_sent_mac1 = msg.mac1;
+        if let Some(cookie) = peer.cookie.as_ref() {
+            msg.mac2 = msg.compute_mac2(cookie);
+        }
+
+        msg
+    }
+
+    pub(crate) fn decrypt(
+        &mut self,
+        peer: &mut Peer,
+        private_key: &StaticSecret,
+    ) -> Result<(), Error> {
+        let hs = &mut peer.handshake.state;
+        let epk_r = PublicKey::from(self.ephemeral_key);
+        hs.mix_chain(epk_r.as_bytes());
+        hs.mix_hash(epk_r.as_bytes());
+        hs.mix_dh(&peer.handshake.esk_i, &epk_r);
+        hs.mix_dh(private_key, &epk_r);
+        let q = &peer.preshared_key;
+        let k = hs.mix_key_and_hash(q);
+        self.empty.decrypt_and_hash(hs, &k)?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CookieMessage, DataHeader, HandshakeInit, HandshakeResp};
+
+    #[test]
+    fn test_size_align() {
+        assert_eq!(core::mem::size_of::<HandshakeInit>(), 148);
+        assert_eq!(core::mem::align_of::<HandshakeInit>(), 4);
+
+        assert_eq!(core::mem::size_of::<HandshakeResp>(), 92);
+        assert_eq!(core::mem::align_of::<HandshakeResp>(), 4);
+
+        assert_eq!(core::mem::size_of::<CookieMessage>(), 64);
+        assert_eq!(core::mem::align_of::<CookieMessage>(), 4);
+
+        assert_eq!(core::mem::size_of::<DataHeader>(), 16);
+        assert_eq!(core::mem::align_of::<DataHeader>(), 8);
     }
 }

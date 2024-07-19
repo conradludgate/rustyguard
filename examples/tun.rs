@@ -1,12 +1,11 @@
 use base64ct::{Base64, Encoding};
 use rand::rngs::OsRng;
-use rustyguard::{Config, DataHeader, Message, Peer, Sessions};
+use rustyguard::{Config, DataHeader, Message, Peer, PublicKey, Sessions, StaticSecret};
 use tai64::Tai64N;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadBuf},
     net::UdpSocket,
 };
-use x25519_dalek::{PublicKey, StaticSecret};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {

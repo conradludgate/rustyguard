@@ -7,9 +7,8 @@ use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
 use rand::rngs::OsRng;
-use rustyguard::{Config, Message, Peer, Sessions};
+use rustyguard::{Config, Message, Peer, PublicKey, Sessions, StaticSecret};
 use tai64::Tai64N;
-use x25519_dalek::{PublicKey, StaticSecret};
 
 /// 16-byte aligned packet of 2048 bytes.
 /// MTU is assumed to be in the range of 1500 or so, so 2048 should be sufficient.

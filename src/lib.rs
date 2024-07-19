@@ -12,24 +12,19 @@ use core::time::Duration;
 use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 
-use blake2::digest::generic_array::GenericArray;
 use bytemuck::{Pod, Zeroable};
-use chacha20poly1305::Key;
-use chacha20poly1305::KeyInit;
-pub use crypto::Tag;
-use crypto::{mac, mac1_key, mac2_key, Cookie, EncryptedEmpty, HandshakeState, Mac};
-use hashbrown::HashMap;
-use hashbrown::HashTable;
+use crypto::{
+    mac, mac1_key, mac2_key, Cookie, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac, Tag,
+};
+use hashbrown::{HashMap, HashTable};
 use messages::{
     CookieMessage, HandshakeInit, HandshakeResp, HasMac, LEU32, LEU64, MSG_COOKIE, MSG_DATA,
     MSG_FIRST, MSG_SECOND,
 };
-use rand::rngs::StdRng;
-use rand::CryptoRng;
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use rustc_hash::FxBuildHasher;
 use tai64::{Tai64, Tai64N};
-use x25519_dalek::{PublicKey, StaticSecret};
+pub use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 mod crypto;
@@ -133,12 +128,8 @@ struct PeerCipherState {
     sent: Tai64N,
     /// who will the outgoing messages be received by
     receiver: u32,
-    /// key to encrypt the outgoing messages
-    encrypt: chacha20poly1305::Key,
-    /// counter for newly encrypted messages
-    nonce: u64,
-    /// key to decrypt incoming messages
-    decrypt: chacha20poly1305::Key,
+    encrypt: EncryptionKey,
+    decrypt: DecryptionKey,
 }
 
 impl Peer {
@@ -162,7 +153,6 @@ impl Peer {
                 sent: Tai64N(Tai64(0), 0),
                 receiver: Default::default(),
                 encrypt: Default::default(),
-                nonce: Default::default(),
                 decrypt: Default::default(),
             },
             last_sent_mac1: [0; 16],
@@ -170,8 +160,6 @@ impl Peer {
     }
 
     fn encrypt_message(&mut self, payload: &mut [u8], now: Tai64N) -> Option<(DataHeader, Tag)> {
-        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce};
-
         let session = &mut self.ciphers;
         if session.sent.0 .0 == 0 {
             return None;
@@ -179,19 +167,12 @@ impl Peer {
         if session.sent + REJECT_AFTER_TIME < now {
             return None;
         }
-        if session.nonce >= REJECT_AFTER_MESSAGES {
+        if session.encrypt.counter >= REJECT_AFTER_MESSAGES {
             return None;
         }
 
-        let n = session.nonce;
-        session.nonce += 1;
-
-        let mut nonce = Nonce::default();
-        nonce[4..12].copy_from_slice(&n.to_le_bytes());
-
-        let tag = ChaCha20Poly1305::new(&session.encrypt)
-            .encrypt_in_place_detached(&nonce, &[], payload)
-            .expect("message to large to encrypt");
+        let n = session.encrypt.counter;
+        let tag = session.encrypt.encrypt(payload);
 
         session.sent = now;
         let header = DataHeader {
@@ -200,7 +181,7 @@ impl Peer {
             counter: LEU64::new(n),
         };
 
-        Some((header, Tag::from_tag(tag)))
+        Some((header, tag))
     }
 }
 
@@ -258,7 +239,7 @@ enum SessionType {
 
 impl Sessions {
     pub fn new(config: Config, now: Tai64N, rng: &mut (impl CryptoRng + RngCore)) -> Self {
-        let mut random_secret = GenericArray::default();
+        let mut random_secret = Key::default();
         rng.fill_bytes(&mut random_secret[..]);
 
         let mut seed = <StdRng as rand::SeedableRng>::Seed::default();
@@ -306,7 +287,7 @@ impl Sessions {
                     if peer.handshake.sent + REKEY_TIMEOUT < self.now
                         && self.now < peer.handshake.started + REKEY_ATTEMPT_TIME
                         && (peer.ciphers.started + REKEY_AFTER_TIME < self.now
-                            || peer.ciphers.nonce >= REKEY_AFTER_MESSAGES)
+                            || peer.ciphers.encrypt.counter >= REKEY_AFTER_MESSAGES)
                     {
                         return Some(MaintenanceMsg {
                             socket: peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before"),
@@ -403,6 +384,25 @@ struct Keepalive {
     tag: crypto::Tag,
 }
 
+macro_rules! allocate_session {
+    ($state:expr) => {{
+        let mut session_id = $state.rng.gen();
+        loop {
+            use hashbrown::hash_map::Entry;
+            match $state.peers_by_session.entry(session_id) {
+                Entry::Occupied(_) => session_id = $state.rng.gen(),
+                Entry::Vacant(v) => break v,
+            }
+        }
+    }};
+}
+
+fn write_msg<'b, T: Pod>(buf: &'b mut [u8], t: &T) -> &'b mut [u8] {
+    let resp_msg = &mut buf[..core::mem::size_of::<T>()];
+    resp_msg.copy_from_slice(bytemuck::bytes_of(t));
+    resp_msg
+}
+
 impl Sessions {
     fn overloaded(&self) -> bool {
         false
@@ -430,7 +430,7 @@ impl Sessions {
         };
         match peer.encrypt_message(payload, self.now) {
             Some((header, tag)) => {
-                if peer.ciphers.nonce >= REKEY_AFTER_MESSAGES {
+                if peer.ciphers.encrypt.counter >= REKEY_AFTER_MESSAGES {
                     self.timers.push(TimerEntry {
                         time: self.now,
                         kind: TimerEntryType::RekeyAttempt { peer_idx },
@@ -490,53 +490,49 @@ impl Sessions {
         msg: &'m mut [u8],
     ) -> Result<&'m mut [u8], Error> {
         let init_msg = match HandshakeInit::verify(msg, self, socket)? {
-            ControlFlow::Break(cookie) => {
-                // cookie message is always smaller than the initial message
-                let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
-                cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                return Ok(cookie_msg);
-            }
+            // cookie message is always smaller than the initial message
+            ControlFlow::Break(cookie) => return Ok(write_msg(msg, &cookie)),
             ControlFlow::Continue(msg) => msg,
         };
 
         let mut hs = HandshakeState::default();
-        let (peer_idx, mut response) = init_msg.process(&mut hs, self)?;
+
+        let data = init_msg.decrypt(&mut hs, &self.config)?;
+
+        // check if we know this peer
+        let peer_idx = self
+            .config
+            .get_peer_idx(&data.spk_i)
+            .ok_or(Error::Rejected)?;
         let peer = &mut self.config.peers[peer_idx];
-        peer.endpoint = Some(socket);
 
-        // we are the receiver for now
-        let mut receiver = self.rng.gen();
-        let vacant = loop {
-            use hashbrown::hash_map::Entry;
-            match self.peers_by_session.entry(receiver) {
-                Entry::Occupied(_) => receiver = self.rng.gen(),
-                Entry::Vacant(v) => break v,
-            }
-        };
+        // check for potential replay attack
+        if data.timestamp < peer.latest_ts {
+            return Err(Error::Rejected);
+        }
+        peer.latest_ts = data.timestamp;
 
+        // start a new session
+        let vacant = allocate_session!(self);
+
+        // complete handshake
+        let esk_r = StaticSecret::random_from_rng(&mut self.rng);
+        let response = HandshakeResp::encrypt_for(&mut hs, &data, &esk_r, peer, *vacant.key());
+
+        // generate the encryption keys
         let (initiator, responder) = hs.split();
         peer.ciphers = PeerCipherState {
             started: self.now,
             sent: self.now,
             receiver: init_msg.sender.get(),
-            nonce: 0,
-            encrypt: responder,
-            decrypt: initiator,
+            encrypt: EncryptionKey::new(responder),
+            decrypt: DecryptionKey::new(initiator),
         };
 
         vacant.insert(SessionType::Cipher(peer_idx));
 
-        response.sender = LEU32::new(receiver);
-        response.mac1 = response.compute_mac1(&peer.mac1_key);
-        peer.last_sent_mac1 = response.mac1;
-        if let Some(cookie) = peer.cookie.as_ref() {
-            response.mac2 = response.compute_mac2(cookie);
-        }
-
         // response message is always smaller than the initial message
-        let resp_msg = &mut msg[..core::mem::size_of::<HandshakeResp>()];
-        resp_msg.copy_from_slice(bytemuck::bytes_of(&response));
-        Ok(resp_msg)
+        Ok(write_msg(msg, &response))
     }
 
     #[inline(never)]
@@ -546,12 +542,8 @@ impl Sessions {
         msg: &'m mut [u8],
     ) -> Result<Message<'m>, Error> {
         let resp_msg = match HandshakeResp::verify(msg, self, socket)? {
-            ControlFlow::Break(cookie) => {
-                // cookie message is always smaller than the response message
-                let cookie_msg = &mut msg[..core::mem::size_of::<CookieMessage>()];
-                cookie_msg.copy_from_slice(bytemuck::bytes_of(&cookie));
-                return Ok(Message::Write(cookie_msg));
-            }
+            // cookie message is always smaller than the initial message
+            ControlFlow::Break(cookie) => return Ok(Message::Write(write_msg(msg, &cookie))),
             ControlFlow::Continue(msg) => msg,
         };
 
@@ -569,7 +561,7 @@ impl Sessions {
         };
         let peer = &mut self.config.peers[peer_idx];
 
-        resp_msg.process(peer, &self.config.private_key)?;
+        resp_msg.decrypt(peer, &self.config.private_key)?;
         peer.endpoint = Some(socket);
 
         let (initiator, responder) = peer.handshake.state.split();
@@ -580,9 +572,8 @@ impl Sessions {
             started: self.now,
             sent: self.now,
             receiver: resp_msg.sender.get(),
-            nonce: 0,
-            encrypt: initiator,
-            decrypt: responder,
+            encrypt: EncryptionKey::new(initiator),
+            decrypt: DecryptionKey::new(responder),
         };
 
         // schedule re-key as we were the initiator
@@ -607,7 +598,7 @@ impl Sessions {
 
         let cookie = *cookie_msg.cookie.decrypt_cookie(
             &peer.mac2_key,
-            (&cookie_msg.nonce).into(),
+            &cookie_msg.nonce,
             &peer.last_sent_mac1,
         )?;
 
@@ -622,7 +613,6 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<(usize, &'m mut [u8]), Error> {
-        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, Nonce, Tag};
         const HEADER_LEN: usize = core::mem::size_of::<DataHeader>();
 
         if msg.as_ptr().align_offset(16) != 0 {
@@ -660,12 +650,9 @@ impl Sessions {
             });
         }
 
-        let mut nonce = Nonce::default();
-        nonce[4..12].copy_from_slice(&header.counter.get().to_le_bytes());
-
-        ChaCha20Poly1305::new(&session.decrypt)
-            .decrypt_in_place_detached(&nonce, &[], payload, Tag::from_slice(tag))
-            .map_err(|_| Error::Rejected)?;
+        session
+            .decrypt
+            .decrypt(header.counter.get(), payload, Tag::from_slice(tag))?;
 
         Ok((peer_idx, payload))
     }
@@ -676,16 +663,9 @@ impl HandshakeInit {
     fn new(state: &mut Sessions, peer_idx: usize) -> Self {
         let peer = &mut state.config.peers[peer_idx];
 
-        // we are the receiver for now
-        let mut sender = state.rng.gen();
-        let vacant = loop {
-            use hashbrown::hash_map::Entry;
-            match state.peers_by_session.entry(sender) {
-                Entry::Occupied(_) => sender = state.rng.gen(),
-                Entry::Vacant(v) => break v,
-            }
-        };
-        // peer.session = Some(sender);
+        // start a new session
+        let vacant = allocate_session!(state);
+        let sender = *vacant.key();
 
         vacant.insert(SessionType::Handshake(peer_idx));
         peer.handshake = PeerHandshake {
@@ -708,66 +688,6 @@ impl HandshakeInit {
         });
 
         msg
-    }
-
-    fn process(
-        &mut self,
-        hs: &mut HandshakeState,
-        state: &mut Sessions,
-    ) -> Result<(usize, HandshakeResp), Error> {
-        let data = self.decrypt(hs, &state.config)?;
-
-        // check if we know this peer
-        let peer_idx = state
-            .config
-            .get_peer_idx(&data.spk_i)
-            .ok_or(Error::Rejected)?;
-        let peer = &mut state.config.peers[peer_idx];
-
-        // check for potential replay attack
-        if data.timestamp < peer.latest_ts {
-            return Err(Error::Rejected);
-        }
-
-        peer.latest_ts = data.timestamp;
-
-        let esk_r = StaticSecret::random_from_rng(&mut state.rng);
-        let epk_r = PublicKey::from(&esk_r);
-        hs.mix_chain(epk_r.as_bytes());
-        hs.mix_hash(epk_r.as_bytes());
-        hs.mix_dh(&esk_r, &data.epk_i);
-        hs.mix_dh(&esk_r, &data.spk_i);
-        let q = peer.preshared_key;
-        let k = hs.mix_key2(&q);
-        let empty = EncryptedEmpty::encrypt_and_hash([], hs, &k);
-
-        let second = HandshakeResp {
-            _type: LEU32::new(MSG_SECOND),
-            sender: LEU32::new(0),
-            receiver: self.sender,
-            ephemeral_key: epk_r.to_bytes(),
-            empty,
-            mac1: [0; 16],
-            mac2: [0; 16],
-        };
-
-        Ok((peer_idx, second))
-    }
-}
-
-impl HandshakeResp {
-    fn process(&mut self, peer: &mut Peer, private_key: &StaticSecret) -> Result<(), Error> {
-        let hs = &mut peer.handshake.state;
-        let epk_r = PublicKey::from(self.ephemeral_key);
-        hs.mix_chain(epk_r.as_bytes());
-        hs.mix_hash(epk_r.as_bytes());
-        hs.mix_dh(&peer.handshake.esk_i, &epk_r);
-        hs.mix_dh(private_key, &epk_r);
-        let q = &peer.preshared_key;
-        let k = hs.mix_key2(q);
-        self.empty.decrypt_and_hash(hs, &k)?;
-
-        Ok(())
     }
 }
 
@@ -798,7 +718,7 @@ mod tests {
         assert_eq!(core::mem::size_of::<DataHeader>(), 16);
         assert_eq!(core::mem::align_of::<DataHeader>(), 8);
 
-        assert_eq!(core::mem::size_of::<Peer>(), 384);
+        assert_eq!(core::mem::size_of::<Peer>(), 448);
     }
 
     fn session_with_peer(

@@ -4,14 +4,14 @@ use blake2::Blake2s256;
 use bytemuck::bytes_of;
 use bytemuck::{Pod, TransparentWrapper, Zeroable};
 use chacha20poly1305::consts::U16;
-use chacha20poly1305::Key;
-use chacha20poly1305::Nonce;
-use chacha20poly1305::XNonce;
+pub use chacha20poly1305::Key;
 use hmac::SimpleHmac;
 use x25519_dalek::PublicKey;
 use x25519_dalek::StaticSecret;
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
+
+use crate::Error;
 
 /// Construction: The UTF-8 string literal “Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s”, 37 bytes of output.
 /// Identifier: The UTF-8 string literal “WireGuard v1 zx2c4 Jason@zx2c4.com”, 34 bytes of output.
@@ -28,8 +28,8 @@ const IDENTIFIER_HASH: [u8; 32] = [
 const LABEL_MAC1: [u8; 8] = *b"mac1----";
 const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
-pub(crate) fn nonce(counter: u64) -> Nonce {
-    let mut n = Nonce::default();
+pub(crate) fn nonce(counter: u64) -> chacha20poly1305::Nonce {
+    let mut n = chacha20poly1305::Nonce::default();
     n[4..].copy_from_slice(&u64::to_le_bytes(counter));
     n
 }
@@ -110,13 +110,16 @@ impl HandshakeState {
     }
 
     pub fn mix_key_dh(&mut self, sk: &StaticSecret, pk: &PublicKey) -> Key {
-        let prk = sk.diffie_hellman(pk);
-        let [c, k] = hkdf(&self.chain, [prk.as_bytes()]);
+        self.mix_key(sk.diffie_hellman(pk).as_bytes())
+    }
+
+    fn mix_key(&mut self, b: &[u8]) -> Key {
+        let [c, k] = hkdf(&self.chain, [b]);
         self.chain = c;
         k
     }
 
-    pub fn mix_key2(&mut self, b: &[u8]) -> Key {
+    pub fn mix_key_and_hash(&mut self, b: &[u8]) -> Key {
         let [c, t, k] = hkdf(&self.chain, [b]);
         self.chain = c;
         self.mix_hash(&t);
@@ -150,10 +153,14 @@ impl core::ops::Deref for Tag {
 }
 
 impl Tag {
+    pub(crate) fn from_slice(tag: &[u8; 16]) -> Self {
+        Self(*tag)
+    }
+
     fn as_tag(&self) -> &chacha20poly1305::Tag {
         (&self.0).into()
     }
-    pub(crate) fn from_tag(tag: chacha20poly1305::Tag) -> Self {
+    fn from_tag(tag: chacha20poly1305::Tag) -> Self {
         Self(tag.into())
     }
 }
@@ -223,13 +230,13 @@ impl EncryptedCookie {
     pub(crate) fn decrypt_cookie(
         &mut self,
         key: &Key,
-        nonce: &XNonce,
+        nonce: &[u8; 24],
         aad: &[u8],
     ) -> Result<&mut Cookie, crate::Error> {
         use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
 
         XChaCha20Poly1305::new(key)
-            .decrypt_in_place_detached(nonce, aad, &mut self.msg.0, self.tag.as_tag())
+            .decrypt_in_place_detached(nonce.into(), aad, &mut self.msg.0, self.tag.as_tag())
             .map_err(|_| crate::Error::Unspecified)?;
 
         Ok(&mut self.msg)
@@ -238,13 +245,13 @@ impl EncryptedCookie {
     pub(crate) fn encrypt_cookie(
         mut cookie: Cookie,
         key: &Key,
-        nonce: &XNonce,
+        nonce: &[u8; 24],
         aad: &[u8],
     ) -> Self {
         use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
 
         let tag = XChaCha20Poly1305::new(key)
-            .encrypt_in_place_detached(nonce, aad, &mut cookie.0)
+            .encrypt_in_place_detached(nonce.into(), aad, &mut cookie.0)
             .expect("cookie message should not be larger than max message size");
 
         Self {
@@ -261,6 +268,66 @@ pub fn mac1_key(spk: &PublicKey) -> Key {
 }
 pub fn mac2_key(spk: &PublicKey) -> Key {
     hash([&LABEL_COOKIE, spk.as_bytes()])
+}
+
+#[derive(Default, Zeroize)]
+pub struct EncryptionKey {
+    key: chacha20poly1305::Key,
+    pub(crate) counter: u64,
+}
+
+impl EncryptionKey {
+    pub(crate) fn new(key: chacha20poly1305::Key) -> Self {
+        Self { key, counter: 0 }
+    }
+
+    pub(crate) fn encrypt(&mut self, payload: &mut [u8]) -> Tag {
+        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce};
+        let n = self.counter;
+        self.counter += 1;
+
+        let mut nonce = Nonce::default();
+        nonce[4..12].copy_from_slice(&n.to_le_bytes());
+
+        let tag = ChaCha20Poly1305::new(&self.key)
+            .encrypt_in_place_detached(&nonce, &[], payload)
+            .expect("message to large to encrypt");
+
+        Tag::from_tag(tag)
+    }
+}
+
+#[derive(Default, Zeroize)]
+pub struct DecryptionKey {
+    key: chacha20poly1305::Key,
+}
+impl DecryptionKey {
+    pub(crate) fn new(key: chacha20poly1305::Key) -> Self {
+        Self { key }
+    }
+
+    pub(crate) fn decrypt(
+        &mut self,
+        counter: u64,
+        payload: &mut [u8],
+        tag: Tag,
+    ) -> Result<(), Error> {
+        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce};
+
+        let mut nonce = Nonce::default();
+        nonce[4..12].copy_from_slice(&counter.to_le_bytes());
+
+        ChaCha20Poly1305::new(&self.key)
+            .decrypt_in_place_detached(
+                &nonce,
+                &[],
+                payload,
+                chacha20poly1305::Tag::from_slice(&tag.0),
+            )
+            .map_err(|_| Error::Rejected)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
