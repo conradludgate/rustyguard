@@ -1,7 +1,7 @@
 use core::net::SocketAddr;
 
 use chacha20poly1305::Key;
-use divan::black_box;
+use divan::{black_box, Bencher};
 use rand::{thread_rng, RngCore};
 use tai64::Tai64N;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -27,19 +27,33 @@ fn session_with_peer(
 struct AlignedPacket([u8; 256]);
 
 #[divan::bench(sample_count = 100, sample_size = 100)]
-fn roundtrip() {
+fn roundtrip(b: Bencher) {
     let server_addr: SocketAddr = "10.0.1.1:1234".parse().unwrap();
     let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
-    let ssk_i = StaticSecret::random_from_rng(thread_rng());
-    let ssk_r = StaticSecret::random_from_rng(thread_rng());
-    let spk_i = PublicKey::from(&ssk_i);
-    let spk_r = PublicKey::from(&ssk_r);
-    let mut psk = Key::default();
-    thread_rng().fill_bytes(&mut psk);
 
-    let mut sessions_i = session_with_peer(ssk_i, spk_r, psk, server_addr);
-    let mut sessions_r = session_with_peer(ssk_r, spk_i, psk, client_addr);
+    b.with_inputs(|| {
+        let ssk_i = StaticSecret::random_from_rng(thread_rng());
+        let ssk_r = StaticSecret::random_from_rng(thread_rng());
+        let spk_i = PublicKey::from(&ssk_i);
+        let spk_r = PublicKey::from(&ssk_r);
+        let mut psk = Key::default();
+        thread_rng().fill_bytes(&mut psk);
+        (
+            session_with_peer(ssk_i, spk_r, psk, server_addr),
+            session_with_peer(ssk_r, spk_i, psk, client_addr),
+        )
+    })
+    .bench_local_values(|(sessions_i, sessions_r)| {
+        roundtrip_impl(server_addr, client_addr, sessions_i, sessions_r)
+    })
+}
 
+fn roundtrip_impl(
+    server_addr: SocketAddr,
+    client_addr: SocketAddr,
+    mut sessions_i: Sessions,
+    mut sessions_r: Sessions,
+) {
     let mut buf = Box::new(AlignedPacket([0; 256]));
 
     let mut msg = black_box(*b"Hello, World!\0\0\0");
