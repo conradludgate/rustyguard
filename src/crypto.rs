@@ -1,9 +1,5 @@
-use blake2::digest::generic_array::GenericArray;
-use blake2::digest::{Digest, Output};
-use blake2::Blake2s256;
 use bytemuck::bytes_of;
 use bytemuck::{Pod, TransparentWrapper, Zeroable};
-use chacha20poly1305::consts::U16;
 pub use chacha20poly1305::Key;
 use hmac::SimpleHmac;
 use x25519_dalek::PublicKey;
@@ -34,39 +30,78 @@ pub(crate) fn nonce(counter: u64) -> chacha20poly1305::Nonce {
     n
 }
 
-pub(crate) fn hash<const M: usize>(msg: [&[u8]; M]) -> Output<Blake2s256> {
-    let mut digest = Blake2s256::default();
-    for msg in msg {
-        digest.update(msg);
-    }
-    digest.finalize()
-}
-
-pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> Mac {
-    use blake2::digest::Mac;
-    let mut mac = blake2::Blake2sMac::<U16>::new_from_slice(key).unwrap();
+pub(crate) fn hash<const M: usize>(msg: [&[u8]; M]) -> [u8; 32] {
+    let mut mac = blake2s_simd::Params::new().hash_length(32).to_state();
     for msg in msg {
         mac.update(msg);
     }
-    mac.finalize().into_bytes().into()
+    *mac.finalize().as_array()
 }
 
-fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Output<Blake2s256> {
+pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> Mac {
+    let mut mac = blake2s_simd::Params::new()
+        .hash_length(16)
+        .key(key)
+        .to_state();
+    for msg in msg {
+        mac.update(msg);
+    }
+    let mut hash = [0; 16];
+    hash.copy_from_slice(mac.finalize().as_bytes());
+    hash
+}
+
+fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
+    use hmac::digest::block_buffer::Eager;
+    use hmac::digest::core_api::{
+        Block, BlockSizeUser, Buffer, BufferKindUser, CoreWrapper, FixedOutputCore, UpdateCore,
+    };
+    use hmac::digest::{HashMarker, OutputSizeUser};
     use hmac::Mac;
-    let mut hmac = <SimpleHmac<Blake2s256> as Mac>::new_from_slice(key).unwrap();
+
+    struct Digest(blake2s_simd::State);
+
+    impl BlockSizeUser for Digest {
+        type BlockSize = hmac::digest::consts::U64;
+    }
+    impl BufferKindUser for Digest {
+        type BufferKind = Eager;
+    }
+    impl OutputSizeUser for Digest {
+        type OutputSize = hmac::digest::consts::U32;
+    }
+    impl HashMarker for Digest {}
+    impl UpdateCore for Digest {
+        fn update_blocks(&mut self, blocks: &[Block<Self>]) {
+            for block in blocks {
+                self.0.update(&block[..]);
+            }
+        }
+    }
+    impl Default for Digest {
+        fn default() -> Self {
+            Self(blake2s_simd::Params::new().hash_length(32).to_state())
+        }
+    }
+    impl FixedOutputCore for Digest {
+        #[inline]
+        fn finalize_fixed_core(&mut self, buffer: &mut Buffer<Self>, out: &mut Key) {
+            self.0.update(buffer.get_data());
+            out.copy_from_slice(self.0.finalize().as_bytes())
+        }
+    }
+
+    let mut hmac = <SimpleHmac<CoreWrapper<Digest>> as Mac>::new_from_slice(key).unwrap();
     for msg in msg {
         hmac.update(msg);
     }
     hmac.finalize().into_bytes()
 }
 
-pub(crate) fn hkdf<const N: usize, const M: usize>(
-    key: &Key,
-    msg: [&[u8]; M],
-) -> [Output<Blake2s256>; N] {
+pub(crate) fn hkdf<const N: usize, const M: usize>(key: &Key, msg: [&[u8]; M]) -> [Key; N] {
     assert!(N <= 255);
 
-    let mut output = [Output::<Blake2s256>::default(); N];
+    let mut output = [Key::default(); N];
 
     if N == 0 {
         return output;
@@ -76,7 +111,7 @@ pub(crate) fn hkdf<const N: usize, const M: usize>(
     let mut ti = hmac(&t0, [&[1]]);
     output[0] = ti;
     for i in 1..N as u8 {
-        ti = hmac(&t0, [&ti, &[i + 1]]);
+        ti = hmac(&t0, [&ti[..], &[i + 1]]);
         output[i as usize] = ti;
     }
 
@@ -85,14 +120,14 @@ pub(crate) fn hkdf<const N: usize, const M: usize>(
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct HandshakeState {
-    hash: Key,
+    hash: [u8; 32],
     chain: Key,
 }
 
 impl Default for HandshakeState {
     fn default() -> Self {
-        let chain = GenericArray::from(CONSTRUCTION_HASH);
-        let hash = GenericArray::from(IDENTIFIER_HASH);
+        let chain = Key::from(CONSTRUCTION_HASH);
+        let hash = IDENTIFIER_HASH;
         Self { chain, hash }
     }
 }
@@ -122,7 +157,7 @@ impl HandshakeState {
     pub fn mix_key_and_hash(&mut self, b: &[u8]) -> Key {
         let [c, t, k] = hkdf(&self.chain, [b]);
         self.chain = c;
-        self.mix_hash(&t);
+        self.mix_hash(&t[..]);
         k
     }
 
@@ -264,10 +299,10 @@ impl EncryptedCookie {
 pub type Mac = [u8; 16];
 
 pub fn mac1_key(spk: &PublicKey) -> Key {
-    hash([&LABEL_MAC1, spk.as_bytes()])
+    hash([&LABEL_MAC1, spk.as_bytes()]).into()
 }
 pub fn mac2_key(spk: &PublicKey) -> Key {
-    hash([&LABEL_COOKIE, spk.as_bytes()])
+    hash([&LABEL_COOKIE, spk.as_bytes()]).into()
 }
 
 #[derive(Default, Zeroize)]
@@ -332,19 +367,16 @@ impl DecryptionKey {
 
 #[cfg(test)]
 mod tests {
-    use blake2::Digest;
+    use blake2s_simd::blake2s;
 
     #[test]
     fn construction_identifier() {
-        let c = blake2::Blake2s256::default()
-            .chain_update(b"Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s")
-            .finalize();
-        let h = blake2::Blake2s256::default()
-            .chain_update(c)
-            .chain_update(b"WireGuard v1 zx2c4 Jason@zx2c4.com")
-            .finalize();
+        let c = *blake2s(b"Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s").as_array();
+        let mut c2 = c.to_vec();
+        c2.extend_from_slice(b"WireGuard v1 zx2c4 Jason@zx2c4.com");
+        let h = *blake2s(&c2).as_array();
 
-        assert_eq!(&*c, &super::CONSTRUCTION_HASH);
-        assert_eq!(&*h, &super::IDENTIFIER_HASH);
+        assert_eq!(&c, &super::CONSTRUCTION_HASH);
+        assert_eq!(&h, &super::IDENTIFIER_HASH);
     }
 }

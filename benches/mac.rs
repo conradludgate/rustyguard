@@ -25,10 +25,11 @@ fn verify_mac2() -> Choice {
 
 #[inline(never)]
 fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> [u8; 16] {
-    use blake2::digest::Mac;
-    let mut mac = blake2::Blake2sMac::<blake2::digest::consts::U16>::new_from_slice(key).unwrap();
+    let mut mac = blake2s_simd::Params::new().hash_length(16).key(key).to_state();
     for msg in msg {
         mac.update(msg);
     }
-    mac.finalize().into_bytes().into()
+    let mut hash = [0; 16];
+    hash.copy_from_slice(mac.finalize().as_bytes());
+    hash
 }

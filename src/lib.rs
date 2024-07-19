@@ -704,7 +704,6 @@ mod tests {
     use core::net::SocketAddr;
 
     use alloc::boxed::Box;
-    use blake2::digest::generic_array::GenericArray;
     use chacha20poly1305::Key;
     use rand::{rngs::OsRng, RngCore};
     use tai64::Tai64N;
@@ -751,7 +750,7 @@ mod tests {
         let ssk_r = StaticSecret::random_from_rng(OsRng);
         let spk_i = PublicKey::from(&ssk_i);
         let spk_r = PublicKey::from(&ssk_r);
-        let mut psk = GenericArray::default();
+        let mut psk = Key::default();
         OsRng.fill_bytes(&mut psk);
 
         let mut sessions_i = session_with_peer(ssk_i, spk_r, psk, server_addr);
