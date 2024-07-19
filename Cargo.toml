@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # crypto
-blake2s_simd = { version = "1", default-features = false }
+blake2 = { version = "0.10", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false }
 hmac = "0.12"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }

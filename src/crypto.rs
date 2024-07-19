@@ -31,67 +31,27 @@ pub(crate) fn nonce(counter: u64) -> chacha20poly1305::Nonce {
 }
 
 pub(crate) fn hash<const M: usize>(msg: [&[u8]; M]) -> [u8; 32] {
-    let mut mac = blake2s_simd::Params::new().hash_length(32).to_state();
+    use blake2::digest::Digest;
+    let mut mac = blake2::Blake2s256::default();
     for msg in msg {
         mac.update(msg);
     }
-    *mac.finalize().as_array()
+    mac.finalize().into()
 }
 
 pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> Mac {
-    let mut mac = blake2s_simd::Params::new()
-        .hash_length(16)
-        .key(key)
-        .to_state();
+    use blake2::digest::Mac;
+    let mut mac = blake2::Blake2sMac::<blake2::digest::consts::U16>::new_from_slice(key).unwrap();
     for msg in msg {
         mac.update(msg);
     }
-    let mut hash = [0; 16];
-    hash.copy_from_slice(mac.finalize().as_bytes());
-    hash
+    mac.finalize().into_bytes().into()
 }
 
 fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
-    use hmac::digest::block_buffer::Eager;
-    use hmac::digest::core_api::{
-        Block, BlockSizeUser, Buffer, BufferKindUser, CoreWrapper, FixedOutputCore, UpdateCore,
-    };
-    use hmac::digest::{HashMarker, OutputSizeUser};
     use hmac::Mac;
 
-    struct Digest(blake2s_simd::State);
-
-    impl BlockSizeUser for Digest {
-        type BlockSize = hmac::digest::consts::U64;
-    }
-    impl BufferKindUser for Digest {
-        type BufferKind = Eager;
-    }
-    impl OutputSizeUser for Digest {
-        type OutputSize = hmac::digest::consts::U32;
-    }
-    impl HashMarker for Digest {}
-    impl UpdateCore for Digest {
-        fn update_blocks(&mut self, blocks: &[Block<Self>]) {
-            for block in blocks {
-                self.0.update(&block[..]);
-            }
-        }
-    }
-    impl Default for Digest {
-        fn default() -> Self {
-            Self(blake2s_simd::Params::new().hash_length(32).to_state())
-        }
-    }
-    impl FixedOutputCore for Digest {
-        #[inline]
-        fn finalize_fixed_core(&mut self, buffer: &mut Buffer<Self>, out: &mut Key) {
-            self.0.update(buffer.get_data());
-            out.copy_from_slice(self.0.finalize().as_bytes())
-        }
-    }
-
-    let mut hmac = <SimpleHmac<CoreWrapper<Digest>> as Mac>::new_from_slice(key).unwrap();
+    let mut hmac = <SimpleHmac<blake2::Blake2s256> as Mac>::new_from_slice(key).unwrap();
     for msg in msg {
         hmac.update(msg);
     }
@@ -375,16 +335,19 @@ impl DecryptionKey {
 
 #[cfg(test)]
 mod tests {
-    use blake2s_simd::blake2s;
+    use blake2::Digest;
 
     #[test]
     fn construction_identifier() {
-        let c = *blake2s(b"Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s").as_array();
-        let mut c2 = c.to_vec();
-        c2.extend_from_slice(b"WireGuard v1 zx2c4 Jason@zx2c4.com");
-        let h = *blake2s(&c2).as_array();
+        let c = blake2::Blake2s256::default()
+            .chain_update(b"Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s")
+            .finalize();
+        let h = blake2::Blake2s256::default()
+            .chain_update(c)
+            .chain_update(b"WireGuard v1 zx2c4 Jason@zx2c4.com")
+            .finalize();
 
-        assert_eq!(&c, &super::CONSTRUCTION_HASH);
-        assert_eq!(&h, &super::IDENTIFIER_HASH);
+        assert_eq!(&*c, &super::CONSTRUCTION_HASH);
+        assert_eq!(&*h, &super::IDENTIFIER_HASH);
     }
 }
