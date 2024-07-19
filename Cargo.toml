@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "cookie"
 harness = false
+
+[[bench]]
+name = "roundtrip"
+harness = false
