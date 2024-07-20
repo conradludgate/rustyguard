@@ -6,7 +6,7 @@ use rand::{thread_rng, RngCore};
 use tai64::Tai64N;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use rustyguard::{Config, Peer, Sessions};
+use rustyguard::{Config, Peer, PeerId, Sessions};
 
 fn main() {
     divan::main()
@@ -17,10 +17,11 @@ fn session_with_peer(
     peer_public_key: PublicKey,
     preshared_key: Key,
     endpoint: SocketAddr,
-) -> Sessions {
+) -> (Sessions, PeerId) {
     let peer = Peer::new(peer_public_key, Some(preshared_key), Some(endpoint));
-    let config = Config::new(secret_key, [peer]);
-    Sessions::new(config, Tai64N::now(), &mut thread_rng())
+    let mut config = Config::new(secret_key);
+    let id = config.insert_peer(peer);
+    (Sessions::new(config, Tai64N::now(), &mut thread_rng()), id)
 }
 
 #[repr(align(16))]
@@ -39,27 +40,27 @@ fn roundtrip(b: Bencher) {
         let mut psk = Key::default();
         thread_rng().fill_bytes(&mut psk);
         (
+            Box::new(AlignedPacket([0; 256])),
             session_with_peer(ssk_i, spk_r, psk, server_addr),
             session_with_peer(ssk_r, spk_i, psk, client_addr),
         )
     })
-    .bench_local_values(|(sessions_i, sessions_r)| {
-        roundtrip_impl(server_addr, client_addr, sessions_i, sessions_r)
+    .bench_local_values(|(buf, sessions_i, sessions_r)| {
+        roundtrip_impl(buf, server_addr, client_addr, sessions_i, sessions_r)
     })
 }
 
 fn roundtrip_impl(
+    mut buf: Box<AlignedPacket>,
     server_addr: SocketAddr,
     client_addr: SocketAddr,
-    mut sessions_i: Sessions,
-    mut sessions_r: Sessions,
+    (mut sessions_i, peer_r): (Sessions, PeerId),
+    (mut sessions_r, peer_i): (Sessions, PeerId),
 ) {
-    let mut buf = Box::new(AlignedPacket([0; 256]));
-
     let mut msg = black_box(*b"Hello, World!\0\0\0");
 
     // try wrap the message - get back handshake message to send
-    let m = match sessions_i.send_message(0, &mut msg).unwrap() {
+    let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
         rustyguard::SendMessage::Maintenance(m) => m,
         rustyguard::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
     };
@@ -77,14 +78,14 @@ fn roundtrip_impl(
     // send the handshake response to the client
     {
         match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-            rustyguard::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, 0),
+            rustyguard::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, peer_i),
             _ => panic!("expecting noop"),
         };
     }
 
     // wrap the messasge and encode into buffer
     let data_msg = {
-        match sessions_i.send_message(0, &mut msg).unwrap() {
+        match sessions_i.send_message(peer_r, &mut msg).unwrap() {
             rustyguard::SendMessage::Maintenance(_msg) => panic!("session should be valid"),
             rustyguard::SendMessage::Data(_socket, header, tag) => {
                 // assert_eq!(socket, Some(server_addr));
@@ -101,7 +102,7 @@ fn roundtrip_impl(
     {
         match sessions_r.recv_message(client_addr, data_msg).unwrap() {
             rustyguard::Message::Read(peer_idx, data) => {
-                assert_eq!(peer_idx, 0);
+                assert_eq!(peer_idx, peer_i);
                 assert_eq!(data, b"Hello, World!\0\0\0")
             }
             _ => panic!("expecting read"),

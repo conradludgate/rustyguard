@@ -55,6 +55,20 @@ const REKEY_ATTEMPT_TIME: Duration = Duration::from_secs(90);
 const REKEY_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PeerId(u32);
+
+impl core::fmt::Debug for PeerId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "PeerId({:08X})", &self.0)
+    }
+}
+impl PeerId {
+    pub const fn sentinal() -> Self {
+        Self(u32::MAX)
+    }
+}
+
 pub struct Config {
     /// Our private key
     private_key: StaticSecret,
@@ -72,31 +86,33 @@ pub struct Config {
     /// safe as this table is immutable (read-only) thus no hash-tampering can take place.
     /// Since public-keys are assumed to be randomly distributed, we can be reasonably
     /// sure that the hash quality is good.
-    peers_by_pubkey: HashTable<usize>,
+    peers_by_pubkey: HashTable<PeerId>,
 
     /// List of peers that this wireguard server can talk to.
-    peers: Vec<Peer>,
+    peers: PeerList,
+}
+
+struct PeerList(Vec<Peer>);
+impl core::ops::Index<PeerId> for PeerList {
+    type Output = Peer;
+
+    fn index(&self, index: PeerId) -> &Self::Output {
+        &self.0[index.0 as usize]
+    }
+}
+impl core::ops::IndexMut<PeerId> for PeerList {
+    fn index_mut(&mut self, index: PeerId) -> &mut Self::Output {
+        &mut self.0[index.0 as usize]
+    }
+}
+impl PeerList {
+    fn get_mut(&mut self, index: PeerId) -> Option<&mut Peer> {
+        self.0.get_mut(index.0 as usize)
+    }
 }
 
 impl Config {
-    pub fn new(private_key: StaticSecret, peers: impl IntoIterator<Item = Peer>) -> Self {
-        let peers = peers.into_iter().collect::<Vec<_>>();
-
-        let mut map = HashTable::<usize>::default();
-        for (i, peer) in peers.iter().enumerate() {
-            use hashbrown::hash_table::Entry;
-            match map.entry(
-                FxBuildHasher.hash_one(peer.key),
-                |&i| peers[i].key == peer.key,
-                |&i| FxBuildHasher.hash_one(peers[i].key),
-            ) {
-                Entry::Occupied(_) => {}
-                Entry::Vacant(v) => {
-                    v.insert(i);
-                }
-            }
-        }
-
+    pub fn new(private_key: StaticSecret) -> Self {
         let public_key = PublicKey::from(&private_key);
 
         Config {
@@ -104,12 +120,39 @@ impl Config {
             cookie_key: cookie_key(&public_key),
             private_key,
             public_key,
-            peers_by_pubkey: map,
-            peers,
+            peers_by_pubkey: HashTable::default(),
+            peers: PeerList(Vec::new()),
         }
     }
 
-    fn get_peer_idx(&self, pk: &PublicKey) -> Option<usize> {
+    /// Adds a new peer to this wireguard config.
+    pub fn insert_peer(&mut self, peer: Peer) -> PeerId {
+        use hashbrown::hash_table::Entry;
+        match self.peers_by_pubkey.entry(
+            FxBuildHasher.hash_one(peer.key),
+            |&i| self.peers[i].key == peer.key,
+            |&i| FxBuildHasher.hash_one(self.peers[i].key),
+        ) {
+            Entry::Occupied(o) => {
+                let id = *o.get();
+
+                self.peers[id] = peer;
+
+                id
+            }
+            Entry::Vacant(v) => {
+                let idx = self.peers.0.len();
+                let id = PeerId(idx as u32);
+
+                self.peers.0.push(peer);
+                v.insert(id);
+
+                id
+            }
+        }
+    }
+
+    fn get_peer_idx(&self, pk: &PublicKey) -> Option<PeerId> {
         let peers = &self.peers;
         self.peers_by_pubkey
             .find(FxBuildHasher.hash_one(pk), |&i| peers[i].key == *pk)
@@ -270,15 +313,15 @@ impl Ord for TimerEntry {
 
 #[derive(Debug)]
 enum TimerEntryType {
-    InitAttempt { peer_idx: usize },
-    RekeyAttempt { peer_idx: usize },
-    Keepalive { peer_idx: usize },
+    InitAttempt { peer_idx: PeerId },
+    RekeyAttempt { peer_idx: PeerId },
+    Keepalive { peer_idx: PeerId },
 }
 
 #[derive(Debug)]
 enum SessionType {
-    Handshake(usize),
-    Cipher(usize),
+    Handshake(PeerId),
+    Cipher(PeerId),
 }
 
 impl Sessions {
@@ -377,9 +420,9 @@ pub enum Message<'a> {
     // This should be sent back to the client
     Write(&'a mut [u8]),
     // This can be processed appropriately
-    Read(usize, &'a mut [u8]),
+    Read(PeerId, &'a mut [u8]),
     Noop,
-    HandshakeComplete(usize),
+    HandshakeComplete(PeerId),
 }
 
 pub enum SendMessage {
@@ -454,7 +497,7 @@ impl Sessions {
 
     pub fn send_message(
         &mut self,
-        peer_idx: usize,
+        peer_idx: PeerId,
         payload: &mut [u8],
     ) -> Result<SendMessage, Error> {
         let peer = self.config.peers.get_mut(peer_idx).ok_or(Error::Rejected)?;
@@ -667,9 +710,10 @@ impl Sessions {
         &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<(usize, &'m mut [u8]), Error> {
-        unsafe_log!("[{socket:?}] parsed as data packet");
+    ) -> Result<(PeerId, &'m mut [u8]), Error> {
         const HEADER_LEN: usize = core::mem::size_of::<DataHeader>();
+
+        unsafe_log!("[{socket:?}] parsed as data packet");
 
         if msg.as_ptr().align_offset(16) != 0 {
             return Err(Error::Unaligned);
@@ -720,7 +764,7 @@ impl Sessions {
 
 impl HandshakeInit {
     #[allow(dead_code)]
-    fn new(state: &mut Sessions, peer_idx: usize) -> Self {
+    fn new(state: &mut Sessions, peer_idx: PeerId) -> Self {
         let peer = &mut state.config.peers[peer_idx];
 
         // start a new session
@@ -764,17 +808,18 @@ mod tests {
     use tai64::Tai64N;
     use x25519_dalek::{PublicKey, StaticSecret};
 
-    use crate::{Config, Peer, Sessions};
+    use crate::{Config, Peer, PeerId, Sessions};
 
     fn session_with_peer(
         secret_key: StaticSecret,
         peer_public_key: PublicKey,
         preshared_key: Key,
         endpoint: SocketAddr,
-    ) -> Sessions {
+    ) -> (PeerId, Sessions) {
         let peer = Peer::new(peer_public_key, Some(preshared_key), Some(endpoint));
-        let config = Config::new(secret_key, [peer]);
-        Sessions::new(config, Tai64N::now(), &mut OsRng)
+        let mut config = Config::new(secret_key);
+        let id = config.insert_peer(peer);
+        (id, Sessions::new(config, Tai64N::now(), &mut OsRng))
     }
 
     #[repr(align(16))]
@@ -791,15 +836,15 @@ mod tests {
         let mut psk = Key::default();
         OsRng.fill_bytes(&mut psk);
 
-        let mut sessions_i = session_with_peer(ssk_i, spk_r, psk, server_addr);
-        let mut sessions_r = session_with_peer(ssk_r, spk_i, psk, client_addr);
+        let (peer_r, mut sessions_i) = session_with_peer(ssk_i, spk_r, psk, server_addr);
+        let (peer_i, mut sessions_r) = session_with_peer(ssk_r, spk_i, psk, client_addr);
 
         let mut buf = Box::new(AlignedPacket([0; 256]));
 
         let mut msg = *b"Hello, World!\0\0\0";
 
         // try wrap the message - get back handshake message to send
-        let m = match sessions_i.send_message(0, &mut msg).unwrap() {
+        let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
             crate::SendMessage::Maintenance(m) => m,
             crate::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
         };
@@ -817,14 +862,14 @@ mod tests {
         // send the handshake response to the client
         {
             match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-                crate::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, 0),
+                crate::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, peer_i),
                 _ => panic!("expecting noop"),
             };
         }
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            match sessions_i.send_message(0, &mut msg).unwrap() {
+            match sessions_i.send_message(peer_r, &mut msg).unwrap() {
                 crate::SendMessage::Maintenance(_msg) => panic!("session should be valid"),
                 crate::SendMessage::Data(_socket, header, tag) => {
                     // assert_eq!(socket, Some(server_addr));
@@ -841,7 +886,7 @@ mod tests {
         {
             match sessions_r.recv_message(client_addr, data_msg).unwrap() {
                 crate::Message::Read(peer_idx, data) => {
-                    assert_eq!(peer_idx, 0);
+                    assert_eq!(peer_idx, peer_i);
                     assert_eq!(data, b"Hello, World!\0\0\0")
                 }
                 _ => panic!("expecting read"),
@@ -864,17 +909,21 @@ mod tests {
         let now = Tai64N::UNIX_EPOCH;
 
         let peer = Peer::new(spk_r, Some(psk), Some(server_addr));
-        let mut sessions_i = Sessions::new(Config::new(ssk_i, [peer]), now, &mut rng);
+        let mut config = Config::new(ssk_i);
+        let peer_r = config.insert_peer(peer);
+        let mut sessions_i = Sessions::new(config, now, &mut rng);
 
         let peer = Peer::new(spk_i, Some(psk), Some(client_addr));
-        let mut sessions_r = Sessions::new(Config::new(ssk_r, [peer]), now, &mut rng);
+        let mut config = Config::new(ssk_r);
+        let peer_i = config.insert_peer(peer);
+        let mut sessions_r = Sessions::new(config, now, &mut rng);
 
         let mut buf = Box::new(AlignedPacket([0; 256]));
 
         let mut msg = *b"Hello, World!\0\0\0";
 
         // try wrap the message - get back handshake message to send
-        let m = match sessions_i.send_message(0, &mut msg).unwrap() {
+        let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
             crate::SendMessage::Maintenance(m) => m,
             crate::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
         };
@@ -896,14 +945,14 @@ mod tests {
         // send the handshake response to the client
         {
             match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-                crate::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, 0),
+                crate::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, peer_i),
                 _ => panic!("expecting noop"),
             };
         }
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            match sessions_i.send_message(0, &mut msg).unwrap() {
+            match sessions_i.send_message(peer_r, &mut msg).unwrap() {
                 crate::SendMessage::Maintenance(_msg) => panic!("session should be valid"),
                 crate::SendMessage::Data(_socket, header, tag) => {
                     // assert_eq!(socket, Some(server_addr));
@@ -922,7 +971,7 @@ mod tests {
         {
             match sessions_r.recv_message(client_addr, data_msg).unwrap() {
                 crate::Message::Read(peer_idx, data) => {
-                    assert_eq!(peer_idx, 0);
+                    assert_eq!(peer_idx, peer_i);
                     assert_eq!(data, b"Hello, World!\0\0\0")
                 }
                 _ => panic!("expecting read"),

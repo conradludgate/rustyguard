@@ -54,14 +54,13 @@ fn main() {
         }
     };
 
-    let mut peers = vec![];
+    let mut config = Config::new(private_key);
     for peer in args.peer {
         let pk = Base64::decode_vec(&peer).unwrap();
         let peer_pk = PublicKey::from(<[u8; 32]>::try_from(pk).unwrap());
-        peers.push(Peer::new(peer_pk, None, None));
+        config.insert_peer(Peer::new(peer_pk, None, None));
     }
 
-    let config = Config::new(private_key, peers);
     let mut sessions = Sessions::new(config, Tai64N::now(), &mut OsRng);
 
     let endpoint = UdpSocket::bind(("0.0.0.0", args.port)).unwrap();

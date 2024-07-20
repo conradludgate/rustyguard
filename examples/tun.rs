@@ -1,6 +1,6 @@
 use base64ct::{Base64, Encoding};
 use rand::rngs::OsRng;
-use rustyguard::{Config, DataHeader, Message, Peer, PublicKey, Sessions, StaticSecret};
+use rustyguard::{Config, DataHeader, Message, Peer, PeerId, PublicKey, Sessions, StaticSecret};
 use tai64::Tai64N;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadBuf},
@@ -10,10 +10,25 @@ use tokio::{
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = TunConfig::parse();
-    let peer_net = args.iptrie();
 
-    let config = Config::new(args.key(), args.peers());
-    let mut sessions = Sessions::new(config, Tai64N::now(), &mut OsRng);
+    let mut rg_config = Config::new(args.key());
+
+    let mut peer_net = iptrie::RTrieMap::with_root(PeerId::sentinal());
+    for peer in args.peers {
+        let peer_pk = PublicKey::from(<[u8; 32]>::try_from(&*peer.key).unwrap());
+        let id = rg_config.insert_peer(Peer::new(
+            peer_pk,
+            None,
+            peer.endpoint.as_ref().and_then(|e| e.parse().ok()),
+        ));
+
+        for addr in &peer.addrs {
+            peer_net.insert(*addr, id);
+        }
+    }
+    let peer_net = peer_net.compress();
+
+    let mut sessions = Sessions::new(rg_config, Tai64N::now(), &mut OsRng);
     let endpoint = UdpSocket::bind(args.interface.host).await.unwrap();
 
     let mut buf: Box<AlignedPacket> = Box::new(AlignedPacket([0; 2048]));
@@ -160,28 +175,5 @@ impl TunConfig {
                 private_key
             }
         }
-    }
-
-    fn peers(&self) -> Vec<Peer> {
-        let mut peers = vec![];
-        for peer in &self.peers {
-            let peer_pk = PublicKey::from(<[u8; 32]>::try_from(&*peer.key).unwrap());
-            peers.push(Peer::new(
-                peer_pk,
-                None,
-                peer.endpoint.as_ref().and_then(|e| e.parse().ok()),
-            ));
-        }
-        peers
-    }
-
-    fn iptrie(&self) -> iptrie::LCTrieMap<ipnet::Ipv4Net, usize> {
-        let mut peers = iptrie::RTrieMap::with_root(usize::MAX);
-        for (peer_idx, peer) in self.peers.iter().enumerate() {
-            for addr in &peer.addrs {
-                peers.insert(*addr, peer_idx);
-            }
-        }
-        peers.compress()
     }
 }
