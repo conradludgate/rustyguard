@@ -157,8 +157,10 @@ pub(crate) trait HasMac: Pod {
         use subtle::ConstantTimeEq;
         let actual_mac1 = self.compute_mac1(&config.mac1_key);
         if actual_mac1.ct_ne(self.get_mac1()).into() {
+            unsafe_log!("invalid mac1");
             Err(Error::Rejected)
         } else {
+            unsafe_log!("valid mac1");
             Ok(())
         }
     }
@@ -168,8 +170,10 @@ pub(crate) trait HasMac: Pod {
         let cookie = state.cookie(socket);
         let actual_mac2 = self.compute_mac2(&cookie);
         if actual_mac2.ct_ne(self.get_mac2()).into() {
+            unsafe_log!("invalid mac2");
             Err(cookie)
         } else {
+            unsafe_log!("valid mac2");
             Ok(())
         }
     }
@@ -302,13 +306,16 @@ impl HandshakeInit {
         let epk_i = PublicKey::from(self.ephemeral_key);
         let k = hs.mix_key_dh(&config.private_key, &epk_i);
 
+        unsafe_log!("decrypting static key");
         // -> s:
         let spk_i = self.static_key.decrypt_and_hash(hs, &k)?;
         let spk_i = PublicKey::from(*spk_i);
+        unsafe_log!("decrypted public key {spk_i:?}");
 
         // -> ss:
         let k = hs.mix_key_dh(&config.private_key, &spk_i);
 
+        unsafe_log!("decrypting payload");
         // payload:
         let timestamp = *self.timestamp.decrypt_and_hash(hs, &k)?;
 
@@ -394,6 +401,7 @@ impl HandshakeResp {
         // <- psk:
         let k = hs.mix_key_and_hash(&peer.preshared_key);
 
+        unsafe_log!("decrypting payload");
         // payload:
         self.empty.decrypt_and_hash(hs, &k)?;
 

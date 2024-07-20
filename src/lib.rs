@@ -1,6 +1,20 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(any(test, rustyguard_unsafe_logging))]
+extern crate std;
+
+macro_rules! unsafe_log {
+    ($($t:tt)*) => {
+        match core::format_args!($($t)*) {
+            #[cfg(any(test, rustyguard_unsafe_logging))]
+            args => std::eprintln!("{args}"),
+            #[cfg(not(any(test, rustyguard_unsafe_logging)))]
+            _ => {}
+        };
+    }
+}
+
 extern crate alloc;
 
 use core::fmt;
@@ -501,6 +515,8 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<Message<'m>, Error> {
+        unsafe_log!("[{socket:?}] received packet");
+
         // For optimisation purposes, we want to assume the message is 16-byte aligned.
         if msg.as_ptr().align_offset(16) != 0 {
             return Err(Error::Unaligned);
@@ -526,6 +542,7 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<&'m mut [u8], Error> {
+        unsafe_log!("[{socket:?}] parsed as handshake init packet");
         let init_msg = match HandshakeInit::verify(msg, self, socket)? {
             // cookie message is always smaller than the initial message
             ControlFlow::Break(cookie) => return Ok(write_msg(msg, &cookie)),
@@ -536,6 +553,7 @@ impl Sessions {
 
         let data = init_msg.decrypt(&mut hs, &self.config)?;
 
+        unsafe_log!("payload decrypted");
         // check if we know this peer
         let peer_idx = self
             .config
@@ -543,6 +561,7 @@ impl Sessions {
             .ok_or(Error::Rejected)?;
         let peer = &mut self.config.peers[peer_idx];
 
+        unsafe_log!("peer id: {peer_idx:?}");
         // check for potential replay attack
         if data.timestamp < peer.latest_ts {
             return Err(Error::Rejected);
@@ -578,6 +597,7 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<Message<'m>, Error> {
+        unsafe_log!("[{socket:?}] parsed as handshake resp packet");
         let resp_msg = match HandshakeResp::verify(msg, self, socket)? {
             // cookie message is always smaller than the initial message
             ControlFlow::Break(cookie) => return Ok(Message::Write(write_msg(msg, &cookie))),
@@ -586,14 +606,21 @@ impl Sessions {
 
         // check for a session expecting this handshake response
         use hashbrown::hash_map::Entry;
-        let mut session = match self.peers_by_session.entry(resp_msg.receiver.get()) {
+        let session_id = resp_msg.receiver.get();
+        let mut session = match self.peers_by_session.entry(session_id) {
             // session not found
-            Entry::Vacant(_) => return Err(Error::Rejected),
+            Entry::Vacant(_) => {
+                unsafe_log!("[{socket:?}] [{session_id:?}] session not found");
+                return Err(Error::Rejected);
+            }
             Entry::Occupied(o) => o,
         };
         let peer_idx = match session.get() {
             // session is already past the handshake phase
-            SessionType::Cipher(_) => return Err(Error::Rejected),
+            SessionType::Cipher(_) => {
+                unsafe_log!("[{socket:?}] [{session_id:?}] session handshake already completed");
+                return Err(Error::Rejected);
+            }
             SessionType::Handshake(peer_idx) => *peer_idx,
         };
         let peer = &mut self.config.peers[peer_idx];
@@ -624,6 +651,7 @@ impl Sessions {
 
     #[inline(never)]
     fn handle_cookie(&mut self, msg: &mut [u8]) -> Result<(), Error> {
+        unsafe_log!("parsed as cookie packet");
         let cookie_msg = bytemuck::try_from_bytes_mut::<CookieMessage>(msg)
             .map_err(|_| Error::InvalidMessage)?;
 
@@ -650,6 +678,7 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<(usize, &'m mut [u8]), Error> {
+        unsafe_log!("[{socket:?}] parsed as data packet");
         const HEADER_LEN: usize = core::mem::size_of::<DataHeader>();
 
         if msg.as_ptr().align_offset(16) != 0 {
@@ -657,6 +686,7 @@ impl Sessions {
         }
 
         if msg.len() % 16 != 0 || msg.len() < HEADER_LEN + 16 {
+            unsafe_log!("[{socket:?}] msg wrong size: len={}", msg.len());
             return Err(Error::InvalidMessage);
         }
 
@@ -667,11 +697,14 @@ impl Sessions {
             .split_last_chunk_mut::<16>()
             .ok_or(Error::InvalidMessage)?;
 
-        let header: &mut DataHeader =
-            bytemuck::try_from_bytes_mut(header).map_err(|_| Error::InvalidMessage)?;
+        let header: &mut DataHeader = bytemuck::cast_mut::<[u8; HEADER_LEN], DataHeader>(header);
 
-        let peer_idx = match self.peers_by_session.get(&header.receiver.get()) {
-            Some(SessionType::Handshake(_)) | None => return Err(Error::Rejected),
+        let session_id = header.receiver.get();
+        let peer_idx = match self.peers_by_session.get(&session_id) {
+            Some(SessionType::Handshake(_)) | None => {
+                unsafe_log!("[{socket:?}] [{session_id:?}] session not ready");
+                return Err(Error::Rejected);
+            }
             Some(SessionType::Cipher(peer_idx)) => *peer_idx,
         };
         let peer = &mut self.config.peers[peer_idx];
@@ -734,7 +767,10 @@ mod tests {
 
     use alloc::boxed::Box;
     use chacha20poly1305::Key;
-    use rand::{rngs::OsRng, RngCore};
+    use rand::{
+        rngs::{OsRng, StdRng},
+        RngCore, SeedableRng,
+    };
     use tai64::Tai64N;
     use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -810,6 +846,87 @@ mod tests {
                 }
             }
         };
+
+        // send the buffer to the server
+        {
+            match sessions_r.recv_message(client_addr, data_msg).unwrap() {
+                crate::Message::Read(peer_idx, data) => {
+                    assert_eq!(peer_idx, 0);
+                    assert_eq!(data, b"Hello, World!\0\0\0")
+                }
+                _ => panic!("expecting read"),
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let server_addr: SocketAddr = "10.0.1.1:1234".parse().unwrap();
+        let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
+        let ssk_i = StaticSecret::random_from_rng(&mut rng);
+        let ssk_r = StaticSecret::random_from_rng(&mut rng);
+        let spk_i = PublicKey::from(&ssk_i);
+        let spk_r = PublicKey::from(&ssk_r);
+        let mut psk = Key::default();
+        rng.fill_bytes(&mut psk);
+
+        let now = Tai64N::UNIX_EPOCH;
+
+        let peer = Peer::new(spk_r, Some(psk), Some(server_addr));
+        let mut sessions_i = Sessions::new(Config::new(ssk_i, [peer]), now, &mut rng);
+
+        let peer = Peer::new(spk_i, Some(psk), Some(client_addr));
+        let mut sessions_r = Sessions::new(Config::new(ssk_r, [peer]), now, &mut rng);
+
+        let mut buf = Box::new(AlignedPacket([0; 256]));
+
+        let mut msg = *b"Hello, World!\0\0\0";
+
+        // try wrap the message - get back handshake message to send
+        let m = match sessions_i.send_message(0, &mut msg).unwrap() {
+            crate::SendMessage::Maintenance(m) => m,
+            crate::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
+        };
+
+        insta::assert_debug_snapshot!(m.data());
+
+        // send handshake to server
+        let response_buf = {
+            let handshake_buf = &mut buf.0[..m.data().len()];
+            handshake_buf.copy_from_slice(m.data());
+            match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
+                crate::Message::Write(buf) => buf,
+                _ => panic!("expecting write"),
+            }
+        };
+
+        insta::assert_debug_snapshot!(response_buf);
+
+        // send the handshake response to the client
+        {
+            match sessions_i.recv_message(server_addr, response_buf).unwrap() {
+                crate::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, 0),
+                _ => panic!("expecting noop"),
+            };
+        }
+
+        // wrap the messasge and encode into buffer
+        let data_msg = {
+            match sessions_i.send_message(0, &mut msg).unwrap() {
+                crate::SendMessage::Maintenance(_msg) => panic!("session should be valid"),
+                crate::SendMessage::Data(_socket, header, tag) => {
+                    // assert_eq!(socket, Some(server_addr));
+
+                    buf.0[..16].copy_from_slice(header.as_ref());
+                    buf.0[16..32].copy_from_slice(&msg);
+                    buf.0[32..48].copy_from_slice(&tag);
+                    &mut buf.0[..48]
+                }
+            }
+        };
+
+        insta::assert_debug_snapshot!(data_msg);
 
         // send the buffer to the server
         {
