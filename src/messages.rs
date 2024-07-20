@@ -191,13 +191,13 @@ macro_rules! mac_protected {
             fn compute_mac1(&self, mac1_key: &chacha20poly1305::Key) -> Mac {
                 let offset = bytemuck::offset_of!(self, $i, mac1);
                 let bytes = bytemuck::bytes_of(self);
-                crate::crypto::mac(mac1_key, &bytes[..offset])
+                crate::crypto::mac(mac1_key, [&bytes[..offset]])
             }
 
             fn compute_mac2(&self, cookie: &Cookie) -> Mac {
                 let offset = bytemuck::offset_of!(self, $i, mac2);
                 let bytes = bytemuck::bytes_of(self);
-                crate::crypto::mac(&cookie.0, &bytes[..offset])
+                crate::crypto::mac(&cookie.0, [&bytes[..offset]])
             }
 
             fn get_mac1(&self) -> &Mac {

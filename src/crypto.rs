@@ -1,6 +1,7 @@
 use bytemuck::bytes_of;
 use bytemuck::{Pod, TransparentWrapper, Zeroable};
 pub use chacha20poly1305::Key;
+use hmac::SimpleHmac;
 use x25519_dalek::PublicKey;
 use x25519_dalek::StaticSecret;
 use zeroize::Zeroize;
@@ -23,13 +24,13 @@ const IDENTIFIER_HASH: [u8; 32] = [
 const LABEL_MAC1: [u8; 8] = *b"mac1----";
 const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
-fn nonce(counter: u64) -> chacha20poly1305::Nonce {
+pub(crate) fn nonce(counter: u64) -> chacha20poly1305::Nonce {
     let mut n = chacha20poly1305::Nonce::default();
     n[4..].copy_from_slice(&u64::to_le_bytes(counter));
     n
 }
 
-fn hash(msg: [&[u8]; 2]) -> [u8; 32] {
+pub(crate) fn hash<const M: usize>(msg: [&[u8]; M]) -> [u8; 32] {
     use blake2::digest::Digest;
     let mut mac = blake2::Blake2s256::default();
     for msg in msg {
@@ -38,17 +39,26 @@ fn hash(msg: [&[u8]; 2]) -> [u8; 32] {
     mac.finalize().into()
 }
 
-pub(crate) fn mac(key: &[u8], msg: &[u8]) -> Mac {
+pub(crate) fn mac<const M: usize>(key: &[u8], msg: [&[u8]; M]) -> Mac {
     use blake2::digest::Mac;
     let mut mac = blake2::Blake2sMac::<blake2::digest::consts::U16>::new_from_slice(key).unwrap();
-    mac.update(msg);
+    for msg in msg {
+        mac.update(msg);
+    }
     mac.finalize().into_bytes().into()
 }
 
-fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
+fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
     use hmac::Mac;
-    type Hmac = hmac::SimpleHmac<blake2::Blake2s256>;
 
+    let mut hmac = <SimpleHmac<blake2::Blake2s256> as Mac>::new_from_slice(key).unwrap();
+    for msg in msg {
+        hmac.update(msg);
+    }
+    hmac.finalize().into_bytes()
+}
+
+pub(crate) fn hkdf<const N: usize, const M: usize>(key: &Key, msg: [&[u8]; M]) -> [Key; N] {
     assert!(N <= 255);
 
     let mut output = [Key::default(); N];
@@ -57,27 +67,11 @@ fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
         return output;
     }
 
-    let t0 = {
-        Hmac::new_from_slice(key)
-            .unwrap()
-            .chain_update(msg)
-            .finalize()
-            .into_bytes()
-    };
-    let mut hmac2 = Hmac::new_from_slice(&t0).unwrap();
-
-    let mut ti = {
-        hmac2.update(&[1]);
-        hmac2.finalize_reset().into_bytes()
-    };
+    let t0 = hmac(key, msg);
+    let mut ti = hmac(&t0, [&[1]]);
     output[0] = ti;
-
     for i in 1..N as u8 {
-        ti = {
-            hmac2.update(&ti[..]);
-            hmac2.update(&[i]);
-            hmac2.finalize_reset().into_bytes()
-        };
+        ti = hmac(&t0, [&ti[..], &[i + 1]]);
         output[i as usize] = ti;
     }
 
@@ -100,13 +94,13 @@ impl Default for HandshakeState {
 
 impl HandshakeState {
     pub fn mix_chain(&mut self, b: &[u8]) {
-        let [c] = hkdf(&self.chain, b);
+        let [c] = hkdf(&self.chain, [b]);
         self.chain = c;
     }
 
     pub fn mix_dh(&mut self, sk: &StaticSecret, pk: &PublicKey) {
         let prk = sk.diffie_hellman(pk);
-        let [c] = hkdf(&self.chain, prk.as_bytes());
+        let [c] = hkdf(&self.chain, [prk.as_bytes()]);
         self.chain = c;
     }
 
@@ -115,13 +109,13 @@ impl HandshakeState {
     }
 
     fn mix_key(&mut self, b: &[u8]) -> Key {
-        let [c, k] = hkdf(&self.chain, b);
+        let [c, k] = hkdf(&self.chain, [b]);
         self.chain = c;
         k
     }
 
     pub fn mix_key_and_hash(&mut self, b: &[u8]) -> Key {
-        let [c, t, k] = hkdf(&self.chain, b);
+        let [c, t, k] = hkdf(&self.chain, [b]);
         self.chain = c;
         self.mix_hash(&t[..]);
         k
@@ -132,7 +126,7 @@ impl HandshakeState {
     }
 
     pub fn split(&mut self) -> (Key, Key) {
-        let [k1, k2] = hkdf(&self.chain, &[]);
+        let [k1, k2] = hkdf(&self.chain, []);
         self.zeroize();
         (k1, k2)
     }
