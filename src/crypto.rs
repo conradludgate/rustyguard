@@ -75,7 +75,7 @@ fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
     for i in 1..N as u8 {
         ti = {
             hmac2.update(&ti[..]);
-            hmac2.update(&[i]);
+            hmac2.update(&[i + 1]);
             hmac2.finalize_reset().into_bytes()
         };
         output[i as usize] = ti;
@@ -360,38 +360,11 @@ mod tests {
     }
 
     #[test]
-    fn hkdf() {
-        let mut rng = StdRng::from_entropy();
-        let mut key = Key::default();
-        rng.fill_bytes(&mut key);
-        let [a, b, c] = super::hkdf(&key, [b"msg data here", b" even more data"]);
-        let [d, e, f] = super::hkdf(&key, [b"msg data here even more data"]);
-        assert_eq!([a, b, c], [d, e, f])
-    }
-
-    #[test]
-    fn hash() {
-        let h1 = super::hash([b"msg data here", b" even more data"]);
-        let h2 = super::hash([b"msg data here even more data"]);
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn mac() {
-        let mut rng = StdRng::from_entropy();
-        let mut key = Key::default();
-        rng.fill_bytes(&mut key);
-        let h1 = super::mac(&key, [b"msg data here", b" even more data"]);
-        let h2 = super::mac(&key, [b"msg data here even more data"]);
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
     fn hkdf_snapshot() {
         let mut rng = StdRng::seed_from_u64(2);
         let mut key = Key::default();
         rng.fill_bytes(&mut key);
-        let [a, b, c] = super::hkdf(&key, [b"msg data here", b" even more data"]);
+        let [a, b, c] = super::hkdf(&key, b"msg data here even more data");
         insta::assert_debug_snapshot!([a, b, c]);
     }
 
@@ -406,7 +379,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2);
         let mut key = Key::default();
         rng.fill_bytes(&mut key);
-        let h = super::mac(&key, [b"msg data here", b" even more data"]);
+        let h = super::mac(&key, b"msg data here even more data");
         insta::assert_debug_snapshot!(h);
     }
 }
