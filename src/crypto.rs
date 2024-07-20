@@ -336,6 +336,8 @@ impl DecryptionKey {
 #[cfg(test)]
 mod tests {
     use blake2::Digest;
+    use chacha20poly1305::Key;
+    use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     #[test]
     fn construction_identifier() {
@@ -349,5 +351,56 @@ mod tests {
 
         assert_eq!(&*c, &super::CONSTRUCTION_HASH);
         assert_eq!(&*h, &super::IDENTIFIER_HASH);
+    }
+
+    #[test]
+    fn hkdf() {
+        let mut rng = StdRng::from_entropy();
+        let mut key = Key::default();
+        rng.fill_bytes(&mut key);
+        let [a, b, c] = super::hkdf(&key, [b"msg data here", b" even more data"]);
+        let [d, e, f] = super::hkdf(&key, [b"msg data here even more data"]);
+        assert_eq!([a, b, c], [d, e, f])
+    }
+
+    #[test]
+    fn hash() {
+        let h1 = super::hash([b"msg data here", b" even more data"]);
+        let h2 = super::hash([b"msg data here even more data"]);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn mac() {
+        let mut rng = StdRng::from_entropy();
+        let mut key = Key::default();
+        rng.fill_bytes(&mut key);
+        let h1 = super::mac(&key, [b"msg data here", b" even more data"]);
+        let h2 = super::mac(&key, [b"msg data here even more data"]);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn hkdf_snapshot() {
+        let mut rng = StdRng::seed_from_u64(2);
+        let mut key = Key::default();
+        rng.fill_bytes(&mut key);
+        let [a, b, c] = super::hkdf(&key, [b"msg data here", b" even more data"]);
+        insta::assert_debug_snapshot!([a, b, c]);
+    }
+
+    #[test]
+    fn hash_snapshot() {
+        let h = super::hash([b"msg data here", b" even more data"]);
+        insta::assert_debug_snapshot!(h);
+    }
+
+    #[test]
+    fn mac_snapshot() {
+        let mut rng = StdRng::seed_from_u64(2);
+        let mut key = Key::default();
+        rng.fill_bytes(&mut key);
+        let h = super::mac(&key, [b"msg data here", b" even more data"]);
+        insta::assert_debug_snapshot!(h);
     }
 }
