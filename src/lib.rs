@@ -35,7 +35,7 @@ use messages::{
     MSG_FIRST, MSG_SECOND,
 };
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
-use rustc_hash::FxBuildHasher;
+use rustc_hash::{FxBuildHasher, FxSeededState};
 use tai64::{Tai64, Tai64N};
 pub use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -87,6 +87,7 @@ pub struct Config {
     /// Since public-keys are assumed to be randomly distributed, we can be reasonably
     /// sure that the hash quality is good.
     peers_by_pubkey: HashTable<PeerId>,
+    pubkey_hasher: FxSeededState,
 
     /// List of peers that this wireguard server can talk to.
     peers: PeerList,
@@ -120,6 +121,8 @@ impl Config {
             cookie_key: cookie_key(&public_key),
             private_key,
             public_key,
+            // TODO(conrad): seed this
+            pubkey_hasher: FxSeededState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
             peers: PeerList(Vec::new()),
         }
@@ -129,9 +132,9 @@ impl Config {
     pub fn insert_peer(&mut self, peer: Peer) -> PeerId {
         use hashbrown::hash_table::Entry;
         match self.peers_by_pubkey.entry(
-            FxBuildHasher.hash_one(peer.key),
+            self.pubkey_hasher.hash_one(peer.key),
             |&i| self.peers[i].key == peer.key,
-            |&i| FxBuildHasher.hash_one(self.peers[i].key),
+            |&i| self.pubkey_hasher.hash_one(self.peers[i].key),
         ) {
             Entry::Occupied(o) => {
                 let id = *o.get();
@@ -155,7 +158,7 @@ impl Config {
     fn get_peer_idx(&self, pk: &PublicKey) -> Option<PeerId> {
         let peers = &self.peers;
         self.peers_by_pubkey
-            .find(FxBuildHasher.hash_one(pk), |&i| peers[i].key == *pk)
+            .find(self.pubkey_hasher.hash_one(pk), |&i| peers[i].key == *pk)
             .copied()
     }
 }
@@ -252,12 +255,23 @@ impl Peer {
         }
     }
 
-    fn encrypt_message(&mut self, payload: &mut [u8], now: Tai64N) -> Option<(DataHeader, Tag)> {
+    fn encrypt_message(&mut self, payload: &mut [u8], now: Tai64N) -> Option<EncryptedMetadata> {
         let session = &mut self.transport;
         if session.should_reject(now) {
             return None;
         }
 
+        Some(self.force_encrypt(payload, now))
+    }
+
+    fn force_encrypt(&mut self, payload: &mut [u8], now: Tai64N) -> EncryptedMetadata {
+        assert_eq!(
+            payload.len() % 16,
+            0,
+            "payload length must be rounded up to the nearest 16 byte boundary"
+        );
+
+        let session = &mut self.transport;
         let n = session.encrypt.counter;
         let tag = session.encrypt.encrypt(payload);
 
@@ -268,7 +282,29 @@ impl Peer {
             counter: LEU64::new(n),
         };
 
-        Some((header, tag))
+        EncryptedMetadata {
+            header,
+            tag,
+            payload_len: payload.len(),
+        }
+    }
+}
+
+pub struct MessageEncrypter<'p>(&'p mut Peer, Tai64N);
+
+impl MessageEncrypter<'_> {
+    pub fn encrypt(self, payload: &mut [u8]) -> EncryptedMetadata {
+        self.0.force_encrypt(payload, self.1)
+    }
+
+    /// Encrypts the payload and attaches the wireguard framing in-place.
+    ///
+    /// The payload is defined to be `buffer[16..buffer.len()-16]`, as first and last
+    /// 16 bytes are reserved for the wireguard framing.
+    pub fn encrypt_and_frame(self, buffer: &mut [u8]) {
+        let len = buffer.len();
+        let payload = &mut buffer[16..len - 16];
+        self.encrypt(payload).frame_in_place(buffer);
     }
 }
 
@@ -392,7 +428,11 @@ impl Sessions {
                 TimerEntryType::Keepalive { peer_idx } => {
                     let peer = &mut self.config.peers[peer_idx];
                     if peer.transport.should_keepalive(self.now) {
-                        let (header, tag) = peer.encrypt_message(&mut [], self.now).expect(
+                        let EncryptedMetadata {
+                            header,
+                            tag,
+                            payload_len: _,
+                        } = peer.encrypt_message(&mut [], self.now).expect(
                             "a keepalive should only be scheduled if the data keys are set",
                         );
                         return Some(MaintenanceMsg {
@@ -416,19 +456,41 @@ pub enum Error {
     Rejected,
 }
 
-pub enum Message<'a> {
+pub enum Message<'a, 's> {
     // This should be sent back to the client
     Write(&'a mut [u8]),
     // This can be processed appropriately
     Read(PeerId, &'a mut [u8]),
     Noop,
-    HandshakeComplete(PeerId),
+    HandshakeComplete(PeerId, MessageEncrypter<'s>),
 }
 
 pub enum SendMessage {
     // This handshake message should be sent
     Maintenance(MaintenanceMsg),
-    Data(SocketAddr, DataHeader, crypto::Tag),
+    Data(SocketAddr, EncryptedMetadata),
+}
+
+pub struct EncryptedMetadata {
+    pub header: DataHeader,
+    pub tag: crypto::Tag,
+    pub payload_len: usize,
+}
+
+impl EncryptedMetadata {
+    /// Write the wireguard framing in place for the encrypted data packet.
+    /// The data from `buffer[16..16+self.payload_len]` must contain the
+    /// encrypted data.
+    ///
+    /// # Panics
+    /// This will panic if the buffer is not correctly sized. It must have space for a 16 byte header and a 16 byte footer.
+    pub fn frame_in_place(self, buffer: &mut [u8]) {
+        const H: usize = core::mem::size_of::<DataHeader>();
+        assert_eq!(self.payload_len + 32, buffer.len());
+
+        buffer[..H].copy_from_slice(self.header.as_ref());
+        buffer[H + self.payload_len..].copy_from_slice(&self.tag);
+    }
 }
 
 pub struct MaintenanceMsg {
@@ -507,7 +569,7 @@ impl Sessions {
 
         match peer.encrypt_message(payload, self.now) {
             // we encrypted the message in-place in payload.
-            Some((header, tag)) => {
+            Some(metadata) => {
                 if peer.transport.encrypt.counter >= REKEY_AFTER_MESSAGES {
                     // the encryption key needs rotating. schedule a rekey attempt
                     self.timers.push(TimerEntry {
@@ -515,7 +577,7 @@ impl Sessions {
                         kind: TimerEntryType::RekeyAttempt { peer_idx },
                     });
                 }
-                Ok(SendMessage::Data(ep, header, tag))
+                Ok(SendMessage::Data(ep, metadata))
             }
             // we could not encrypt the message as we don't yet have an active session.
             // create a handshake init message to be sent.
@@ -543,11 +605,11 @@ impl Sessions {
     /// * Any valid messages that could not be decrypted or processed will be reported as [`Error::Rejected`]
     ///
     // TODO(conrad): enforce the msg is 16 byte aligned.
-    pub fn recv_message<'m>(
-        &mut self,
+    pub fn recv_message<'s, 'm>(
+        &'s mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<Message<'m>, Error> {
+    ) -> Result<Message<'m, 's>, Error> {
         unsafe_log!("[{socket:?}] received packet");
 
         // For optimisation purposes, we want to assume the message is 16-byte aligned.
@@ -625,11 +687,11 @@ impl Sessions {
     }
 
     #[inline(never)]
-    fn handle_handshake_resp<'m>(
-        &mut self,
+    fn handle_handshake_resp<'s, 'm>(
+        &'s mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<Message<'m>, Error> {
+    ) -> Result<Message<'m, 's>, Error> {
         unsafe_log!("[{socket:?}] parsed as handshake resp packet");
         let resp_msg = match HandshakeResp::verify(msg, self, socket)? {
             // cookie message is always smaller than the initial message
@@ -679,7 +741,10 @@ impl Sessions {
             kind: TimerEntryType::RekeyAttempt { peer_idx },
         });
 
-        Ok(Message::HandshakeComplete(peer_idx))
+        Ok(Message::HandshakeComplete(
+            peer_idx,
+            MessageEncrypter(peer, self.now),
+        ))
     }
 
     #[inline(never)]
@@ -846,7 +911,7 @@ mod tests {
         // try wrap the message - get back handshake message to send
         let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
             crate::SendMessage::Maintenance(m) => m,
-            crate::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
+            crate::SendMessage::Data(_, _) => panic!("expecting handshake"),
         };
 
         // send handshake to server
@@ -860,26 +925,23 @@ mod tests {
         };
 
         // send the handshake response to the client
-        {
+        let encryptor = {
             match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-                crate::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, peer_i),
+                crate::Message::HandshakeComplete(peer_idx, encryptor) => {
+                    assert_eq!(peer_idx, peer_i);
+                    encryptor
+                }
                 _ => panic!("expecting noop"),
-            };
-        }
+            }
+        };
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            match sessions_i.send_message(peer_r, &mut msg).unwrap() {
-                crate::SendMessage::Maintenance(_msg) => panic!("session should be valid"),
-                crate::SendMessage::Data(_socket, header, tag) => {
-                    // assert_eq!(socket, Some(server_addr));
-
-                    buf.0[..16].copy_from_slice(header.as_ref());
-                    buf.0[16..32].copy_from_slice(&msg);
-                    buf.0[32..48].copy_from_slice(&tag);
-                    &mut buf.0[..48]
-                }
-            }
+            let metadata = encryptor.encrypt(&mut msg);
+            buf.0[..16].copy_from_slice(metadata.header.as_ref());
+            buf.0[16..32].copy_from_slice(&msg);
+            buf.0[32..48].copy_from_slice(&metadata.tag);
+            &mut buf.0[..48]
         };
 
         // send the buffer to the server
@@ -925,7 +987,7 @@ mod tests {
         // try wrap the message - get back handshake message to send
         let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
             crate::SendMessage::Maintenance(m) => m,
-            crate::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
+            crate::SendMessage::Data(_, _) => panic!("expecting handshake"),
         };
 
         insta::assert_debug_snapshot!(m.data());
@@ -943,26 +1005,23 @@ mod tests {
         insta::assert_debug_snapshot!(response_buf);
 
         // send the handshake response to the client
-        {
+        let encryptor = {
             match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-                crate::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, peer_i),
+                crate::Message::HandshakeComplete(peer_idx, encryptor) => {
+                    assert_eq!(peer_idx, peer_i);
+                    encryptor
+                }
                 _ => panic!("expecting noop"),
-            };
-        }
+            }
+        };
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            match sessions_i.send_message(peer_r, &mut msg).unwrap() {
-                crate::SendMessage::Maintenance(_msg) => panic!("session should be valid"),
-                crate::SendMessage::Data(_socket, header, tag) => {
-                    // assert_eq!(socket, Some(server_addr));
-
-                    buf.0[..16].copy_from_slice(header.as_ref());
-                    buf.0[16..32].copy_from_slice(&msg);
-                    buf.0[32..48].copy_from_slice(&tag);
-                    &mut buf.0[..48]
-                }
-            }
+            let metadata = encryptor.encrypt(&mut msg);
+            buf.0[..16].copy_from_slice(metadata.header.as_ref());
+            buf.0[16..32].copy_from_slice(&msg);
+            buf.0[32..48].copy_from_slice(&metadata.tag);
+            &mut buf.0[..48]
         };
 
         insta::assert_debug_snapshot!(data_msg);

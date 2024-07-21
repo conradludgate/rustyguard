@@ -45,6 +45,17 @@ pub(crate) fn mac(key: &[u8], msg: &[u8]) -> Mac {
     mac.finalize().into_bytes().into()
 }
 
+fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
+    use hmac::Mac;
+    type Hmac = hmac::SimpleHmac<blake2::Blake2s256>;
+
+    let mut hmac = Hmac::new_from_slice(key).unwrap();
+    for msg in msg {
+        hmac.update(msg);
+    }
+    hmac.finalize().into_bytes()
+}
+
 fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
     use hmac::Mac;
     type Hmac = hmac::SimpleHmac<blake2::Blake2s256>;
@@ -57,27 +68,17 @@ fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
         return output;
     }
 
-    let t0 = {
-        Hmac::new_from_slice(key)
-            .unwrap()
-            .chain_update(msg)
-            .finalize()
-            .into_bytes()
-    };
-    let mut hmac2 = Hmac::new_from_slice(&t0).unwrap();
-
-    let mut ti = {
-        hmac2.update(&[1]);
-        hmac2.finalize_reset().into_bytes()
-    };
+    let hmac = Hmac::new_from_slice(&hmac(key, [msg])).unwrap();
+    let mut ti = hmac.clone().chain_update([1u8]).finalize().into_bytes();
     output[0] = ti;
 
     for i in 1..N as u8 {
-        ti = {
-            hmac2.update(&ti[..]);
-            hmac2.update(&[i + 1]);
-            hmac2.finalize_reset().into_bytes()
-        };
+        ti = hmac
+            .clone()
+            .chain_update(ti)
+            .chain_update([i+1])
+            .finalize()
+            .into_bytes();
         output[i as usize] = ti;
     }
 

@@ -62,7 +62,7 @@ fn roundtrip_impl(
     // try wrap the message - get back handshake message to send
     let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
         rustyguard::SendMessage::Maintenance(m) => m,
-        rustyguard::SendMessage::Data(_, _, _) => panic!("expecting handshake"),
+        rustyguard::SendMessage::Data(_, _) => panic!("expecting handshake"),
     };
 
     // send handshake to server
@@ -76,26 +76,23 @@ fn roundtrip_impl(
     };
 
     // send the handshake response to the client
-    {
+    let encryptor = {
         match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-            rustyguard::Message::HandshakeComplete(peer_idx) => assert_eq!(peer_idx, peer_i),
+            rustyguard::Message::HandshakeComplete(peer_idx, encryptor) => {
+                assert_eq!(peer_idx, peer_i);
+                encryptor
+            }
             _ => panic!("expecting noop"),
-        };
-    }
+        }
+    };
 
     // wrap the messasge and encode into buffer
     let data_msg = {
-        match sessions_i.send_message(peer_r, &mut msg).unwrap() {
-            rustyguard::SendMessage::Maintenance(_msg) => panic!("session should be valid"),
-            rustyguard::SendMessage::Data(_socket, header, tag) => {
-                // assert_eq!(socket, Some(server_addr));
-
-                buf.0[..16].copy_from_slice(header.as_ref());
-                buf.0[16..32].copy_from_slice(&msg);
-                buf.0[32..48].copy_from_slice(&tag);
-                &mut buf.0[..48]
-            }
-        }
+        let metadata = encryptor.encrypt(&mut msg);
+        buf.0[..16].copy_from_slice(metadata.header.as_ref());
+        buf.0[16..32].copy_from_slice(&msg);
+        buf.0[32..48].copy_from_slice(&metadata.tag);
+        &mut buf.0[..48]
     };
 
     // send the buffer to the server

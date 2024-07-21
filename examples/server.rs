@@ -79,7 +79,7 @@ fn main() {
         match sessions.recv_message(addr, &mut buf.0[..n]) {
             Err(err) => println!("error: {err:?}"),
             Ok(Message::Noop) => println!("noop"),
-            Ok(Message::HandshakeComplete(_peer)) => {}
+            Ok(Message::HandshakeComplete(_peer, _encryptor)) => {}
             Ok(Message::Read(peer, buf)) => {
                 if buf.is_empty() {
                     continue;
@@ -126,13 +126,10 @@ fn main() {
                                             .unwrap()
                                         {
                                             rustyguard::SendMessage::Maintenance(_) => todo!(),
-                                            rustyguard::SendMessage::Data(_, header, tag) => {
-                                                inner_reply_buf[reply_len..reply_len + 16]
-                                                    .copy_from_slice(&tag[..]);
-                                                reply_buf[..16].copy_from_slice(header.as_ref());
-                                                endpoint
-                                                    .send_to(&reply_buf[..reply_len + 32], addr)
-                                                    .unwrap();
+                                            rustyguard::SendMessage::Data(_, metadata) => {
+                                                let buf = &mut reply_buf[..reply_len + 16 + 16];
+                                                metadata.frame_in_place(buf);
+                                                endpoint.send_to(buf, addr).unwrap();
                                             }
                                         }
                                     } else {

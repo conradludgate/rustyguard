@@ -60,16 +60,27 @@ async fn main() {
                 match sessions.recv_message(addr, ep_buf.filled_mut()) {
                     Err(e) => println!("error: {e:?}"),
                     Ok(Message::Noop) => println!("noop"),
-                    Ok(Message::HandshakeComplete(_peer)) => {}
-                    Ok(Message::Read(_peer, buf)) => {
+                    Ok(Message::HandshakeComplete(_peer, _encryptor)) => {
+                        // TODO(conrad): resend queued message.
+                        // _encryptor.encrypt_and_frame(payload_buffer)
+                        // endpoint.send_to(payload_buffer, addr).await.unwrap()
+                    }
+                    Ok(Message::Read(peer_idx, buf)) => {
                         if buf.is_empty() {
                             continue;
                         }
+
                         // println!("wg->tun {buf:02X?}");
-                        // let Ok(ipv4) = packet::ip::v4::Packet::new(&*buf) else {
-                        //     continue;
-                        // };
+                        let Ok(ipv4) = packet::ip::v4::Packet::new(&*buf) else {
+                            continue;
+                        };
                         // println!("{ipv4:?}");
+
+                        let src_ip = ipv4.source();
+                        if *peer_net.lookup(&src_ip).1 != peer_idx {
+                            continue;
+                        }
+
                         dev.write_all(buf).await.unwrap();
                     }
                     Ok(Message::Write(buf)) => {
@@ -95,11 +106,12 @@ async fn main() {
                 match sessions.send_message(*peer_idx, tun_buf.filled_mut()).unwrap() {
                     rustyguard::SendMessage::Maintenance(msg) => {
                         endpoint.send_to(msg.data(), msg.to()).await.unwrap();
+                        // TODO(conrad): queue up tun_buf to send again later.
                     },
-                    rustyguard::SendMessage::Data(ep, header, tag) => {
-                        tun_buf.put_slice(&tag[..]);
-                        reply_buf[..H].copy_from_slice(header.as_ref());
-                        endpoint.send_to(&reply_buf[..pad_to + H + 16], ep).await.unwrap();
+                    rustyguard::SendMessage::Data(ep, metadata) => {
+                        let buf = &mut reply_buf[..pad_to + H + 16];
+                        metadata.frame_in_place(buf);
+                        endpoint.send_to(buf, ep).await.unwrap();
                     }
                 }
             }
