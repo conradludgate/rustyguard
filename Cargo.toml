@@ -15,11 +15,11 @@ zeroize = "1.8"
 subtle = { version = "2.6", default-features = false }
 
 # other helpful things
-bytemuck = { version = "1", features = ["derive"] }
 hashbrown = { version = "0.14", default-features = false }
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 rustc-hash = { version = "2", default-features = false }
 tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
+zerocopy = { version = "0.7.35", features = ["derive"] }
 
 [dev-dependencies]
 divan = "0.1.14"

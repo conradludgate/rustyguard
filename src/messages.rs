@@ -1,9 +1,9 @@
 use core::{net::SocketAddr, ops::ControlFlow};
 
-use bytemuck::{Pod, Zeroable};
 use chacha20poly1305::Key;
 use rand::RngCore;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zerocopy::{byteorder::little_endian, AsBytes, FromBytes, FromZeroes};
 
 use crate::{
     crypto::{
@@ -15,7 +15,7 @@ use crate::{
 
 impl AsRef<[u8]> for DataHeader {
     fn as_ref(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
+        self.as_bytes()
     }
 }
 
@@ -24,11 +24,11 @@ pub const MSG_SECOND: u32 = 2;
 pub const MSG_DATA: u32 = 4;
 pub const MSG_COOKIE: u32 = 3;
 
-#[derive(Pod, Zeroable, Clone, Copy)]
-#[repr(C)]
+#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[repr(C, align(4))]
 pub(crate) struct HandshakeInit {
-    pub(crate) _type: LEU32,
-    pub(crate) sender: LEU32,
+    pub(crate) _type: little_endian::U32,
+    pub(crate) sender: little_endian::U32,
     pub(crate) ephemeral_key: [u8; 32],
     pub(crate) static_key: EncryptedPublicKey,
     pub(crate) timestamp: EncryptedTimestamp,
@@ -44,59 +44,33 @@ pub(crate) struct HandshakeInitData {
     pub(crate) timestamp: [u8; 12],
 }
 
-#[derive(Pod, Zeroable, Clone, Copy)]
-#[repr(C)]
+#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[repr(C, align(4))]
 pub(crate) struct HandshakeResp {
-    pub(crate) _type: LEU32,
-    pub(crate) sender: LEU32,
-    pub(crate) receiver: LEU32,
+    pub(crate) _type: little_endian::U32,
+    pub(crate) sender: little_endian::U32,
+    pub(crate) receiver: little_endian::U32,
     pub(crate) ephemeral_key: [u8; 32],
     pub(crate) empty: EncryptedEmpty,
     pub(crate) mac1: Mac,
     pub(crate) mac2: Mac,
 }
 
-#[derive(Pod, Zeroable, Clone, Copy)]
-#[repr(C)]
+#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[repr(C, align(4))]
 pub(crate) struct CookieMessage {
-    pub(crate) _type: LEU32,
-    pub(crate) receiver: LEU32,
+    pub(crate) _type: little_endian::U32,
+    pub(crate) receiver: little_endian::U32,
     pub(crate) nonce: [u8; 24],
     pub(crate) cookie: EncryptedCookie,
 }
 
-#[derive(Pod, Zeroable, Clone, Copy)]
-#[repr(C)]
+#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[repr(C, align(8))]
 pub struct DataHeader {
-    pub(crate) _type: LEU32,
-    pub(crate) receiver: LEU32,
-    pub(crate) counter: LEU64,
-}
-
-#[derive(Pod, Zeroable, Clone, Copy, Default)]
-#[repr(C)]
-pub(crate) struct LEU32(u32);
-
-impl LEU32 {
-    pub(crate) fn get(self) -> u32 {
-        u32::from_le(self.0)
-    }
-    pub(crate) fn new(n: u32) -> Self {
-        Self(n.to_le())
-    }
-}
-
-#[derive(Pod, Zeroable, Clone, Copy, Default)]
-#[repr(C)]
-pub(crate) struct LEU64(u64);
-
-impl LEU64 {
-    pub(crate) fn get(self) -> u64 {
-        u64::from_le(self.0)
-    }
-    pub(crate) fn new(n: u64) -> Self {
-        Self(n.to_le())
-    }
+    pub(crate) _type: little_endian::U32,
+    pub(crate) receiver: little_endian::U32,
+    pub(crate) counter: little_endian::U64,
 }
 
 /// Both handshake messages are protected via MACs which can quickly be used
@@ -106,14 +80,13 @@ impl LEU64 {
 /// The second MAC is only checked if the server is overloaded. If the server is
 /// overloaded and second MAC is invalid, a CookieReply is sent to the client,
 /// which contains an encrypted key that can be used to re-sign the handshake later.
-pub(crate) trait HasMac: Pod {
+pub(crate) trait HasMac: FromBytes + AsBytes + Sized {
     fn verify<'m>(
         msg: &'m mut [u8],
         state: &mut Sessions,
         socket: SocketAddr,
     ) -> Result<ControlFlow<CookieMessage, &'m mut Self>, Error> {
-        let this: &'m mut Self =
-            bytemuck::try_from_bytes_mut(msg).map_err(|_| Error::InvalidMessage)?;
+        let this: &'m mut Self = Self::mut_from(msg).ok_or(Error::InvalidMessage)?;
 
         // verify the mac1. this should be very fast.
         // takes 450ns on my M2 Max.
@@ -141,7 +114,7 @@ pub(crate) trait HasMac: Pod {
                 );
 
                 let msg = CookieMessage {
-                    _type: LEU32::new(MSG_COOKIE),
+                    _type: little_endian::U32::new(MSG_COOKIE),
                     receiver: this.sender(),
                     nonce,
                     cookie,
@@ -182,25 +155,25 @@ pub(crate) trait HasMac: Pod {
     fn compute_mac2(&self, cookie: &Cookie) -> Mac;
     fn get_mac1(&self) -> &Mac;
     fn get_mac2(&self) -> &Mac;
-    fn sender(&self) -> LEU32;
+    fn sender(&self) -> little_endian::U32;
 }
 
 macro_rules! mac_protected {
     ($i:ident, $t:ident) => {
         impl HasMac for $i {
-            fn sender(&self) -> LEU32 {
+            fn sender(&self) -> little_endian::U32 {
                 self.sender
             }
 
             fn compute_mac1(&self, mac1_key: &chacha20poly1305::Key) -> Mac {
-                let offset = bytemuck::offset_of!(self, $i, mac1);
-                let bytes = bytemuck::bytes_of(self);
+                let offset = core::mem::offset_of!($i, mac1);
+                let bytes = self.as_bytes();
                 crate::crypto::mac(mac1_key, &bytes[..offset])
             }
 
             fn compute_mac2(&self, cookie: &Cookie) -> Mac {
-                let offset = bytemuck::offset_of!(self, $i, mac2);
-                let bytes = bytemuck::bytes_of(self);
+                let offset = core::mem::offset_of!($i, mac2);
+                let bytes = self.as_bytes();
                 crate::crypto::mac(&cookie.0, &bytes[..offset])
             }
 
@@ -268,8 +241,8 @@ impl HandshakeInit {
 
         // build the message and protect with the MACs
         let mut msg = Self {
-            _type: LEU32::new(MSG_FIRST),
-            sender: LEU32::new(sender),
+            _type: little_endian::U32::new(MSG_FIRST),
+            sender: little_endian::U32::new(sender),
             ephemeral_key: epk_i.to_bytes(),
             static_key,
             timestamp,
@@ -359,9 +332,9 @@ impl HandshakeResp {
 
         // build the message and protect with the MACs
         let mut msg = HandshakeResp {
-            _type: LEU32::new(MSG_SECOND),
-            sender: LEU32::new(sender),
-            receiver: LEU32::new(data.sender),
+            _type: little_endian::U32::new(MSG_SECOND),
+            sender: little_endian::U32::new(sender),
+            receiver: little_endian::U32::new(data.sender),
             ephemeral_key: epk_r.to_bytes(),
             empty,
             mac1: [0; 16],

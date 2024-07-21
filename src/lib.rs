@@ -25,19 +25,19 @@ use core::time::Duration;
 use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 
-use bytemuck::{Pod, Zeroable};
 use crypto::{
     cookie_key, mac, mac1_key, Cookie, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac, Tag,
 };
 use hashbrown::{HashMap, HashTable};
 use messages::{
-    CookieMessage, HandshakeInit, HandshakeResp, HasMac, LEU32, LEU64, MSG_COOKIE, MSG_DATA,
-    MSG_FIRST, MSG_SECOND,
+    CookieMessage, HandshakeInit, HandshakeResp, HasMac, MSG_COOKIE, MSG_DATA, MSG_FIRST,
+    MSG_SECOND,
 };
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use rustc_hash::{FxBuildHasher, FxSeededState};
 use tai64::{Tai64, Tai64N};
 pub use x25519_dalek::{PublicKey, StaticSecret};
+use zerocopy::{little_endian, AsBytes, FromBytes, FromZeroes};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 mod crypto;
@@ -277,9 +277,9 @@ impl Peer {
 
         session.sent = now;
         let header = DataHeader {
-            _type: LEU32::new(MSG_DATA),
-            receiver: LEU32::new(session.receiver),
-            counter: LEU64::new(n),
+            _type: little_endian::U32::new(MSG_DATA),
+            receiver: little_endian::U32::new(session.receiver),
+            counter: little_endian::U64::new(n),
         };
 
         EncryptedMetadata {
@@ -504,8 +504,8 @@ impl MaintenanceMsg {
     }
     pub fn data(&self) -> &[u8] {
         match &self.data {
-            MaintenanceRepr::Init(init) => bytemuck::bytes_of(init),
-            MaintenanceRepr::Data(ka) => bytemuck::bytes_of(ka),
+            MaintenanceRepr::Init(init) => init.as_bytes(),
+            MaintenanceRepr::Data(ka) => ka.as_bytes(),
         }
     }
 }
@@ -515,7 +515,7 @@ enum MaintenanceRepr {
     Data(Keepalive),
 }
 
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
 #[repr(C)]
 struct Keepalive {
     header: DataHeader,
@@ -535,9 +535,9 @@ macro_rules! allocate_session {
     }};
 }
 
-fn write_msg<'b, T: Pod>(buf: &'b mut [u8], t: &T) -> &'b mut [u8] {
+fn write_msg<'b, T: AsBytes>(buf: &'b mut [u8], t: &T) -> &'b mut [u8] {
     let resp_msg = &mut buf[..core::mem::size_of::<T>()];
-    resp_msg.copy_from_slice(bytemuck::bytes_of(t));
+    resp_msg.copy_from_slice(t.as_bytes());
     resp_msg
 }
 
@@ -619,8 +619,8 @@ impl Sessions {
 
         // Every message in wireguard starts with a 1 byte message tag and 3 bytes empty.
         // This happens to be easy to read as a little-endian u32.
-        let (msg_type, _) = msg.split_first_chunk_mut().ok_or(Error::InvalidMessage)?;
-        match u32::from_le_bytes(*msg_type) {
+        let msg_type = little_endian::U32::ref_from_prefix(msg).ok_or(Error::InvalidMessage)?;
+        match msg_type.get() {
             MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
             MSG_SECOND => self.handle_handshake_resp(socket, msg),
             MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
@@ -750,8 +750,7 @@ impl Sessions {
     #[inline(never)]
     fn handle_cookie(&mut self, msg: &mut [u8]) -> Result<(), Error> {
         unsafe_log!("parsed as cookie packet");
-        let cookie_msg = bytemuck::try_from_bytes_mut::<CookieMessage>(msg)
-            .map_err(|_| Error::InvalidMessage)?;
+        let cookie_msg = CookieMessage::mut_from(msg).ok_or(Error::InvalidMessage)?;
 
         let (SessionType::Cipher(peer_idx) | SessionType::Handshake(peer_idx)) = self
             .peers_by_session
@@ -796,7 +795,8 @@ impl Sessions {
             .split_last_chunk_mut::<16>()
             .ok_or(Error::InvalidMessage)?;
 
-        let header: &mut DataHeader = bytemuck::cast_mut::<[u8; HEADER_LEN], DataHeader>(header);
+        let header: &mut DataHeader =
+            DataHeader::mut_from(header).expect("alignment and length has already been checked");
 
         let session_id = header.receiver.get();
         let peer_idx = match self.peers_by_session.get(&session_id) {

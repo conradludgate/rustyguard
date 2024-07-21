@@ -37,7 +37,7 @@ The only parsing we need to do is:
 2. Check the message length.
 
 This makes it very easy to avoid both buffer exploits, as well as reducing bounds-check overhead as we only
-need to perform 1 bounds check. This comes courtesy of [`bytemuck`](https://docs.rs/bytemuck).
+need to perform 1 bounds check. This comes courtesy of [`zerocopy`](https://docs.rs/zerocopy).
 
 This also means we can focus on the things that actually matter, the cryptography, the key schedule, and the
 timing system.

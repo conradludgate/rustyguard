@@ -1,8 +1,7 @@
-use bytemuck::bytes_of;
-use bytemuck::{Pod, TransparentWrapper, Zeroable};
 pub use chacha20poly1305::Key;
 use x25519_dalek::PublicKey;
 use x25519_dalek::StaticSecret;
+use zerocopy::{AsBytes, FromBytes, FromZeroes};
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
@@ -76,7 +75,7 @@ fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
         ti = hmac
             .clone()
             .chain_update(ti)
-            .chain_update([i+1])
+            .chain_update([i + 1])
             .finalize()
             .into_bytes();
         output[i as usize] = ti;
@@ -139,11 +138,11 @@ impl HandshakeState {
     }
 }
 
-#[derive(Clone, Copy, Pod, Zeroable, TransparentWrapper)]
+#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
 #[repr(transparent)]
 pub struct Cookie(pub(crate) Mac);
 
-#[derive(Clone, Copy, Pod, Zeroable, TransparentWrapper)]
+#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
 #[repr(transparent)]
 pub struct Tag([u8; 16]);
 
@@ -169,7 +168,7 @@ impl Tag {
 
 macro_rules! encrypted {
     ($i:ident, $n:literal) => {
-        #[derive(Clone, Copy, Pod, Zeroable)]
+        #[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
         #[repr(C)]
         pub(crate) struct $i {
             msg: [u8; $n],
@@ -185,7 +184,7 @@ macro_rules! encrypted {
                 use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 
                 let aad = state.hash;
-                state.mix_hash(bytes_of(&*self));
+                state.mix_hash(self.as_bytes());
 
                 ChaCha20Poly1305::new(key)
                     .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, self.tag.as_tag())
@@ -209,7 +208,7 @@ macro_rules! encrypted {
                     msg,
                     tag: Tag::from_tag(tag),
                 };
-                state.mix_hash(bytes_of(&out));
+                state.mix_hash(out.as_bytes());
 
                 out
             }
@@ -221,7 +220,7 @@ encrypted!(EncryptedEmpty, 0);
 encrypted!(EncryptedTimestamp, 12);
 encrypted!(EncryptedPublicKey, 32);
 
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
 #[repr(C)]
 pub(crate) struct EncryptedCookie {
     msg: Cookie,
