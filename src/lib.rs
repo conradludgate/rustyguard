@@ -17,6 +17,10 @@ macro_rules! unsafe_log {
 
 extern crate alloc;
 
+mod anti_replay;
+mod crypto;
+mod messages;
+
 use core::hash::BuildHasher;
 use core::net::SocketAddr;
 use core::ops::ControlFlow;
@@ -40,9 +44,8 @@ pub use x25519_dalek::{PublicKey, StaticSecret};
 use zerocopy::{little_endian, AsBytes, FromBytes, FromZeroes};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-mod crypto;
-mod messages;
-
+#[cfg(fuzz)]
+pub use anti_replay::AntiReplay;
 pub use messages::DataHeader;
 
 /// After sending this many messages, a rekey should take place.

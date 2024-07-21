@@ -5,6 +5,7 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
+use crate::anti_replay::AntiReplay;
 use crate::Error;
 
 /// Construction: The UTF-8 string literal “Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s”, 37 bytes of output.
@@ -306,12 +307,14 @@ impl EncryptionKey {
 #[derive(ZeroizeOnDrop)]
 pub struct DecryptionKey {
     key: chacha20poly1305::ChaCha20Poly1305,
+    replay: AntiReplay,
 }
 impl DecryptionKey {
     pub(crate) fn new(key: chacha20poly1305::Key) -> Self {
         use chacha20poly1305::KeyInit;
         Self {
             key: chacha20poly1305::ChaCha20Poly1305::new(&key),
+            replay: AntiReplay::default(),
         }
     }
 
@@ -322,6 +325,11 @@ impl DecryptionKey {
         tag: Tag,
     ) -> Result<(), Error> {
         use chacha20poly1305::{AeadInPlace, Nonce};
+
+        if !self.replay.check(counter) {
+            unsafe_log!("payload replayed or is too old");
+            return Err(Error::Rejected)
+        }
 
         let mut nonce = Nonce::default();
         nonce[4..12].copy_from_slice(&counter.to_le_bytes());
