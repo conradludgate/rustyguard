@@ -39,14 +39,15 @@ use messages::{
 };
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use rustc_hash::{FxBuildHasher, FxSeededState};
-use tai64::{Tai64, Tai64N};
-pub use x25519_dalek::{PublicKey, StaticSecret};
+use tai64::Tai64;
 use zerocopy::{little_endian, AsBytes, FromBytes, FromZeroes};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(fuzz)]
 pub use anti_replay::AntiReplay;
 pub use messages::DataHeader;
+pub use tai64::Tai64N;
+pub use x25519_dalek::{PublicKey, StaticSecret};
 
 /// After sending this many messages, a rekey should take place.
 const REKEY_AFTER_MESSAGES: u64 = 1 << 60; // 2^60

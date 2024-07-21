@@ -72,7 +72,7 @@ However, It is still necessary for the application developer to provide:
 ## Project TODO:
 
 - [ ] Overload detection for DDoS mitigation
-- [ ] Reject data packet replay with sliding counter window bitset
+- [x] Reject data packet replay with sliding counter window bitset
 - [ ] More efficient timer management
 - [ ] Optional multithreadding support
 - [ ] Live peer updating
