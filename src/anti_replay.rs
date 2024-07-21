@@ -26,7 +26,7 @@ impl AntiReplay {
             let next_index = ((self.last >> REDUNDANT_BIT_SHIFTS) + 1) as usize;
 
             // edge case - skips the entire window ahead.
-            if index - next_index > BITMAP_LEN {
+            if index > next_index && index - next_index > BITMAP_LEN {
                 self.bitmap = [0; BITMAP_LEN];
             } else {
                 for i in next_index..=index {
@@ -40,7 +40,7 @@ impl AntiReplay {
             return true;
         }
 
-        let d = n - self.last;
+        let d = self.last - n;
         if d >= WINDOW_SIZE {
             return false;
         }

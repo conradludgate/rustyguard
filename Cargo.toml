@@ -53,3 +53,6 @@ harness = false
 [[bench]]
 name = "roundtrip"
 harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(rustyguard_unsafe_logging)'] }
