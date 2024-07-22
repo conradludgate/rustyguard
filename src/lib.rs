@@ -40,7 +40,7 @@ use messages::{
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use rustc_hash::{FxBuildHasher, FxSeededState};
 use tai64::Tai64;
-use zerocopy::{little_endian, AsBytes, FromBytes, FromZeroes};
+use zerocopy::{little_endian, transmute_mut, AsBytes, FromBytes, FromZeroes};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(fuzz)]
@@ -779,28 +779,19 @@ impl Sessions {
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<(PeerId, &'m mut [u8]), Error> {
-        const HEADER_LEN: usize = core::mem::size_of::<DataHeader>();
-
         unsafe_log!("[{socket:?}] parsed as data packet");
 
-        if msg.as_ptr().align_offset(16) != 0 {
-            return Err(Error::Unaligned);
-        }
+        #[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+        #[repr(C, align(16))]
+        struct DataSegment([u8; 16]);
 
-        if msg.len() % 16 != 0 || msg.len() < HEADER_LEN + 16 {
-            unsafe_log!("[{socket:?}] msg wrong size: len={}", msg.len());
+        let len = msg.len();
+        let segments = DataSegment::mut_slice_from(msg).ok_or(Error::InvalidMessage)?;
+        let [header, payload @ .., tag] = segments else {
+            unsafe_log!("[{socket:?}] msg wrong size: len={len}");
             return Err(Error::InvalidMessage);
-        }
-
-        let (header, payload) = msg
-            .split_first_chunk_mut::<HEADER_LEN>()
-            .ok_or(Error::InvalidMessage)?;
-        let (payload, tag) = payload
-            .split_last_chunk_mut::<16>()
-            .ok_or(Error::InvalidMessage)?;
-
-        let header: &mut DataHeader =
-            DataHeader::mut_from(header).expect("alignment and length has already been checked");
+        };
+        let header: &mut DataHeader = transmute_mut!(header);
 
         let session_id = header.receiver.get();
         let peer_idx = match self.peers_by_session.get(&session_id) {
@@ -823,9 +814,10 @@ impl Sessions {
             });
         }
 
+        let payload = payload.as_bytes_mut();
         session
             .decrypt
-            .decrypt(header.counter.get(), payload, Tag::from_slice(tag))?;
+            .decrypt(header.counter.get(), payload, Tag::from_slice(&tag.0))?;
 
         Ok((peer_idx, payload))
     }
