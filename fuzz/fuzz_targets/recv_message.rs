@@ -2,10 +2,10 @@
 
 use std::{fmt::Debug, net::SocketAddr};
 
-use chacha20poly1305::Key;
 use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use rustyguard::{Config, Peer, PublicKey, Sessions, StaticSecret, Tai64N};
+use rustyguard_core::{Config, Peer, PublicKey, Sessions, StaticSecret, Tai64N};
+use rustyguard_crypto::Key;
 
 /// 16-byte aligned packet of 2048 bytes.
 /// MTU is assumed to be in the range of 1500 or so, so 2048 should be sufficient.
@@ -54,7 +54,8 @@ fuzz_target!(|data: Packet| {
     let peer = Peer::new(spk_r, Some(psk), Some(server_addr));
     let mut config = Config::new(ssk_i);
     let _ = config.insert_peer(peer);
-    let mut sessions_i = Sessions::new(config, now, &mut rng);
+    let mut sessions_i = Sessions::new(config);
+    sessions_i.turn(now, &mut rng);
 
     _ = sessions_i.recv_message(server_addr, &mut data.b.0[..data.len]);
 });

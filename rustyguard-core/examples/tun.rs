@@ -1,6 +1,8 @@
 use base64ct::{Base64, Encoding};
 use rand::rngs::OsRng;
-use rustyguard::{Config, DataHeader, Message, Peer, PeerId, PublicKey, Sessions, StaticSecret};
+use rustyguard_core::{
+    Config, DataHeader, Message, Peer, PeerId, PublicKey, Sessions, StaticSecret,
+};
 use tai64::Tai64N;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadBuf},
@@ -28,7 +30,7 @@ async fn main() {
     }
     let peer_net = peer_net.compress();
 
-    let mut sessions = Sessions::new(rg_config, Tai64N::now(), &mut OsRng);
+    let mut sessions = Sessions::new(rg_config);
     let endpoint = UdpSocket::bind(args.interface.host).await.unwrap();
 
     let mut buf: Box<AlignedPacket> = Box::new(AlignedPacket([0; 2048]));
@@ -104,11 +106,11 @@ async fn main() {
                 tun_buf.put_slice(&[0; 16][..pad_to-n]);
 
                 match sessions.send_message(*peer_idx, tun_buf.filled_mut()).unwrap() {
-                    rustyguard::SendMessage::Maintenance(msg) => {
+                    rustyguard_core::SendMessage::Maintenance(msg) => {
                         endpoint.send_to(msg.data(), msg.to()).await.unwrap();
                         // TODO(conrad): queue up tun_buf to send again later.
                     },
-                    rustyguard::SendMessage::Data(ep, metadata) => {
+                    rustyguard_core::SendMessage::Data(ep, metadata) => {
                         let buf = &mut reply_buf[..pad_to + H + 16];
                         metadata.frame_in_place(buf);
                         endpoint.send_to(buf, ep).await.unwrap();

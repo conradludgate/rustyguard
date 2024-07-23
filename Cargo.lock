@@ -974,16 +974,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustyguard"
+name = "rustyguard-core"
 version = "0.1.0"
 dependencies = [
  "base64ct",
- "blake2",
- "chacha20poly1305",
  "clap",
  "divan",
  "hashbrown",
- "hmac",
  "insta",
  "ipnet",
  "iptrie",
@@ -992,11 +989,39 @@ dependencies = [
  "packet",
  "rand",
  "rustc-hash",
- "subtle",
+ "rustyguard-crypto",
+ "rustyguard-types",
  "tai64",
  "tokio",
  "tun",
+ "zerocopy",
+ "zeroize",
+]
+
+[[package]]
+name = "rustyguard-crypto"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "chacha20poly1305",
+ "divan",
+ "hmac",
+ "insta",
+ "rand",
+ "rand_core",
+ "rustyguard-types",
+ "subtle",
+ "tai64",
  "x25519-dalek",
+ "zerocopy",
+ "zeroize",
+]
+
+[[package]]
+name = "rustyguard-types"
+version = "0.1.0"
+dependencies = [
  "zerocopy",
  "zeroize",
 ]

@@ -1,27 +1,31 @@
 pub use chacha20poly1305::Key;
+use rustyguard_types::EncryptedEmpty;
+use rustyguard_types::EncryptedPublicKey;
+use rustyguard_types::EncryptedTimestamp;
+use rustyguard_types::Tag;
 use x25519_dalek::PublicKey;
 use x25519_dalek::StaticSecret;
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::AsBytes;
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
-use crate::anti_replay::AntiReplay;
-use crate::Error;
+use crate::AntiReplay;
+use crate::CryptoError;
 
 /// Construction: The UTF-8 string literal “Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s”, 37 bytes of output.
 /// Identifier: The UTF-8 string literal “WireGuard v1 zx2c4 Jason@zx2c4.com”, 34 bytes of output.
 /// Ci := Hash(Construction)
 /// Hi := Hash(Ci || Identifier)
-const CONSTRUCTION_HASH: [u8; 32] = [
+pub(crate) const CONSTRUCTION_HASH: [u8; 32] = [
     96, 226, 109, 174, 243, 39, 239, 192, 46, 195, 53, 226, 160, 37, 210, 208, 22, 235, 66, 6, 248,
     114, 119, 245, 45, 56, 209, 152, 139, 120, 205, 54,
 ];
-const IDENTIFIER_HASH: [u8; 32] = [
+pub(crate) const IDENTIFIER_HASH: [u8; 32] = [
     34, 17, 179, 97, 8, 26, 197, 102, 105, 18, 67, 219, 69, 138, 213, 50, 45, 156, 108, 102, 34,
     147, 232, 183, 14, 225, 156, 101, 186, 7, 158, 243,
 ];
-const LABEL_MAC1: [u8; 8] = *b"mac1----";
-const LABEL_COOKIE: [u8; 8] = *b"cookie--";
+pub(crate) const LABEL_MAC1: [u8; 8] = *b"mac1----";
+pub(crate) const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
 fn nonce(counter: u64) -> chacha20poly1305::Nonce {
     let mut n = chacha20poly1305::Nonce::default();
@@ -29,7 +33,7 @@ fn nonce(counter: u64) -> chacha20poly1305::Nonce {
     n
 }
 
-fn hash(msg: [&[u8]; 2]) -> [u8; 32] {
+pub(crate) fn hash(msg: [&[u8]; 2]) -> [u8; 32] {
     use blake2::digest::Digest;
     let mut mac = blake2::Blake2s256::default();
     for msg in msg {
@@ -38,7 +42,7 @@ fn hash(msg: [&[u8]; 2]) -> [u8; 32] {
     mac.finalize().into()
 }
 
-pub(crate) fn mac(key: &[u8], msg: &[u8]) -> Mac {
+pub fn mac(key: &[u8], msg: &[u8]) -> Mac {
     use blake2::digest::Mac;
     let mut mac = blake2::Blake2sMac::<blake2::digest::consts::U16>::new_from_slice(key).unwrap();
     mac.update(msg);
@@ -132,72 +136,48 @@ impl HandshakeState {
         self.hash = hash([&self.hash, b]);
     }
 
-    pub fn split(&mut self) -> (Key, Key) {
+    pub fn split(&mut self, initiator: bool) -> (EncryptionKey, DecryptionKey) {
         let [k1, k2] = hkdf(&self.chain, &[]);
         self.zeroize();
-        (k1, k2)
+
+        if initiator {
+            (EncryptionKey::new(k1), DecryptionKey::new(k2))
+        } else {
+            (EncryptionKey::new(k2), DecryptionKey::new(k1))
+        }
     }
 }
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
-#[repr(transparent)]
-pub struct Cookie(pub(crate) Mac);
+pub trait Encrypted<const N: usize> {
+    fn decrypt_and_hash(
+        &mut self,
+        state: &mut HandshakeState,
+        key: &Key,
+    ) -> Result<&mut [u8; N], CryptoError>;
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
-#[repr(transparent)]
-pub struct Tag([u8; 16]);
-
-impl core::ops::Deref for Tag {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Tag {
-    pub(crate) fn from_slice(tag: &[u8; 16]) -> Self {
-        Self(*tag)
-    }
-
-    fn as_tag(&self) -> &chacha20poly1305::Tag {
-        (&self.0).into()
-    }
-    fn from_tag(tag: chacha20poly1305::Tag) -> Self {
-        Self(tag.into())
-    }
+    fn encrypt_and_hash(msg: [u8; N], state: &mut HandshakeState, key: &Key) -> Self;
 }
 
 macro_rules! encrypted {
     ($i:ident, $n:literal) => {
-        #[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
-        #[repr(C)]
-        pub(crate) struct $i {
-            msg: [u8; $n],
-            tag: Tag,
-        }
-
-        impl $i {
-            pub(crate) fn decrypt_and_hash(
+        impl Encrypted<$n> for $i {
+            fn decrypt_and_hash(
                 &mut self,
                 state: &mut HandshakeState,
                 key: &Key,
-            ) -> Result<&mut [u8; $n], crate::Error> {
+            ) -> Result<&mut [u8; $n], CryptoError> {
                 use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 
                 let aad = state.hash;
                 state.mix_hash(self.as_bytes());
 
                 ChaCha20Poly1305::new(key)
-                    .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, self.tag.as_tag())
-                    .map_err(|_| crate::Error::Unspecified)?;
+                    .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, (&self.tag.0).into())
+                    .map_err(|_| CryptoError::DecryptionError)?;
                 Ok(&mut self.msg)
             }
 
-            pub(crate) fn encrypt_and_hash(
-                mut msg: [u8; $n],
-                state: &mut HandshakeState,
-                key: &Key,
-            ) -> Self {
+            fn encrypt_and_hash(mut msg: [u8; $n], state: &mut HandshakeState, key: &Key) -> Self {
                 use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 
                 let aad = state.hash;
@@ -207,7 +187,7 @@ macro_rules! encrypted {
 
                 let out = Self {
                     msg,
-                    tag: Tag::from_tag(tag),
+                    tag: Tag(tag.into()),
                 };
                 state.mix_hash(out.as_bytes());
 
@@ -221,65 +201,16 @@ encrypted!(EncryptedEmpty, 0);
 encrypted!(EncryptedTimestamp, 12);
 encrypted!(EncryptedPublicKey, 32);
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
-#[repr(C)]
-pub(crate) struct EncryptedCookie {
-    msg: Cookie,
-    tag: Tag,
-}
-
-impl EncryptedCookie {
-    pub(crate) fn decrypt_cookie(
-        &mut self,
-        key: &Key,
-        nonce: &[u8; 24],
-        aad: &[u8],
-    ) -> Result<&mut Cookie, crate::Error> {
-        use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
-
-        XChaCha20Poly1305::new(key)
-            .decrypt_in_place_detached(nonce.into(), aad, &mut self.msg.0, self.tag.as_tag())
-            .map_err(|_| crate::Error::Unspecified)?;
-
-        Ok(&mut self.msg)
-    }
-
-    pub(crate) fn encrypt_cookie(
-        mut cookie: Cookie,
-        key: &Key,
-        nonce: &[u8; 24],
-        aad: &[u8],
-    ) -> Self {
-        use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
-
-        let tag = XChaCha20Poly1305::new(key)
-            .encrypt_in_place_detached(nonce.into(), aad, &mut cookie.0)
-            .expect("cookie message should not be larger than max message size");
-
-        Self {
-            msg: cookie,
-            tag: Tag::from_tag(tag),
-        }
-    }
-}
-
 pub type Mac = [u8; 16];
-
-pub fn mac1_key(spk: &PublicKey) -> Key {
-    hash([&LABEL_MAC1, spk.as_bytes()]).into()
-}
-pub fn cookie_key(spk: &PublicKey) -> Key {
-    hash([&LABEL_COOKIE, spk.as_bytes()]).into()
-}
 
 #[derive(ZeroizeOnDrop)]
 pub struct EncryptionKey {
     key: chacha20poly1305::ChaCha20Poly1305,
-    pub(crate) counter: u64,
+    pub counter: u64,
 }
 
 impl EncryptionKey {
-    pub(crate) fn new(key: chacha20poly1305::Key) -> Self {
+    pub fn new(key: chacha20poly1305::Key) -> Self {
         use chacha20poly1305::KeyInit;
         Self {
             key: chacha20poly1305::ChaCha20Poly1305::new(&key),
@@ -287,7 +218,7 @@ impl EncryptionKey {
         }
     }
 
-    pub(crate) fn encrypt(&mut self, payload: &mut [u8]) -> Tag {
+    pub fn encrypt(&mut self, payload: &mut [u8]) -> Tag {
         use chacha20poly1305::{AeadInPlace, Nonce};
         let n = self.counter;
         self.counter += 1;
@@ -300,7 +231,7 @@ impl EncryptionKey {
             .encrypt_in_place_detached(&nonce, &[], payload)
             .expect("message to large to encrypt");
 
-        Tag::from_tag(tag)
+        Tag(tag.into())
     }
 }
 
@@ -310,7 +241,7 @@ pub struct DecryptionKey {
     replay: AntiReplay,
 }
 impl DecryptionKey {
-    pub(crate) fn new(key: chacha20poly1305::Key) -> Self {
+    pub fn new(key: Key) -> Self {
         use chacha20poly1305::KeyInit;
         Self {
             key: chacha20poly1305::ChaCha20Poly1305::new(&key),
@@ -318,17 +249,17 @@ impl DecryptionKey {
         }
     }
 
-    pub(crate) fn decrypt(
+    pub fn decrypt(
         &mut self,
         counter: u64,
         payload: &mut [u8],
         tag: Tag,
-    ) -> Result<(), Error> {
+    ) -> Result<(), CryptoError> {
         use chacha20poly1305::{AeadInPlace, Nonce};
 
         if !self.replay.check(counter) {
             unsafe_log!("payload replayed or is too old");
-            return Err(Error::Rejected)
+            return Err(CryptoError::Rejected);
         }
 
         let mut nonce = Nonce::default();
@@ -341,7 +272,7 @@ impl DecryptionKey {
                 payload,
                 chacha20poly1305::Tag::from_slice(&tag.0),
             )
-            .map_err(|_| Error::Rejected)?;
+            .map_err(|_| CryptoError::DecryptionError)?;
 
         Ok(())
     }

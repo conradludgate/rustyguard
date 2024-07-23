@@ -12,8 +12,12 @@ libfuzzer-sys = "0.4"
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 chacha20poly1305 = { version = "0.10", default-features = false }
 
-[dependencies.rustyguard]
-path = ".."
+[dependencies.rustyguard-core]
+path = "../rustyguard-core"
+[dependencies.rustyguard-types]
+path = "../rustyguard-types"
+[dependencies.rustyguard-crypto]
+path = "../rustyguard-crypto"
 
 # Prevent this from interfering with workspaces
 [workspace]

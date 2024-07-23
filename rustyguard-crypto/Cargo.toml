@@ -1,0 +1,40 @@
+[package]
+name = "rustyguard-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
+
+# crypto
+blake2 = { version = "0.10", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false }
+hmac = { version = "0.12" }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+
+# crypto adjacent
+zeroize = "1.8"
+subtle = { version = "2.6", default-features = false }
+
+# other helpful things
+rand_core = { version = "0.6", default-features = false }
+tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
+zerocopy = { version = "0.7.35", features = ["derive"] }
+
+[dev-dependencies]
+divan = "0.1.14"
+base64ct = { version = "1", features = ["std"] }
+tai64 = { version = "4.0", features = ["std"] }
+rand = { version = "0.8", features = ["getrandom"] }
+insta = "1.39.0"
+
+[[bench]]
+name = "mac"
+harness = false
+
+[[bench]]
+name = "cookie"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(rustyguard_unsafe_logging)'] }

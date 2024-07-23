@@ -1,12 +1,13 @@
 use core::net::SocketAddr;
 
-use chacha20poly1305::Key;
 use divan::{black_box, Bencher};
 use rand::{thread_rng, RngCore};
+use rustyguard_core::{PublicKey, StaticSecret};
+use rustyguard_crypto::Key;
 use tai64::Tai64N;
-use x25519_dalek::{PublicKey, StaticSecret};
+use zerocopy::AsBytes;
 
-use rustyguard::{Config, Peer, PeerId, Sessions};
+use rustyguard_core::{Config, Peer, PeerId, Sessions};
 
 fn main() {
     divan::main()
@@ -21,7 +22,9 @@ fn session_with_peer(
     let peer = Peer::new(peer_public_key, Some(preshared_key), Some(endpoint));
     let mut config = Config::new(secret_key);
     let id = config.insert_peer(peer);
-    (Sessions::new(config, Tai64N::now(), &mut thread_rng()), id)
+    let mut sessions = Sessions::new(config);
+    sessions.turn(Tai64N::now(), &mut thread_rng());
+    (sessions, id)
 }
 
 #[repr(align(16))]
@@ -61,8 +64,8 @@ fn roundtrip_impl(
 
     // try wrap the message - get back handshake message to send
     let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
-        rustyguard::SendMessage::Maintenance(m) => m,
-        rustyguard::SendMessage::Data(_, _) => panic!("expecting handshake"),
+        rustyguard_core::SendMessage::Maintenance(m) => m,
+        rustyguard_core::SendMessage::Data(_, _) => panic!("expecting handshake"),
     };
 
     // send handshake to server
@@ -70,7 +73,7 @@ fn roundtrip_impl(
         let handshake_buf = &mut buf.0[..m.data().len()];
         handshake_buf.copy_from_slice(m.data());
         match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
-            rustyguard::Message::Write(buf) => buf,
+            rustyguard_core::Message::Write(buf) => buf,
             _ => panic!("expecting write"),
         }
     };
@@ -78,7 +81,7 @@ fn roundtrip_impl(
     // send the handshake response to the client
     let encryptor = {
         match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-            rustyguard::Message::HandshakeComplete(peer_idx, encryptor) => {
+            rustyguard_core::Message::HandshakeComplete(peer_idx, encryptor) => {
                 assert_eq!(peer_idx, peer_i);
                 encryptor
             }
@@ -89,16 +92,16 @@ fn roundtrip_impl(
     // wrap the messasge and encode into buffer
     let data_msg = {
         let metadata = encryptor.encrypt(&mut msg);
-        buf.0[..16].copy_from_slice(metadata.header.as_ref());
+        buf.0[..16].copy_from_slice(metadata.header.as_bytes());
         buf.0[16..32].copy_from_slice(&msg);
-        buf.0[32..48].copy_from_slice(&metadata.tag);
+        buf.0[32..48].copy_from_slice(&metadata.tag.0);
         &mut buf.0[..48]
     };
 
     // send the buffer to the server
     {
         match sessions_r.recv_message(client_addr, data_msg).unwrap() {
-            rustyguard::Message::Read(peer_idx, data) => {
+            rustyguard_core::Message::Read(peer_idx, data) => {
                 assert_eq!(peer_idx, peer_i);
                 assert_eq!(data, b"Hello, World!\0\0\0")
             }

@@ -1,4 +1,5 @@
 use divan::black_box;
+use rustyguard_crypto::mac;
 use subtle::Choice;
 
 fn main() {
@@ -21,12 +22,4 @@ fn verify_mac2() -> Choice {
 
     let actual_mac2 = mac(&cookie, &black_box([0xa5; 116]));
     actual_mac2.ct_ne(&black_box([0xa5; 16]))
-}
-
-#[inline(never)]
-fn mac(key: &[u8], msg: &[u8]) -> [u8; 16] {
-    use blake2::digest::Mac;
-    let mut mac = blake2::Blake2sMac::<blake2::digest::consts::U16>::new_from_slice(key).unwrap();
-    mac.update(msg);
-    mac.finalize().into_bytes().into()
 }

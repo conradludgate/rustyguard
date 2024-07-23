@@ -304,7 +304,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustyguard"
+name = "rustyguard-core"
 version = "0.1.0"
 dependencies = [
  "blake2",
@@ -313,6 +313,24 @@ dependencies = [
  "hmac",
  "rand",
  "rustc-hash",
+ "rustyguard-crypto",
+ "rustyguard-types",
+ "subtle",
+ "tai64",
+ "x25519-dalek",
+ "zerocopy",
+ "zeroize",
+]
+
+[[package]]
+name = "rustyguard-crypto"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "chacha20poly1305",
+ "hmac",
+ "rand_core",
+ "rustyguard-types",
  "subtle",
  "tai64",
  "x25519-dalek",
@@ -327,7 +345,17 @@ dependencies = [
  "chacha20poly1305",
  "libfuzzer-sys",
  "rand",
- "rustyguard",
+ "rustyguard-core",
+ "rustyguard-crypto",
+ "rustyguard-types",
+]
+
+[[package]]
+name = "rustyguard-types"
+version = "0.1.0"
+dependencies = [
+ "zerocopy",
+ "zeroize",
 ]
 
 [[package]]

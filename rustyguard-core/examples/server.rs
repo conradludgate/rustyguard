@@ -7,7 +7,7 @@ use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
 use rand::rngs::OsRng;
-use rustyguard::{Config, Message, Peer, PublicKey, Sessions, StaticSecret};
+use rustyguard_core::{Config, Message, Peer, PublicKey, Sessions, StaticSecret};
 use tai64::Tai64N;
 
 /// 16-byte aligned packet of 2048 bytes.
@@ -61,7 +61,7 @@ fn main() {
         config.insert_peer(Peer::new(peer_pk, None, None));
     }
 
-    let mut sessions = Sessions::new(config, Tai64N::now(), &mut OsRng);
+    let mut sessions = Sessions::new(config);
 
     let endpoint = UdpSocket::bind(("0.0.0.0", args.port)).unwrap();
     println!("addr: {:?}", endpoint.local_addr());
@@ -125,8 +125,8 @@ fn main() {
                                             .send_message(peer, &mut inner_reply_buf[..reply_len])
                                             .unwrap()
                                         {
-                                            rustyguard::SendMessage::Maintenance(_) => todo!(),
-                                            rustyguard::SendMessage::Data(_, metadata) => {
+                                            rustyguard_core::SendMessage::Maintenance(_) => todo!(),
+                                            rustyguard_core::SendMessage::Data(_, metadata) => {
                                                 let buf = &mut reply_buf[..reply_len + 16 + 16];
                                                 metadata.frame_in_place(buf);
                                                 endpoint.send_to(buf, addr).unwrap();

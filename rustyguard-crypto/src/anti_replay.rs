@@ -2,8 +2,8 @@
 
 use zeroize::Zeroize;
 
-const REDUNDANT_BIT_SHIFTS: u32 = SIZE_OF_WORD.ilog2();
 const SIZE_OF_WORD: usize = core::mem::size_of::<usize>() * 8;
+const REDUNDANT_BIT_SHIFTS: u32 = SIZE_OF_WORD.ilog2();
 
 const BITMAP_BITLEN: usize = 2048;
 const BITMAP_LEN: usize = BITMAP_BITLEN / SIZE_OF_WORD;

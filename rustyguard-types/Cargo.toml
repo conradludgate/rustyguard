@@ -1,0 +1,8 @@
+[package]
+name = "rustyguard-types"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zeroize = "1.8"
+zerocopy = { version = "0.7.35", features = ["derive"] }
