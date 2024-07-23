@@ -23,8 +23,6 @@ zerocopy = { version = "0.7.35", features = ["derive"] }
 
 [dev-dependencies]
 divan = "0.1.14"
-base64ct = { version = "1", features = ["std"] }
-tai64 = { version = "4.0", features = ["std"] }
 rand = { version = "0.8", features = ["getrandom"] }
 insta = "1.39.0"
 

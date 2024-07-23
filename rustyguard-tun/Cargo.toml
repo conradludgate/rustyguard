@@ -1,0 +1,21 @@
+[package]
+name = "rustyguard-tun"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rustyguard-core = { version = "0.1", path = "../rustyguard-core" }
+rustyguard-crypto = { version = "0.1", path = "../rustyguard-crypto" }
+rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
+
+rand = "0.8"
+tai64 = "4.0"
+base64ct = "1"
+tun = { version = "0.6", features = ["async"], git = "https://github.com/conradludgate/rust-tun" }
+tokio = { version = "1", features = ["full"] }
+knuffel = { version = "3.2.0" }
+miette = { version = "5.10", features = ["fancy"] }
+ipnet = { version = "2.9" }
+iptrie = "0.8"
+packet = "0.1"

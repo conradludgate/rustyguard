@@ -1,3 +1,9 @@
 [workspace]
-members = ["rustyguard-core", "rustyguard-types", "rustyguard-crypto"]
+members = [
+    "rustyguard-core",
+    "rustyguard-types",
+    "rustyguard-crypto",
+    "rustyguard-tun",
+    "wg-proxy",
+]
 resolver = "2"

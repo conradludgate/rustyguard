@@ -25,16 +25,6 @@ insta = "1.39.0"
 clap = { version = "4", features = ["derive"] }
 packet = "0.1"
 
-# tun example
-tun = { version = "0.6", features = [
-    "async",
-], git = "https://github.com/conradludgate/rust-tun" }
-tokio = { version = "1", features = ["full"] }
-knuffel = { version = "3.2.0" }
-miette = { version = "5.10", features = ["fancy"] }
-ipnet = { version = "2.9" }
-iptrie = "0.8"
-
 [[bench]]
 name = "roundtrip"
 harness = false

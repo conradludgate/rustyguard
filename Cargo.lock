@@ -982,18 +982,12 @@ dependencies = [
  "divan",
  "hashbrown",
  "insta",
- "ipnet",
- "iptrie",
- "knuffel",
- "miette",
  "packet",
  "rand",
  "rustc-hash",
  "rustyguard-crypto",
  "rustyguard-types",
  "tai64",
- "tokio",
- "tun",
  "zerocopy",
  "zeroize",
 ]
@@ -1002,7 +996,6 @@ dependencies = [
 name = "rustyguard-crypto"
 version = "0.1.0"
 dependencies = [
- "base64ct",
  "blake2",
  "chacha20poly1305",
  "divan",
@@ -1016,6 +1009,25 @@ dependencies = [
  "x25519-dalek",
  "zerocopy",
  "zeroize",
+]
+
+[[package]]
+name = "rustyguard-tun"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "ipnet",
+ "iptrie",
+ "knuffel",
+ "miette",
+ "packet",
+ "rand",
+ "rustyguard-core",
+ "rustyguard-crypto",
+ "rustyguard-types",
+ "tai64",
+ "tokio",
+ "tun",
 ]
 
 [[package]]
@@ -1340,6 +1352,23 @@ name = "wasi"
 version = "0.11.0+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
+
+[[package]]
+name = "wg-proxy"
+version = "0.1.0"
+dependencies = [
+ "hashbrown",
+ "ipnet",
+ "iptrie",
+ "rand",
+ "rustc-hash",
+ "rustyguard-crypto",
+ "rustyguard-types",
+ "tai64",
+ "tokio",
+ "zerocopy",
+ "zeroize",
+]
 
 [[package]]
 name = "winapi"

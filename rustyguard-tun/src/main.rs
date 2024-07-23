@@ -161,9 +161,9 @@ struct PeerConfig {
 
 impl TunConfig {
     fn parse() -> Self {
-        let config = std::fs::read_to_string("./examples/tun.kdl")
-            .expect("examples/tun.kdl file should not be missing");
-        knuffel::parse("examples/tun.kdl", &config).unwrap()
+        let config = std::fs::read_to_string("./rustyguard-tun/tun.kdl")
+            .expect("rustyguard-tun/tun.kdl file should not be missing");
+        knuffel::parse("rustyguard-tun/tun.kdl", &config).unwrap()
     }
 
     fn key(&self) -> StaticSecret {

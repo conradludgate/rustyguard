@@ -26,7 +26,7 @@ Unmanaged in this context means it is an application developer's responsibility 
 process UDP packets going in and out of the RustyGuard interface - as well as manage IP routing etc.
 RustyGuard will only take care of the byte processing and the cryptography.
 
-You can see the [tun](examples/tun.rs) example codebase to see what that looks like. In that file we:
+You can see the [tun](rustyguard-tun/src/main.rs) example codebase to see what that looks like. In that file we:
 1. Manage the IP routing rules with the [`iptrie`](https://docs.rs/iptrie) crate.
 2. Manage the UDP socket
 3. Manage the TUN interface using the [`tun`](https://docs.rs/tun) crate.
