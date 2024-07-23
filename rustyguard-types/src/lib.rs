@@ -49,6 +49,29 @@ pub const MSG_DATA: u32 = 4;
 /// The type of [`CookieMessage`]
 pub const MSG_COOKIE: u32 = 3;
 
+#[repr(u32)]
+pub enum WgMessage<'a> {
+    Init(&'a mut HandshakeInit) = MSG_FIRST,
+    Resp(&'a mut HandshakeResp) = MSG_SECOND,
+    Cookie(&'a mut CookieMessage) = MSG_COOKIE,
+    Data(&'a mut DataHeader) = MSG_DATA,
+}
+
+impl<'a> WgMessage<'a> {
+    pub fn mut_from(b: &'a mut [u8]) -> Option<Self> {
+        // Every message in wireguard starts with a 1 byte message tag and 3 bytes empty.
+        // This happens to be easy to read as a little-endian u32.
+        let msg_type = little_endian::U32::ref_from_prefix(b)?;
+        match msg_type.get() {
+            MSG_FIRST => Some(WgMessage::Init(FromBytes::mut_from(b)?)),
+            MSG_SECOND => Some(WgMessage::Resp(FromBytes::mut_from(b)?)),
+            MSG_COOKIE => Some(WgMessage::Cookie(FromBytes::mut_from(b)?)),
+            MSG_DATA => Some(WgMessage::Data(FromBytes::mut_from(b)?)),
+            _ => None,
+        }
+    }
+}
+
 /// The initiation for a wireguard session handshake.
 #[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
 #[repr(C, align(4))]

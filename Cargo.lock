@@ -1364,6 +1364,7 @@ dependencies = [
  "rustc-hash",
  "rustyguard-crypto",
  "rustyguard-types",
+ "subtle",
  "tai64",
  "tokio",
  "zerocopy",
