@@ -1,17 +1,22 @@
-use std::{future::poll_fn, net::SocketAddr, sync::RwLock, task::Poll, time::Duration};
+use std::{
+    future::poll_fn,
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+    task::Poll,
+    time::Duration,
+};
 
 use dashmap::{DashMap, Entry};
 use rand::{rngs::OsRng, RngCore};
 use rustyguard_crypto::{decrypt_cookie, encrypt_cookie, CookieState, HasMac, Key, Mac};
 use rustyguard_types::{Cookie, WgMessage};
-use sharded_slab::{Clear, Pool};
 use slotmap::{DefaultKey, Key as _, KeyData, SlotMap};
 use subtle::{Choice, CtOption};
 use tokio::{io::ReadBuf, net::UdpSocket, sync::Mutex, time::Instant};
 
 type PeerId = DefaultKey;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     let cookie_state = RwLock::new(CookieState::default());
     cookie_state.write().unwrap().generate(&mut OsRng);
@@ -21,11 +26,6 @@ async fn main() {
     // used to talk to internal peers only
     let priv_ep = UdpSocket::bind("0.0.0.0:1235").await.unwrap();
 
-    // we should update cookie random state every 2 minutes.
-    let mut tick = tokio::time::interval(Duration::from_secs(120));
-
-    let pool = Pool::<Box<AlignedPacket>>::new();
-
     // all peers.
     let peers: Mutex<SlotMap<PeerId, InternalPeer>> = Mutex::new(SlotMap::new());
 
@@ -34,47 +34,112 @@ async fn main() {
     // (in addr, receiver_id) => (created, peer_idx, out addr)
     let out_sessions = DashMap::<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>::new();
 
-    let overloaded = false;
+    let state = Arc::new(State {
+        pub_ep,
+        priv_ep,
+        cookie_state,
+        peers,
+        in_sessions,
+        out_sessions,
+    });
 
-    loop {
-        let mut packet = pool.create().unwrap();
-        let mut buf = ReadBuf::new(&mut packet.0);
-        let (addr, internal) = poll_fn(|cx| {
-            if let Poll::Ready(now) = tick.poll_tick(cx) {
-                cookie_state.write().unwrap().generate(&mut OsRng);
+    // primitive garbage collection for old sessions.
+    let state2 = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            let now = tick.tick().await;
 
-                // primitive garbage collection for old sessions.
-                // REKEY_ATTEMPT_TIME = 90s
-                // REJECT_AFTER_TIME = 180s
-                // After 270s any session should be considered invalid.
-                const TOTAL_SESSION_LIFE: Duration = Duration::from_secs(270);
-                in_sessions
-                    .retain(|_, (t, _)| now.saturating_duration_since(*t) < TOTAL_SESSION_LIFE);
-                out_sessions
-                    .retain(|_, (t, _, _)| now.saturating_duration_since(*t) < TOTAL_SESSION_LIFE);
-            }
+            // REKEY_ATTEMPT_TIME = 90s
+            // REJECT_AFTER_TIME = 180s
+            // After 270s any session should be considered invalid.
+            const TOTAL_SESSION_LIFE: Duration = Duration::from_secs(270);
 
-            if let Poll::Ready(res) = pub_ep.poll_recv_from(cx, &mut buf) {
-                return Poll::Ready((res.unwrap(), false));
-            }
+            state2
+                .in_sessions
+                .retain(|_, (t, _)| now.saturating_duration_since(*t) < TOTAL_SESSION_LIFE);
+            state2
+                .out_sessions
+                .retain(|_, (t, _, _)| now.saturating_duration_since(*t) < TOTAL_SESSION_LIFE);
+        }
+    });
 
-            if let Poll::Ready(res) = priv_ep.poll_recv_from(cx, &mut buf) {
-                return Poll::Ready((res.unwrap(), true));
-            }
+    // we should update cookie random state every 2 minutes.
+    let state2 = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(120));
+        loop {
+            tick.tick().await;
+            state2.cookie_state.write().unwrap().generate(&mut OsRng);
+        }
+    });
 
-            Poll::Pending
-        })
-        .await;
-        let data = buf.initialized_mut();
+    tokio::spawn(async move {
+        loop {
+            let mut packet = Box::new(AlignedPacket::default());
+            let mut buf = ReadBuf::new(&mut packet.0);
+            let (addr, internal) = poll_fn(|cx| {
+                if let Poll::Ready(res) = state.pub_ep.poll_recv_from(cx, &mut buf) {
+                    return Poll::Ready((res.unwrap(), false));
+                }
+
+                if let Poll::Ready(res) = state.priv_ep.poll_recv_from(cx, &mut buf) {
+                    return Poll::Ready((res.unwrap(), true));
+                }
+
+                Poll::Pending
+            })
+            .await;
+
+            let filled = buf.initialized().len();
+
+            let state2 = Arc::clone(&state);
+            tokio::spawn(async move {
+                let mut packet = packet;
+                let data = &mut packet.0[..filled];
+                state2.handle_packet(addr, data, internal).await;
+            });
+        }
+    })
+    .await
+    .unwrap();
+}
+
+struct State {
+    pub_ep: UdpSocket,
+    priv_ep: UdpSocket,
+
+    cookie_state: RwLock<CookieState>,
+    peers: Mutex<SlotMap<PeerId, InternalPeer>>,
+
+    // receiver_id => (created, peer_idx)
+    in_sessions: DashMap<u32, (Instant, PeerId)>,
+    // (in addr, receiver_id) => (created, peer_idx, out addr)
+    out_sessions: DashMap<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>,
+}
+
+impl State {
+    async fn handle_packet(&self, addr: SocketAddr, data: &mut [u8], internal: bool) {
+        let Self {
+            pub_ep,
+            priv_ep,
+            cookie_state,
+            peers,
+            in_sessions,
+            out_sessions,
+            ..
+        } = self;
 
         let Some(wg) = WgMessage::mut_from(data) else {
-            continue;
+            return;
         };
+
+        let overloaded = false;
 
         match wg {
             WgMessage::Data(header) if internal => {
                 let Some(session) = out_sessions.get(&(addr, header.receiver.get())) else {
-                    continue;
+                    return;
                 };
                 let (_, _, out_socket) = *session;
 
@@ -82,7 +147,7 @@ async fn main() {
             }
             WgMessage::Data(header) => {
                 let Some(session) = in_sessions.get(&header.receiver.get()) else {
-                    continue;
+                    return;
                 };
                 let (_, peer_idx) = *session;
 
@@ -92,7 +157,7 @@ async fn main() {
             // we need to rewrite cookies going outbound
             WgMessage::Cookie(cookie_msg) if internal => {
                 let Some(session) = out_sessions.get(&(addr, cookie_msg.receiver.get())) else {
-                    continue;
+                    return;
                 };
                 let (_, peer_idx, out_socket) = *session;
 
@@ -103,7 +168,7 @@ async fn main() {
                     &cookie_msg.nonce,
                     &peer.last_recv_mac1,
                 ) else {
-                    continue;
+                    return;
                 };
 
                 peer.last_sent_cookie = Some(*cookie);
@@ -122,7 +187,7 @@ async fn main() {
             // we do not rewrite inbound cookie messages
             WgMessage::Cookie(cookie_msg) => {
                 let Some(session) = in_sessions.get(&cookie_msg.receiver.get()) else {
-                    continue;
+                    return;
                 };
                 let (_, peer_idx) = *session;
                 let peer = &mut peers.lock().await[peer_idx];
@@ -152,7 +217,7 @@ async fn main() {
                 );
 
                 let Some(peer_idx) = peer.into_option() else {
-                    continue;
+                    return;
                 };
                 let peer_idx = PeerId::from(KeyData::from_ffi(peer_idx));
                 let peer = &peers.lock().await[peer_idx];
@@ -161,7 +226,7 @@ async fn main() {
                 if init.mac2 != [0; 16] || overloaded {
                     let cookie = cookie_state.read().unwrap().new_cookie(addr);
                     if init.verify_mac2(&cookie).is_err() {
-                        continue;
+                        return;
                     }
                     if let Some(cookie) = &peer.last_sent_cookie {
                         init.mac2 = init.compute_mac2(cookie);
@@ -174,7 +239,7 @@ async fn main() {
                     // no way as the response message sent back we cannot forge the
                     // mac1 that we would need to replace.
                     Entry::Occupied(_) => {
-                        continue;
+                        return;
                     }
                     Entry::Vacant(v) => {
                         v.insert((Instant::now(), peer_idx, addr));
@@ -185,7 +250,7 @@ async fn main() {
             }
             WgMessage::Resp(resp) => {
                 let Some(session) = out_sessions.get(&(addr, resp.receiver.get())) else {
-                    continue;
+                    return;
                 };
                 let (start, peer_idx, endpoint) = *session;
 
@@ -195,7 +260,7 @@ async fn main() {
                     // no way as the response message sent back we cannot forge the
                     // mac1 that we would need to replace.
                     Entry::Occupied(_) => {
-                        continue;
+                        return;
                     }
                     Entry::Vacant(v) => {
                         v.insert((start, peer_idx));
@@ -228,11 +293,5 @@ struct AlignedPacket([u8; 2048]);
 impl Default for AlignedPacket {
     fn default() -> Self {
         Self([0; 2048])
-    }
-}
-
-impl Clear for AlignedPacket {
-    fn clear(&mut self) {
-        // nothing to clear.
     }
 }
