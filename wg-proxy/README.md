@@ -37,3 +37,27 @@ which application peer to forward to.
 
 The wg-proxy will rewrite the mac2 on handshake messages passed through. It must do this as wg-proxy is the only
 process that will know the end user IP addresses to validate them.
+
+## Bad idea
+
+I would like to tamper with sender/receiver fields, but the MACs are messing with me.
+on the receiver side, I can sign the MACs as I can determine the final public key,
+but on the initiator side, I do not know the public key (it's encrypted).
+
+On the internal network, we could modify the wireguard clients to put the decrypted
+public key on the end of the response message. That way we can resign the macs appropriately.
+
+It should be encrypted still. Maybe from proxy <-> internal we perform an NK handshake.
+
+```
+NK:
+  <- s
+  ...
+  -> e, es
+  <- e, ee
+```
+
+proxy already knows internal-peer's public key (`s`).
+proxy sends internal-peer an ephmeral key (`e1`) which is DH against `s`.
+internal-peer responds with an ephemeral key (`e2`) which is DH against `e1`.
+cipher state is used to encrypt the external-peer's public key in the respond back to proxy.
