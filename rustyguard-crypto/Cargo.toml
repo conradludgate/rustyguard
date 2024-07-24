@@ -14,7 +14,6 @@ x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 
 # crypto adjacent
 zeroize = "1.8"
-subtle = { version = "2.6", default-features = false }
 
 # other helpful things
 rand_core = { version = "0.6", default-features = false }
@@ -34,5 +33,11 @@ harness = false
 name = "cookie"
 harness = false
 
+[[bench]]
+name = "handshake"
+harness = false
+
 [lints.rust]
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(rustyguard_unsafe_logging)'] }
+unexpected_cfgs = { level = "allow", check-cfg = [
+    'cfg(rustyguard_unsafe_logging)',
+] }

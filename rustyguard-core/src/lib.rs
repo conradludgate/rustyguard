@@ -32,9 +32,9 @@ use hashbrown::{HashMap, HashTable};
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use rustc_hash::{FxBuildHasher, FxSeededState};
 use rustyguard_crypto::{
-    cookie_key, decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_cookie,
-    encrypt_handshake_resp, mac1_key, CookieState, CryptoError, DecryptionKey, EncryptionKey,
-    HandshakeState, HasMac, Key, Mac, StaticInitiatorConfig, StaticPeerConfig,
+    decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_cookie,
+    encrypt_handshake_resp, CookieState, CryptoError, DecryptionKey, EncryptionKey, HandshakeState,
+    HasMac, Key, Mac, StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, HandshakeResp, MSG_COOKIE, MSG_DATA, MSG_FIRST,
@@ -110,15 +110,8 @@ impl PeerList {
 
 impl Config {
     pub fn new(private_key: StaticSecret) -> Self {
-        let public_key = PublicKey::from(&private_key);
-
         Config {
-            static_: StaticInitiatorConfig {
-                mac1_key: mac1_key(&public_key),
-                cookie_key: cookie_key(&public_key),
-                private_key,
-                public_key,
-            },
+            static_: StaticInitiatorConfig::new(private_key),
             // TODO(conrad): seed this
             pubkey_hasher: FxSeededState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
@@ -223,12 +216,7 @@ impl PeerCipherState {
 impl Peer {
     pub fn new(key: PublicKey, preshared_key: Option<Key>, endpoint: Option<SocketAddr>) -> Self {
         Self {
-            static_: StaticPeerConfig {
-                mac1_key: mac1_key(&key),
-                cookie_key: cookie_key(&key),
-                key,
-                preshared_key: preshared_key.unwrap_or_default(),
-            },
+            static_: StaticPeerConfig::new(key, preshared_key),
 
             endpoint,
             latest_ts: Tai64NBytes::default(),

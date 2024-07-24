@@ -4,7 +4,7 @@ use hashbrown::{hash_map::Entry, HashMap};
 use rand::{rngs::OsRng, RngCore};
 use rustyguard_crypto::{decrypt_cookie, encrypt_cookie, CookieState, HasMac, Key, Mac};
 use rustyguard_types::{Cookie, WgMessage};
-use subtle::{Choice, ConstantTimeEq, CtOption};
+use subtle::{Choice, CtOption};
 use tokio::{io::ReadBuf, net::UdpSocket, time::Instant};
 
 #[tokio::main(flavor = "current_thread")]
@@ -135,7 +135,9 @@ async fn main() {
                     |acc, (peer_idx, peer)| {
                         let mac1 = init.compute_mac1(&peer.mac1_key);
 
-                        acc.or_else(|| CtOption::new(peer_idx as u32, init.mac1.ct_eq(&mac1)))
+                        acc.or_else(|| {
+                            CtOption::new(peer_idx as u32, Choice::from((init.mac1 == mac1) as u8))
+                        })
                     },
                 );
 

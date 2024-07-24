@@ -34,6 +34,7 @@ macro_rules! unsafe_log {
 mod anti_replay;
 mod prim;
 
+#[derive(Debug)]
 pub enum CryptoError {
     DecryptionError,
     Rejected,
@@ -137,9 +138,8 @@ pub trait HasMac: FromBytes + AsBytes + Sized {
     }
 
     fn verify_mac1(&self, mac1_key: &Key) -> Result<(), CryptoError> {
-        use subtle::ConstantTimeEq;
         let actual_mac1 = self.compute_mac1(mac1_key);
-        if actual_mac1.ct_ne(self.get_mac1()).into() {
+        if &actual_mac1 != self.get_mac1() {
             unsafe_log!("invalid mac1");
             Err(CryptoError::Rejected)
         } else {
@@ -149,9 +149,8 @@ pub trait HasMac: FromBytes + AsBytes + Sized {
     }
 
     fn verify_mac2(&self, cookie: &Cookie) -> Result<(), CryptoError> {
-        use subtle::ConstantTimeEq;
         let actual_mac2 = self.compute_mac2(cookie);
-        if actual_mac2.ct_ne(self.get_mac2()).into() {
+        if &actual_mac2 != self.get_mac2() {
             unsafe_log!("invalid mac2");
             Err(CryptoError::Rejected)
         } else {
@@ -228,6 +227,29 @@ pub struct StaticInitiatorConfig {
     pub mac1_key: Key,
     /// Cached cookie_key: calculated using `cookie_key(&self.public_key)`
     pub cookie_key: Key,
+}
+
+impl StaticPeerConfig {
+    pub fn new(key: PublicKey, preshared_key: Option<Key>) -> Self {
+        Self {
+            mac1_key: mac1_key(&key),
+            cookie_key: cookie_key(&key),
+            key,
+            preshared_key: preshared_key.unwrap_or_default(),
+        }
+    }
+}
+
+impl StaticInitiatorConfig {
+    pub fn new(key: StaticSecret) -> Self {
+        let public_key = PublicKey::from(&key);
+        Self {
+            mac1_key: mac1_key(&public_key),
+            cookie_key: cookie_key(&public_key),
+            public_key,
+            private_key: key,
+        }
+    }
 }
 
 #[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]

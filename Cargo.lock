@@ -1004,7 +1004,6 @@ dependencies = [
  "rand",
  "rand_core",
  "rustyguard-types",
- "subtle",
  "tai64",
  "x25519-dalek",
  "zerocopy",

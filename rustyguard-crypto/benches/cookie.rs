@@ -7,7 +7,7 @@ fn main() {
     divan::main()
 }
 
-#[divan::bench(sample_count = 1000, sample_size = 1000)]
+#[divan::bench(sample_count = 100, sample_size = 10000)]
 fn encrypt_cookie() -> EncryptedCookie {
     let mut rng = StdRng::from_seed(black_box([0; 32]));
     let mut nonce = [0; 24];
