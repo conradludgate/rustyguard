@@ -12,3 +12,4 @@ subtle = { version = "2.6", default-features = false }
 slotmap = "1"
 rand = { version = "0.8", features = ["getrandom"] }
 tokio = { version = "1", features = ["full"] }
+sharded-slab = "0.1"

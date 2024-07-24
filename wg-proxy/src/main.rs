@@ -1,9 +1,10 @@
-use std::{future::poll_fn, net::SocketAddr, task::Poll, time::Duration};
+use std::{future::poll_fn, net::SocketAddr, sync::RwLock, task::Poll, time::Duration};
 
 use dashmap::{DashMap, Entry};
 use rand::{rngs::OsRng, RngCore};
 use rustyguard_crypto::{decrypt_cookie, encrypt_cookie, CookieState, HasMac, Key, Mac};
 use rustyguard_types::{Cookie, WgMessage};
+use sharded_slab::{Clear, Pool};
 use slotmap::{DefaultKey, Key as _, KeyData, SlotMap};
 use subtle::{Choice, CtOption};
 use tokio::{io::ReadBuf, net::UdpSocket, sync::Mutex, time::Instant};
@@ -12,8 +13,8 @@ type PeerId = DefaultKey;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let mut cookie_state = CookieState::default();
-    cookie_state.generate(&mut OsRng);
+    let cookie_state = RwLock::new(CookieState::default());
+    cookie_state.write().unwrap().generate(&mut OsRng);
 
     // used to talk to external peers only
     let pub_ep = UdpSocket::bind("0.0.0.0:1234").await.unwrap();
@@ -23,7 +24,7 @@ async fn main() {
     // we should update cookie random state every 2 minutes.
     let mut tick = tokio::time::interval(Duration::from_secs(120));
 
-    let mut packet = Box::new(AlignedPacket([0; 2048]));
+    let pool = Pool::<Box<AlignedPacket>>::new();
 
     // all peers.
     let peers: Mutex<SlotMap<PeerId, InternalPeer>> = Mutex::new(SlotMap::new());
@@ -36,10 +37,11 @@ async fn main() {
     let overloaded = false;
 
     loop {
+        let mut packet = pool.create().unwrap();
         let mut buf = ReadBuf::new(&mut packet.0);
         let (addr, internal) = poll_fn(|cx| {
             if let Poll::Ready(now) = tick.poll_tick(cx) {
-                cookie_state.generate(&mut OsRng);
+                cookie_state.write().unwrap().generate(&mut OsRng);
 
                 // primitive garbage collection for old sessions.
                 // REKEY_ATTEMPT_TIME = 90s
@@ -109,7 +111,7 @@ async fn main() {
                 // generate a new nonce and encrypt our new cookie.
                 OsRng.fill_bytes(&mut cookie_msg.nonce);
                 cookie_msg.cookie = encrypt_cookie(
-                    cookie_state.new_cookie(out_socket),
+                    cookie_state.read().unwrap().new_cookie(out_socket),
                     &peer.cookie_key,
                     &cookie_msg.nonce,
                     &peer.last_recv_mac1,
@@ -157,7 +159,8 @@ async fn main() {
 
                 // mac2 was sent, let's check it and replace it.
                 if init.mac2 != [0; 16] || overloaded {
-                    if init.verify_mac2(&cookie_state.new_cookie(addr)).is_err() {
+                    let cookie = cookie_state.read().unwrap().new_cookie(addr);
+                    if init.verify_mac2(&cookie).is_err() {
                         continue;
                     }
                     if let Some(cookie) = &peer.last_sent_cookie {
@@ -221,3 +224,15 @@ struct InternalPeer {
 /// MTU is assumed to be in the range of 1500 or so, so 2048 should be sufficient.
 #[repr(align(16))]
 struct AlignedPacket([u8; 2048]);
+
+impl Default for AlignedPacket {
+    fn default() -> Self {
+        Self([0; 2048])
+    }
+}
+
+impl Clear for AlignedPacket {
+    fn clear(&mut self) {
+        // nothing to clear.
+    }
+}
