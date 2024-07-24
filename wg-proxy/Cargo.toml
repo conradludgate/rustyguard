@@ -7,14 +7,8 @@ edition = "2021"
 rustyguard-crypto = { version = "0.1", path = "../rustyguard-crypto" }
 rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 
-hashbrown = { version = "0.14", default-features = false }
-rustc-hash = { version = "2", default-features = false }
-zerocopy = { version = "0.7.35", features = ["derive"] }
-zeroize = "1.8"
+dashmap = "6"
 subtle = { version = "2.6", default-features = false }
-
-tai64 = { version = "4.0", features = ["std"] }
+slotmap = "1"
 rand = { version = "0.8", features = ["getrandom"] }
 tokio = { version = "1", features = ["full"] }
-ipnet = { version = "2.9" }
-iptrie = "0.8"

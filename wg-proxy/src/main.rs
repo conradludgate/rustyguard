@@ -1,11 +1,14 @@
 use std::{future::poll_fn, net::SocketAddr, task::Poll, time::Duration};
 
-use hashbrown::{hash_map::Entry, HashMap};
+use dashmap::{DashMap, Entry};
 use rand::{rngs::OsRng, RngCore};
 use rustyguard_crypto::{decrypt_cookie, encrypt_cookie, CookieState, HasMac, Key, Mac};
 use rustyguard_types::{Cookie, WgMessage};
+use slotmap::{DefaultKey, Key as _, KeyData, SlotMap};
 use subtle::{Choice, CtOption};
-use tokio::{io::ReadBuf, net::UdpSocket, time::Instant};
+use tokio::{io::ReadBuf, net::UdpSocket, sync::Mutex, time::Instant};
+
+type PeerId = DefaultKey;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -23,12 +26,12 @@ async fn main() {
     let mut packet = Box::new(AlignedPacket([0; 2048]));
 
     // all peers.
-    let mut peers: Vec<InternalPeer> = vec![];
+    let peers: Mutex<SlotMap<PeerId, InternalPeer>> = Mutex::new(SlotMap::new());
 
     // receiver_id => (created, peer_idx)
-    let mut in_sessions = HashMap::<u32, (Instant, u32)>::new();
+    let in_sessions = DashMap::<u32, (Instant, PeerId)>::new();
     // (in addr, receiver_id) => (created, peer_idx, out addr)
-    let mut out_sessions = HashMap::<(SocketAddr, u32), (Instant, u32, SocketAddr)>::new();
+    let out_sessions = DashMap::<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>::new();
 
     let overloaded = false;
 
@@ -68,29 +71,30 @@ async fn main() {
 
         match wg {
             WgMessage::Data(header) if internal => {
-                let Some(&(_, _, out_socket)) = out_sessions.get(&(addr, header.receiver.get()))
-                else {
+                let Some(session) = out_sessions.get(&(addr, header.receiver.get())) else {
                     continue;
                 };
+                let (_, _, out_socket) = *session;
 
                 pub_ep.send_to(data, out_socket).await.unwrap();
             }
             WgMessage::Data(header) => {
-                let Some(&(_, peer_idx)) = in_sessions.get(&header.receiver.get()) else {
+                let Some(session) = in_sessions.get(&header.receiver.get()) else {
                     continue;
                 };
-                let peer = &mut peers[peer_idx as usize];
+                let (_, peer_idx) = *session;
+
+                let peer = &mut peers.lock().await[peer_idx];
                 priv_ep.send_to(data, peer.endpoint).await.unwrap();
             }
             // we need to rewrite cookies going outbound
             WgMessage::Cookie(cookie_msg) if internal => {
-                let Some(&(_, peer_idx, out_socket)) =
-                    out_sessions.get(&(addr, cookie_msg.receiver.get()))
-                else {
+                let Some(session) = out_sessions.get(&(addr, cookie_msg.receiver.get())) else {
                     continue;
                 };
+                let (_, peer_idx, out_socket) = *session;
 
-                let peer = &mut peers[peer_idx as usize];
+                let peer = &mut peers.lock().await[peer_idx];
                 let Ok(cookie) = decrypt_cookie(
                     &mut cookie_msg.cookie,
                     &peer.cookie_key,
@@ -115,10 +119,11 @@ async fn main() {
             }
             // we do not rewrite inbound cookie messages
             WgMessage::Cookie(cookie_msg) => {
-                let Some(&(_, peer_idx)) = in_sessions.get(&cookie_msg.receiver.get()) else {
+                let Some(session) = in_sessions.get(&cookie_msg.receiver.get()) else {
                     continue;
                 };
-                let peer = &mut peers[peer_idx as usize];
+                let (_, peer_idx) = *session;
+                let peer = &mut peers.lock().await[peer_idx];
                 priv_ep.send_to(data, peer.endpoint).await.unwrap();
             }
             WgMessage::Init(_init) if internal => {
@@ -130,13 +135,16 @@ async fn main() {
             WgMessage::Init(init) => {
                 // this is shit. hopefully we don't have that many peers.
                 // thankfully mac1 checks are fast.
-                let peer = peers.iter().enumerate().fold(
+                let peer = peers.lock().await.iter().fold(
                     CtOption::new(0, Choice::from(0)),
                     |acc, (peer_idx, peer)| {
                         let mac1 = init.compute_mac1(&peer.mac1_key);
 
                         acc.or_else(|| {
-                            CtOption::new(peer_idx as u32, Choice::from((init.mac1 == mac1) as u8))
+                            CtOption::new(
+                                peer_idx.data().as_ffi(),
+                                Choice::from((init.mac1 == mac1) as u8),
+                            )
                         })
                     },
                 );
@@ -144,8 +152,8 @@ async fn main() {
                 let Some(peer_idx) = peer.into_option() else {
                     continue;
                 };
-
-                let peer = &peers[peer_idx as usize];
+                let peer_idx = PeerId::from(KeyData::from_ffi(peer_idx));
+                let peer = &peers.lock().await[peer_idx];
 
                 // mac2 was sent, let's check it and replace it.
                 if init.mac2 != [0; 16] || overloaded {
@@ -173,11 +181,10 @@ async fn main() {
                 priv_ep.send_to(data, peer.endpoint).await.unwrap();
             }
             WgMessage::Resp(resp) => {
-                let Some(&(start, peer_idx, endpoint)) =
-                    out_sessions.get(&(addr, resp.receiver.get()))
-                else {
+                let Some(session) = out_sessions.get(&(addr, resp.receiver.get())) else {
                     continue;
                 };
+                let (start, peer_idx, endpoint) = *session;
 
                 match in_sessions.entry(resp.sender.get()) {
                     // unlucky...
