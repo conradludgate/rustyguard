@@ -30,7 +30,7 @@ async fn main() {
     }
     let peer_net = peer_net.compress();
 
-    let mut sessions = Sessions::new(rg_config);
+    let mut sessions = Sessions::new(rg_config, &mut OsRng);
     let endpoint = UdpSocket::bind(args.interface.host).await.unwrap();
 
     let mut buf: Box<AlignedPacket> = Box::new(AlignedPacket([0; 2048]));

@@ -9,8 +9,8 @@ use zerocopy::AsBytes;
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
-use crate::AntiReplay;
 use crate::CryptoError;
+use rustyguard_utils::anti_replay::AntiReplay;
 
 /// Construction: The UTF-8 string literal “Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s”, 37 bytes of output.
 /// Identifier: The UTF-8 string literal “WireGuard v1 zx2c4 Jason@zx2c4.com”, 34 bytes of output.
@@ -238,8 +238,10 @@ impl EncryptionKey {
 #[derive(ZeroizeOnDrop)]
 pub struct DecryptionKey {
     key: chacha20poly1305::ChaCha20Poly1305,
+    #[zeroize(skip)]
     replay: AntiReplay,
 }
+
 impl DecryptionKey {
     pub fn new(key: Key) -> Self {
         use chacha20poly1305::KeyInit;

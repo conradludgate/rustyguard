@@ -2,7 +2,6 @@
 
 use core::{net::SocketAddr, ops::ControlFlow};
 
-pub use anti_replay::AntiReplay;
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
 pub use x25519_dalek::{PublicKey, StaticSecret};
@@ -31,7 +30,6 @@ macro_rules! unsafe_log {
     }
 }
 
-mod anti_replay;
 mod prim;
 
 #[derive(Debug)]

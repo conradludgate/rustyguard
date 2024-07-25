@@ -3,7 +3,7 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: Vec<u64>| {
-    let mut replay = rustyguard_crypto::AntiReplay::default();
+    let mut replay = rustyguard_utils::anti_replay::AntiReplay::default();
 
     let mut seen = std::collections::BTreeSet::new();
     let mut last = 0u64;

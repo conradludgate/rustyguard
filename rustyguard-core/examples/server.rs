@@ -61,7 +61,7 @@ fn main() {
         config.insert_peer(Peer::new(peer_pk, None, None));
     }
 
-    let mut sessions = Sessions::new(config);
+    let mut sessions = Sessions::new(config, &mut OsRng);
 
     let endpoint = UdpSocket::bind(("0.0.0.0", args.port)).unwrap();
     println!("addr: {:?}", endpoint.local_addr());

@@ -1,7 +1,7 @@
 use std::{
     future::poll_fn,
     net::SocketAddr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     task::Poll,
     time::Duration,
 };
@@ -12,7 +12,7 @@ use rustyguard_crypto::{decrypt_cookie, encrypt_cookie, CookieState, HasMac, Key
 use rustyguard_types::{Cookie, WgMessage};
 use slotmap::{DefaultKey, Key as _, KeyData, SlotMap};
 use subtle::{Choice, CtOption};
-use tokio::{io::ReadBuf, net::UdpSocket, sync::Mutex, time::Instant};
+use tokio::{io::ReadBuf, net::UdpSocket, time::Instant};
 
 type PeerId = DefaultKey;
 
@@ -151,8 +151,8 @@ impl State {
                 };
                 let (_, peer_idx) = *session;
 
-                let peer = &mut peers.lock().await[peer_idx];
-                priv_ep.send_to(data, peer.endpoint).await.unwrap();
+                let endpoint = peers.lock().unwrap()[peer_idx].endpoint;
+                priv_ep.send_to(data, endpoint).await.unwrap();
             }
             // we need to rewrite cookies going outbound
             WgMessage::Cookie(cookie_msg) if internal => {
@@ -161,25 +161,31 @@ impl State {
                 };
                 let (_, peer_idx, out_socket) = *session;
 
-                let peer = &mut peers.lock().await[peer_idx];
-                let Ok(cookie) = decrypt_cookie(
-                    &mut cookie_msg.cookie,
-                    &peer.cookie_key,
-                    &cookie_msg.nonce,
-                    &peer.last_recv_mac1,
-                ) else {
-                    return;
-                };
-
-                peer.last_sent_cookie = Some(*cookie);
+                let last_recv_mac1;
+                let cookie_key;
+                {
+                    let mut peers = peers.lock().unwrap();
+                    let peer = &mut peers[peer_idx];
+                    let Ok(cookie) = decrypt_cookie(
+                        &mut cookie_msg.cookie,
+                        &peer.cookie_key,
+                        &cookie_msg.nonce,
+                        &peer.last_recv_mac1,
+                    ) else {
+                        return;
+                    };
+                    peer.last_sent_cookie = Some(*cookie);
+                    cookie_key = peer.cookie_key;
+                    last_recv_mac1 = peer.last_recv_mac1;
+                }
 
                 // generate a new nonce and encrypt our new cookie.
                 OsRng.fill_bytes(&mut cookie_msg.nonce);
                 cookie_msg.cookie = encrypt_cookie(
                     cookie_state.read().unwrap().new_cookie(out_socket),
-                    &peer.cookie_key,
+                    &cookie_key,
                     &cookie_msg.nonce,
-                    &peer.last_recv_mac1,
+                    &last_recv_mac1,
                 );
 
                 pub_ep.send_to(data, out_socket).await.unwrap();
@@ -190,8 +196,8 @@ impl State {
                     return;
                 };
                 let (_, peer_idx) = *session;
-                let peer = &mut peers.lock().await[peer_idx];
-                priv_ep.send_to(data, peer.endpoint).await.unwrap();
+                let endpoint = peers.lock().unwrap()[peer_idx].endpoint;
+                priv_ep.send_to(data, endpoint).await.unwrap();
             }
             WgMessage::Init(_init) if internal => {
                 // whoops, no NAT :(
@@ -200,27 +206,35 @@ impl State {
                 // responding to who? we don't send init messages :think:
             }
             WgMessage::Init(init) => {
-                // this is shit. hopefully we don't have that many peers.
-                // thankfully mac1 checks are fast.
-                let peer = peers.lock().await.iter().fold(
-                    CtOption::new(0, Choice::from(0)),
-                    |acc, (peer_idx, peer)| {
-                        let mac1 = init.compute_mac1(&peer.mac1_key);
+                let peer_idx;
+                let last_sent_cookie;
+                let endpoint;
+                {
+                    let peers = peers.lock().unwrap();
+                    // this is shit. hopefully we don't have that many peers.
+                    // thankfully mac1 checks are fast.
+                    let peer = peers.iter().fold(
+                        CtOption::new(0, Choice::from(0)),
+                        |acc, (peer_idx, peer)| {
+                            let mac1 = init.compute_mac1(&peer.mac1_key);
 
-                        acc.or_else(|| {
-                            CtOption::new(
-                                peer_idx.data().as_ffi(),
-                                Choice::from((init.mac1 == mac1) as u8),
-                            )
-                        })
-                    },
-                );
+                            acc.or_else(|| {
+                                CtOption::new(
+                                    peer_idx.data().as_ffi(),
+                                    Choice::from((init.mac1 == mac1) as u8),
+                                )
+                            })
+                        },
+                    );
 
-                let Some(peer_idx) = peer.into_option() else {
-                    return;
-                };
-                let peer_idx = PeerId::from(KeyData::from_ffi(peer_idx));
-                let peer = &peers.lock().await[peer_idx];
+                    let Some(peer_idx2) = peer.into_option() else {
+                        return;
+                    };
+                    peer_idx = PeerId::from(KeyData::from_ffi(peer_idx2));
+                    let peer = &peers[peer_idx];
+                    last_sent_cookie = peer.last_sent_cookie;
+                    endpoint = peer.endpoint;
+                }
 
                 // mac2 was sent, let's check it and replace it.
                 if init.mac2 != [0; 16] || overloaded {
@@ -228,12 +242,12 @@ impl State {
                     if init.verify_mac2(&cookie).is_err() {
                         return;
                     }
-                    if let Some(cookie) = &peer.last_sent_cookie {
+                    if let Some(cookie) = &last_sent_cookie {
                         init.mac2 = init.compute_mac2(cookie);
                     }
                 }
 
-                match out_sessions.entry((peer.endpoint, init.sender.get())) {
+                match out_sessions.entry((endpoint, init.sender.get())) {
                     // unlucky...
                     // i would like to replace the sender, but unfortunately there's
                     // no way as the response message sent back we cannot forge the
@@ -246,7 +260,7 @@ impl State {
                     }
                 }
 
-                priv_ep.send_to(data, peer.endpoint).await.unwrap();
+                priv_ep.send_to(data, endpoint).await.unwrap();
             }
             WgMessage::Resp(resp) => {
                 let Some(session) = out_sessions.get(&(addr, resp.receiver.get())) else {

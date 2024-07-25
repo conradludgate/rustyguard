@@ -1,7 +1,5 @@
 //! Implementation of <https://tools.ietf.org/html/rfc6479> as required
 
-use zeroize::Zeroize;
-
 const SIZE_OF_WORD: usize = core::mem::size_of::<usize>() * 8;
 const REDUNDANT_BIT_SHIFTS: u32 = SIZE_OF_WORD.ilog2();
 
@@ -11,7 +9,7 @@ const BITMAP_INDEX_MASK: usize = BITMAP_LEN - 1;
 const BITMAP_LOC_MASK: u64 = (SIZE_OF_WORD as u64) - 1;
 const WINDOW_SIZE: u64 = (BITMAP_BITLEN - SIZE_OF_WORD) as u64;
 
-#[derive(Zeroize, Default)]
+#[derive(Default)]
 pub struct AntiReplay {
     bitmap: [usize; BITMAP_LEN],
     last: u64,

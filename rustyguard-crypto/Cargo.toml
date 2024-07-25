@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
+rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 
 # crypto
 blake2 = { version = "0.10", default-features = false }

@@ -1007,6 +1007,7 @@ dependencies = [
  "rustc-hash",
  "rustyguard-crypto",
  "rustyguard-types",
+ "rustyguard-utils",
  "tai64",
  "zerocopy",
  "zeroize",
@@ -1024,6 +1025,7 @@ dependencies = [
  "rand",
  "rand_core",
  "rustyguard-types",
+ "rustyguard-utils",
  "tai64",
  "x25519-dalek",
  "zerocopy",
@@ -1055,6 +1057,15 @@ version = "0.1.0"
 dependencies = [
  "zerocopy",
  "zeroize",
+]
+
+[[package]]
+name = "rustyguard-utils"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "rand",
+ "rand_core",
 ]
 
 [[package]]

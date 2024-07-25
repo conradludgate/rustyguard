@@ -22,7 +22,7 @@ fn session_with_peer(
     let peer = Peer::new(peer_public_key, Some(preshared_key), Some(endpoint));
     let mut config = Config::new(secret_key);
     let id = config.insert_peer(peer);
-    let mut sessions = Sessions::new(config);
+    let mut sessions = Sessions::new(config, &mut thread_rng());
     sessions.turn(Tai64N::now(), &mut thread_rng());
     (sessions, id)
 }

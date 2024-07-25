@@ -1,0 +1,11 @@
+[package]
+name = "rustyguard-utils"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ahash = { version = "0.8", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+
+[dev-dependencies]
+rand = { version = "0.8", features = ["getrandom"] }

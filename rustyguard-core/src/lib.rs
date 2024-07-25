@@ -20,10 +20,10 @@ extern crate alloc;
 // mod crypto;
 // mod messages;
 
-use core::hash::BuildHasher;
 use core::net::SocketAddr;
 use core::ops::ControlFlow;
 use core::time::Duration;
+use core::{hash::BuildHasher, net::IpAddr};
 
 use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
@@ -40,6 +40,7 @@ use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, HandshakeResp, MSG_COOKIE, MSG_DATA, MSG_FIRST,
     MSG_SECOND,
 };
+use rustyguard_utils::rate_limiter::CountMinSketch;
 use tai64::Tai64;
 use zerocopy::{little_endian, AsBytes, FromBytes, FromZeroes};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -301,6 +302,9 @@ pub struct Sessions {
     last_reseed: Tai64N,
     now: Tai64N,
 
+    last_rate_reset: Tai64N,
+    ip_rate_limit: CountMinSketch,
+
     // session IDs are chosen randomly by us, thus, are not vulnerable to hashdos
     // and don't need a high-quality hasher
     peers_by_session: HashMap<u32, SessionType, FxBuildHasher>,
@@ -344,19 +348,15 @@ enum SessionType {
 }
 
 impl Sessions {
-    pub fn new(config: Config) -> Self {
-        // let mut cookie = ;
-        // rng.fill_bytes(&mut random_secret[..]);
-
-        // let mut seed = <StdRng as rand::SeedableRng>::Seed::default();
-        // rng.fill_bytes(&mut seed);
-
+    pub fn new(config: Config, rng: &mut (impl CryptoRng + RngCore)) -> Self {
         Sessions {
             config,
             cookie: CookieState::default(),
             last_reseed: Tai64N(Tai64(0), 0),
             now: Tai64N(Tai64(0), 0),
-            rng: StdRng::from_seed([0; 32]),
+            last_rate_reset: Tai64N(Tai64(0), 0),
+            ip_rate_limit: CountMinSketch::with_params(10.0 / 20_000.0, 0.01, rng),
+            rng: StdRng::from_rng(rng).unwrap(),
             peers_by_session: HashMap::default(),
             timers: BinaryHeap::new(),
         }
@@ -379,6 +379,9 @@ impl Sessions {
                 rng.fill_bytes(&mut seed);
                 self.rng = StdRng::from_seed(seed);
                 self.last_reseed = now;
+            }
+            if now.duration_since(&self.last_rate_reset).unwrap() > Duration::from_secs(1) {
+                self.ip_rate_limit.reset();
             }
         }
 
@@ -535,8 +538,12 @@ fn write_msg<'b, T: AsBytes>(buf: &'b mut [u8], t: &T) -> &'b mut [u8] {
 }
 
 impl Sessions {
-    fn overloaded(&self) -> bool {
-        false
+    fn overloaded(&mut self, ip: IpAddr) -> bool {
+        let key = match ip {
+            IpAddr::V4(v4) => v4.to_bits() as u64,
+            IpAddr::V6(v6) => (v6.to_bits() >> 64) as u64,
+        };
+        self.ip_rate_limit.count(&key) > 10
     }
 
     fn write_cookie_message<'b>(
@@ -646,10 +653,11 @@ impl Sessions {
         unsafe_log!("[{addr:?}] parsed as handshake init packet");
         let init_msg = HandshakeInit::mut_from(msg).ok_or(Error::InvalidMessage)?;
 
+        let overload = self.overloaded(addr.ip());
         let init_msg = match HandshakeInit::verify(
             init_msg,
             &self.config.static_,
-            self.overloaded(),
+            overload,
             &self.cookie,
             addr,
         )? {
@@ -724,10 +732,11 @@ impl Sessions {
         unsafe_log!("[{addr:?}] parsed as handshake resp packet");
         let resp_msg = HandshakeResp::mut_from(msg).ok_or(Error::InvalidMessage)?;
 
+        let overload = self.overloaded(addr.ip());
         let resp_msg = match HandshakeResp::verify(
             resp_msg,
             &self.config.static_,
-            self.overloaded(),
+            overload,
             &self.cookie,
             addr,
         )? {
@@ -920,7 +929,7 @@ mod tests {
         let peer = Peer::new(peer_public_key, Some(preshared_key), Some(endpoint));
         let mut config = Config::new(secret_key);
         let id = config.insert_peer(peer);
-        let mut session = Sessions::new(config);
+        let mut session = Sessions::new(config, &mut OsRng);
         session.turn(Tai64N::now(), &mut OsRng);
         (id, session)
     }
@@ -1011,13 +1020,13 @@ mod tests {
         let peer = Peer::new(spk_r, Some(psk), Some(server_addr));
         let mut config = Config::new(ssk_i);
         let peer_r = config.insert_peer(peer);
-        let mut sessions_i = Sessions::new(config);
+        let mut sessions_i = Sessions::new(config, &mut rng);
         sessions_i.turn(now, &mut rng);
 
         let peer = Peer::new(spk_i, Some(psk), Some(client_addr));
         let mut config = Config::new(ssk_r);
         let peer_i = config.insert_peer(peer);
-        let mut sessions_r = Sessions::new(config);
+        let mut sessions_r = Sessions::new(config, &mut rng);
         sessions_r.turn(now, &mut rng);
 
         let mut buf = Box::new(AlignedPacket([0; 256]));
