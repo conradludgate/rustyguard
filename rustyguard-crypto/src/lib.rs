@@ -446,8 +446,7 @@ mod tests {
     use x25519_dalek::StaticSecret;
 
     use crate::{
-        decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_init,
-        encrypt_handshake_resp, HandshakeState, StaticInitiatorConfig, StaticPeerConfig,
+        decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_init, encrypt_handshake_resp, HandshakeState, HasMac, StaticInitiatorConfig, StaticPeerConfig
     };
 
     #[test]
@@ -472,6 +471,8 @@ mod tests {
         let esk_i = StaticSecret::random_from_rng(&mut rng);
         let mut init = encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, None);
 
+        init.verify_mac1(&init_r.mac1_key).unwrap();
+
         let mut hs2 = HandshakeState::default();
         let init = decrypt_handshake_init(&mut init, &mut hs2, &init_r).unwrap();
 
@@ -480,6 +481,8 @@ mod tests {
 
         let esk_r = StaticSecret::random_from_rng(&mut rng);
         let mut resp = encrypt_handshake_resp(&mut hs2, init, &esk_r, &peer_i, 2, None);
+
+        resp.verify_mac1(&init_i.mac1_key).unwrap();
 
         decrypt_handshake_resp(&mut resp, &mut hs1, &init_i, &peer_r, &esk_i).unwrap();
 
@@ -497,5 +500,17 @@ mod tests {
         insta::assert_debug_snapshot!((msg, tag.0));
         dk1.decrypt(0, &mut msg, tag).unwrap();
         assert_eq!(msg, *b"goodbye world");
+
+        let mut msg = *b"hello world2";
+        let tag = ek1.encrypt(&mut msg);
+        insta::assert_debug_snapshot!((msg, tag.0));
+        dk2.decrypt(1, &mut msg, tag).unwrap();
+        assert_eq!(msg, *b"hello world2");
+
+        let mut msg = *b"goodbye world2";
+        let tag = ek2.encrypt(&mut msg);
+        insta::assert_debug_snapshot!((msg, tag.0));
+        dk1.decrypt(1, &mut msg, tag).unwrap();
+        assert_eq!(msg, *b"goodbye world2");
     }
 }
