@@ -437,3 +437,65 @@ pub fn decrypt_handshake_resp(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use chacha20poly1305::Key;
+    use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use tai64::{Tai64, Tai64N};
+    use x25519_dalek::StaticSecret;
+
+    use crate::{
+        decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_init,
+        encrypt_handshake_resp, HandshakeState, StaticInitiatorConfig, StaticPeerConfig,
+    };
+
+    #[test]
+    fn handshake() {
+        let mut rng = StdRng::seed_from_u64(3);
+
+        let sk_i = StaticSecret::random_from_rng(&mut rng);
+        let sk_r = StaticSecret::random_from_rng(&mut rng);
+        let mut psk = Key::default();
+        rng.fill_bytes(&mut psk);
+
+        let peer_i = StaticPeerConfig::new((&sk_i).into(), Some(psk));
+        let peer_r = StaticPeerConfig::new((&sk_r).into(), Some(psk));
+
+        let init_i = StaticInitiatorConfig::new(sk_i);
+        let init_r = StaticInitiatorConfig::new(sk_r);
+
+        let now = Tai64N(Tai64(1), 2);
+
+        let mut hs1 = HandshakeState::default();
+
+        let esk_i = StaticSecret::random_from_rng(&mut rng);
+        let mut init = encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, None);
+
+        let mut hs2 = HandshakeState::default();
+        let init = decrypt_handshake_init(&mut init, &mut hs2, &init_r).unwrap();
+
+        assert_eq!(init.static_key(), peer_i.key);
+        assert_eq!(init.timestamp(), &now.to_bytes());
+
+        let esk_r = StaticSecret::random_from_rng(&mut rng);
+        let mut resp = encrypt_handshake_resp(&mut hs2, init, &esk_r, &peer_i, 2, None);
+
+        decrypt_handshake_resp(&mut resp, &mut hs1, &init_i, &peer_r, &esk_i).unwrap();
+
+        let (mut ek1, mut dk1) = hs1.split(true);
+        let (mut ek2, mut dk2) = hs2.split(false);
+
+        let mut msg = *b"hello world";
+        let tag = ek1.encrypt(&mut msg);
+        insta::assert_debug_snapshot!((msg, tag.0));
+        dk2.decrypt(0, &mut msg, tag).unwrap();
+        assert_eq!(msg, *b"hello world");
+
+        let mut msg = *b"goodbye world";
+        let tag = ek2.encrypt(&mut msg);
+        insta::assert_debug_snapshot!((msg, tag.0));
+        dk1.decrypt(0, &mut msg, tag).unwrap();
+        assert_eq!(msg, *b"goodbye world");
+    }
+}

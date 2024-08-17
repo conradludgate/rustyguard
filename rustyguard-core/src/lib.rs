@@ -17,9 +17,6 @@ macro_rules! unsafe_log {
 
 extern crate alloc;
 
-// mod crypto;
-// mod messages;
-
 use core::net::SocketAddr;
 use core::ops::ControlFlow;
 use core::time::Duration;
