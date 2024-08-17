@@ -90,7 +90,7 @@ impl CookieState {
 
     pub fn new_cookie(&self, addr: SocketAddr) -> Cookie {
         // there's no specified encoding here - it just needs to contain the IP address and port :shrug:
-        let mut a = [0; 20];
+        let mut a = [0; 18];
         match addr.ip() {
             core::net::IpAddr::V4(ipv4) => a[..4].copy_from_slice(&ipv4.octets()[..]),
             core::net::IpAddr::V6(ipv6) => a[..16].copy_from_slice(&ipv6.octets()[..]),
@@ -444,9 +444,12 @@ mod tests {
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use tai64::{Tai64, Tai64N};
     use x25519_dalek::StaticSecret;
+    use zerocopy::AsBytes;
 
     use crate::{
-        decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_init, encrypt_handshake_resp, HandshakeState, HasMac, StaticInitiatorConfig, StaticPeerConfig
+        decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_init,
+        encrypt_handshake_resp, CookieState, HandshakeState, HasMac, StaticInitiatorConfig,
+        StaticPeerConfig,
     };
 
     #[test]
@@ -464,14 +467,23 @@ mod tests {
         let init_i = StaticInitiatorConfig::new(sk_i);
         let init_r = StaticInitiatorConfig::new(sk_r);
 
+        insta::assert_debug_snapshot!(init_i.mac1_key);
+        insta::assert_debug_snapshot!(init_i.cookie_key);
+
         let now = Tai64N(Tai64(1), 2);
+
+        let mut cookie_state = CookieState::default();
+        cookie_state.generate(&mut rng);
+        let cookie = cookie_state.new_cookie("192.168.1.1:1234".parse().unwrap());
 
         let mut hs1 = HandshakeState::default();
 
         let esk_i = StaticSecret::random_from_rng(&mut rng);
-        let mut init = encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, None);
+        let mut init =
+            encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
 
         init.verify_mac1(&init_r.mac1_key).unwrap();
+        init.verify_mac2(&cookie).unwrap();
 
         let mut hs2 = HandshakeState::default();
         let init = decrypt_handshake_init(&mut init, &mut hs2, &init_r).unwrap();
@@ -483,6 +495,7 @@ mod tests {
         let mut resp = encrypt_handshake_resp(&mut hs2, init, &esk_r, &peer_i, 2, None);
 
         resp.verify_mac1(&init_i.mac1_key).unwrap();
+        insta::assert_debug_snapshot!(resp.empty.as_bytes());
 
         decrypt_handshake_resp(&mut resp, &mut hs1, &init_i, &peer_r, &esk_i).unwrap();
 
