@@ -219,12 +219,9 @@ impl EncryptionKey {
     }
 
     pub fn encrypt(&mut self, payload: &mut [u8]) -> Tag {
-        use chacha20poly1305::{AeadInPlace, Nonce};
-        let n = self.counter;
+        use chacha20poly1305::AeadInPlace;
+        let nonce = nonce(self.counter);
         self.counter += 1;
-
-        let mut nonce = Nonce::default();
-        nonce[4..12].copy_from_slice(&n.to_le_bytes());
 
         let tag = self
             .key
@@ -257,15 +254,14 @@ impl DecryptionKey {
         payload: &mut [u8],
         tag: Tag,
     ) -> Result<(), CryptoError> {
-        use chacha20poly1305::{AeadInPlace, Nonce};
+        use chacha20poly1305::AeadInPlace;
 
         if !self.replay.check(counter) {
             unsafe_log!("payload replayed or is too old");
             return Err(CryptoError::Rejected);
         }
 
-        let mut nonce = Nonce::default();
-        nonce[4..12].copy_from_slice(&counter.to_le_bytes());
+        let nonce = nonce(counter);
 
         self.key
             .decrypt_in_place_detached(

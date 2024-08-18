@@ -526,4 +526,37 @@ mod tests {
         dk1.decrypt(1, &mut msg, tag).unwrap();
         assert_eq!(msg, *b"goodbye world2");
     }
+
+    #[test]
+    fn mac_failure() {
+        let mut rng = StdRng::seed_from_u64(3);
+
+        let sk_i = StaticSecret::random_from_rng(&mut rng);
+        let sk_r = StaticSecret::random_from_rng(&mut rng);
+        let mut psk = Key::default();
+        rng.fill_bytes(&mut psk);
+
+        let peer_r = StaticPeerConfig::new((&sk_r).into(), Some(psk));
+
+        let init_i = StaticInitiatorConfig::new(sk_i);
+        let init_r = StaticInitiatorConfig::new(sk_r);
+
+        let now = Tai64N(Tai64(1), 2);
+
+        let mut cookie_state = CookieState::default();
+        cookie_state.generate(&mut rng);
+        let cookie = cookie_state.new_cookie("192.168.1.1:1234".parse().unwrap());
+
+        let mut hs1 = HandshakeState::default();
+
+        let esk_i = StaticSecret::random_from_rng(&mut rng);
+        let mut init =
+            encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
+
+        init.mac2[0]=0;
+        init.verify_mac2(&cookie).unwrap_err();
+
+        init.mac1[0]=0;
+        init.verify_mac1(&init_r.mac1_key).unwrap_err();
+    }
 }
