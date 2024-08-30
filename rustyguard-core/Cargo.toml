@@ -10,7 +10,7 @@ rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 
 hashbrown = { version = "0.14", default-features = false }
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
-rustc-hash = { version = "2", default-features = false }
+foldhash = { version = "0.1", default-features = false }
 tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
 zerocopy = { version = "0.7.35", features = ["derive"] }
 zeroize = "1.8"

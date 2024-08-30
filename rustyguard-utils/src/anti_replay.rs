@@ -49,3 +49,32 @@ impl AntiReplay {
         seen == 0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AntiReplay;
+
+    #[test]
+    fn check() {
+        let mut replay = AntiReplay::default();
+        for i in 0..2048 {
+            assert!(replay.check(i * 2 + 1));
+            assert!(!replay.check(i * 2 + 1));
+            assert!(replay.check(i * 2));
+            assert!(!replay.check(i * 2));
+        }
+        for i in 0..4096 {
+            assert!(!replay.check(i));
+        }
+        assert!(replay.check(4096 + 2048));
+        assert!(!replay.check(4097));
+
+        assert!(replay.check(65535));
+        assert!(!replay.check(10000));
+
+        assert!(replay.check(66000));
+
+        // assert!(replay.check(8192));
+        // assert!(!replay.check(4096));
+    }
+}

@@ -553,10 +553,10 @@ mod tests {
         let mut init =
             encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
 
-        init.mac2[0]=0;
+        init.mac2[0] = 0;
         init.verify_mac2(&cookie).unwrap_err();
 
-        init.mac1[0]=0;
+        init.mac1[0] = 0;
         init.verify_mac1(&init_r.mac1_key).unwrap_err();
     }
 }

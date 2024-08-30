@@ -25,9 +25,9 @@ use core::{hash::BuildHasher, net::IpAddr};
 use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 
+use foldhash::fast::FixedState;
 use hashbrown::{HashMap, HashTable};
 use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
-use rustc_hash::{FxBuildHasher, FxSeededState};
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_cookie,
     encrypt_handshake_resp, CookieState, CryptoError, DecryptionKey, EncryptionKey, HandshakeState,
@@ -76,12 +76,12 @@ pub struct Config {
     /// This hashtable identifies peers by their public key.
     ///
     /// The public keys are contained within the `peers` vec.
-    /// We use FxHasher as the hasher for public-keys. This is considered
+    /// We use foldhash::fast as the hasher for public-keys. This is considered
     /// safe as this table is immutable (read-only) thus no hash-tampering can take place.
     /// Since public-keys are assumed to be randomly distributed, we can be reasonably
     /// sure that the hash quality is good.
     peers_by_pubkey: HashTable<PeerId>,
-    pubkey_hasher: FxSeededState,
+    pubkey_hasher: FixedState,
 
     /// List of peers that this wireguard server can talk to.
     peers: PeerList,
@@ -111,7 +111,7 @@ impl Config {
         Config {
             static_: StaticInitiatorConfig::new(private_key),
             // TODO(conrad): seed this
-            pubkey_hasher: FxSeededState::with_seed(0),
+            pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
             peers: PeerList(Vec::new()),
         }
@@ -178,6 +178,7 @@ pub struct Peer {
 pub struct PeerHandshake {
     started: Tai64N,
     sent: Tai64N,
+    // TODO: switch to ReusableSecret as this is more correct.
     esk_i: StaticSecret,
     state: HandshakeState,
 }
@@ -304,7 +305,7 @@ pub struct Sessions {
 
     // session IDs are chosen randomly by us, thus, are not vulnerable to hashdos
     // and don't need a high-quality hasher
-    peers_by_session: HashMap<u32, SessionType, FxBuildHasher>,
+    peers_by_session: HashMap<u32, SessionType, FixedState>,
 
     timers: BinaryHeap<TimerEntry>,
 }

@@ -1,7 +1,7 @@
-use core::hash::Hash;
+use core::hash::{BuildHasher, Hash};
 
 use libm::{ceil, log};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::RngCore;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -12,12 +12,15 @@ use alloc::vec::Vec;
 /// <https://en.wikipedia.org/wiki/Count%E2%80%93min_sketch>
 pub struct CountMinSketch {
     // one for each depth
-    hashers: Vec<ahash::RandomState>,
+    hashers: Vec<foldhash::quality::FixedState>,
     width: usize,
     depth: usize,
     // buckets, width*depth
     buckets: Vec<u32>,
 }
+
+pub trait CryptoRng: RngCore + rand_core::CryptoRng {}
+impl<R: RngCore + rand_core::CryptoRng> CryptoRng for R {}
 
 impl CountMinSketch {
     /// Given parameters (ε, δ),
@@ -50,7 +53,7 @@ impl CountMinSketch {
     /// ```
     ///
     /// These parameters will use a total of 108,964 bytes.
-    pub fn with_params(epsilon: f64, delta: f64, rng: &mut (impl RngCore + CryptoRng)) -> Self {
+    pub fn with_params(epsilon: f64, delta: f64, rng: &mut dyn CryptoRng) -> Self {
         CountMinSketch::new(
             ceil(core::f64::consts::E / epsilon) as usize,
             ceil(log(delta.recip())) as usize,
@@ -58,17 +61,10 @@ impl CountMinSketch {
         )
     }
 
-    fn new(width: usize, depth: usize, rng: &mut (impl RngCore + CryptoRng)) -> Self {
+    fn new(width: usize, depth: usize, rng: &mut dyn CryptoRng) -> Self {
         Self {
             hashers: (0..depth)
-                .map(|_| {
-                    ahash::RandomState::with_seeds(
-                        rng.next_u64(),
-                        rng.next_u64(),
-                        rng.next_u64(),
-                        rng.next_u64(),
-                    )
-                })
+                .map(|_| foldhash::quality::FixedState::with_seed(rng.next_u64()))
                 .collect(),
             width,
             depth,
@@ -90,8 +86,7 @@ impl CountMinSketch {
     }
 
     pub fn reset(&mut self) {
-        self.buckets.clear();
-        self.buckets.resize(self.width * self.depth, 0);
+        self.buckets.fill(0);
     }
 }
 
@@ -202,8 +197,21 @@ mod tests {
         let sketch = CountMinSketch::with_params(10.0 / 20_000.0, 0.01, &mut thread_rng());
 
         let memory = core::mem::size_of::<u32>() * sketch.buckets.len();
-        let memory2 = core::mem::size_of::<ahash::RandomState>() * sketch.hashers.len();
+        let memory2 = core::mem::size_of::<foldhash::quality::FixedState>() * sketch.hashers.len();
         let time = sketch.depth;
         std::println!("{} {time}", memory + memory2);
+    }
+
+    #[test]
+    fn reset() {
+        // fixed value of phi for consistent test
+        let mut rng = StdRng::seed_from_u64(16180339887498948482);
+        let mut sketch = CountMinSketch::with_params(1.0, 0.1, &mut rng);
+
+        for i in 1..=5 {
+            assert_eq!(sketch.count(&0), i);
+        }
+        sketch.reset();
+        assert_eq!(sketch.count(&0), 1);
     }
 }

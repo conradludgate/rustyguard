@@ -450,6 +450,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+name = "foldhash"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67442eab18f81a350b79a83a322bd47cfdec87de4e070c6463c3922983c5031d"
+
+[[package]]
 name = "futures-core"
 version = "0.3.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -972,12 +978,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "719b953e2095829ee67db738b3bfa9fa368c94900df327b3f07fe6e794d2fe1f"
 
 [[package]]
-name = "rustc-hash"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "583034fd73374156e66797ed8e5b0d5690409c9226b22d87cb7f19821c05d152"
-
-[[package]]
 name = "rustc_version"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1006,11 +1006,11 @@ dependencies = [
  "base64ct",
  "clap",
  "divan",
+ "foldhash",
  "hashbrown",
  "insta",
  "packet",
  "rand",
- "rustc-hash",
  "rustyguard-crypto",
  "rustyguard-types",
  "rustyguard-utils",
@@ -1069,7 +1069,7 @@ dependencies = [
 name = "rustyguard-utils"
 version = "0.1.0"
 dependencies = [
- "ahash",
+ "foldhash",
  "libm",
  "rand",
  "rand_core",

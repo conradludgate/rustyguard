@@ -64,13 +64,10 @@ fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
     use hmac::Mac;
     type Hmac = hmac::SimpleHmac<blake2::Blake2s256>;
 
+    assert!(N > 0);
     assert!(N <= 255);
 
     let mut output = [Key::default(); N];
-
-    if N == 0 {
-        return output;
-    }
 
     let hmac = Hmac::new_from_slice(&hmac(key, [msg])).unwrap();
     let mut ti = hmac.clone().chain_update([1u8]).finalize().into_bytes();
