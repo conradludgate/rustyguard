@@ -1,5 +1,6 @@
 use core::hash::Hash;
 
+use libm::{ceil, log};
 use rand_core::{CryptoRng, RngCore};
 
 extern crate alloc;
@@ -51,8 +52,8 @@ impl CountMinSketch {
     /// These parameters will use a total of 108,964 bytes.
     pub fn with_params(epsilon: f64, delta: f64, rng: &mut (impl RngCore + CryptoRng)) -> Self {
         CountMinSketch::new(
-            (core::f64::consts::E / epsilon).ceil() as usize,
-            (1.0_f64 / delta).ln().ceil() as usize,
+            ceil(core::f64::consts::E / epsilon) as usize,
+            ceil(log(delta.recip())) as usize,
             rng,
         )
     }
