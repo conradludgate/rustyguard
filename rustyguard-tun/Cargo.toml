@@ -14,8 +14,7 @@ tai64 = "4.0"
 base64ct = { version = "1.6", features = ["alloc"] }
 tun = { version = "0.6", features = ["async"], git = "https://github.com/conradludgate/rust-tun" }
 tokio = { version = "1", features = ["full"] }
-knuffel = { version = "3.2.0" }
-miette = { version = "5.10", features = ["fancy"] }
 ipnet = { version = "2.9" }
 iptrie = "0.8"
 packet = "0.1"
+rust-ini = "0.21"

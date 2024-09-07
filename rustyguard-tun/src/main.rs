@@ -1,4 +1,7 @@
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+
 use base64ct::{Base64, Encoding};
+use ini::Ini;
 use rand::rngs::OsRng;
 use rustyguard_core::{
     Config, DataHeader, Message, Peer, PeerId, PublicKey, Sessions, StaticSecret,
@@ -21,7 +24,9 @@ async fn main() {
         let id = rg_config.insert_peer(Peer::new(
             peer_pk,
             None,
-            peer.endpoint.as_ref().and_then(|e| e.parse().ok()),
+            peer.endpoint
+                .as_ref()
+                .and_then(|e| e.to_socket_addrs().unwrap().find(|s| s.is_ipv4())),
         ));
 
         for addr in &peer.addrs {
@@ -126,44 +131,85 @@ async fn main() {
 #[repr(align(16))]
 struct AlignedPacket([u8; 2048]);
 
-#[derive(knuffel::Decode)]
 struct TunConfig {
-    #[knuffel(child)]
     interface: TunInterface,
 
-    #[knuffel(children(name = "peer"))]
     peers: Vec<PeerConfig>,
 }
 
-#[derive(knuffel::Decode)]
 struct TunInterface {
-    #[knuffel(child, unwrap(argument, bytes))]
     key: Option<Vec<u8>>,
 
-    #[knuffel(child, unwrap(argument))]
-    host: String,
+    host: SocketAddr,
 
-    #[knuffel(child, unwrap(argument, str))]
     addr: ipnet::Ipv4Net,
 }
 
-#[derive(knuffel::Decode)]
 struct PeerConfig {
-    #[knuffel(child, unwrap(argument, bytes))]
     key: Vec<u8>,
 
-    #[knuffel(children(name = "addr"), unwrap(argument, str))]
     addrs: Vec<ipnet::Ipv4Net>,
 
-    #[knuffel(child, unwrap(argument))]
     endpoint: Option<String>,
 }
 
 impl TunConfig {
     fn parse() -> Self {
-        let config = std::fs::read_to_string("./rustyguard-tun/tun.kdl")
-            .expect("rustyguard-tun/tun.kdl file should not be missing");
-        knuffel::parse("rustyguard-tun/tun.kdl", &config).unwrap()
+        let i = Ini::load_from_file("rustyguard-tun/test-data/rg.conf").unwrap();
+
+        let mut interface = None;
+        let mut peers = vec![];
+
+        for (sec, prop) in i.iter() {
+            match sec {
+                Some("Interface") => {
+                    let mut key = None;
+                    let mut port = 0u16;
+                    let mut addr = None;
+
+                    for (k, v) in prop.iter() {
+                        match k {
+                            "ListenPort" => port = v.parse().unwrap(),
+                            "PrivateKey" => key = Some(base64ct::Base64::decode_vec(v).unwrap()),
+                            "Address" => addr = Some(v.parse().unwrap()),
+                            _ => {}
+                        }
+                    }
+
+                    interface = Some(TunInterface {
+                        key,
+                        host: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port),
+                        addr: addr.unwrap(),
+                    });
+                }
+                Some("Peer") => {
+                    let mut key = None;
+                    let mut addrs = vec![];
+                    let mut endpoint = None;
+
+                    for (k, v) in prop.iter() {
+                        match k {
+                            "PublicKey" => key = Some(base64ct::Base64::decode_vec(v).unwrap()),
+                            "AllowedIPs" => addrs.push(v.parse().unwrap()),
+                            "Endpoint" => endpoint = Some(v.to_owned()),
+                            _ => {}
+                        }
+                    }
+
+                    peers.push(PeerConfig {
+                        key: key.unwrap(),
+                        addrs,
+                        endpoint,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            interface: interface.unwrap(),
+            peers,
+        }
     }
 
     fn key(&self) -> StaticSecret {
