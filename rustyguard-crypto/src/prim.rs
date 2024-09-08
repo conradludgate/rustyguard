@@ -4,6 +4,7 @@ use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
 use rustyguard_types::Tag;
 use x25519_dalek::PublicKey;
+use x25519_dalek::ReusableSecret;
 use x25519_dalek::StaticSecret;
 use zerocopy::AsBytes;
 use zeroize::Zeroize;
@@ -113,6 +114,16 @@ impl HandshakeState {
     }
 
     pub fn mix_key_dh(&mut self, sk: &StaticSecret, pk: &PublicKey) -> Key {
+        self.mix_key(sk.diffie_hellman(pk).as_bytes())
+    }
+
+    pub fn mix_edh(&mut self, sk: &ReusableSecret, pk: &PublicKey) {
+        let prk = sk.diffie_hellman(pk);
+        let [c] = hkdf(&self.chain, prk.as_bytes());
+        self.chain = c;
+    }
+
+    pub fn mix_key_edh(&mut self, sk: &ReusableSecret, pk: &PublicKey) -> Key {
         self.mix_key(sk.diffie_hellman(pk).as_bytes())
     }
 

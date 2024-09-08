@@ -6,7 +6,7 @@ use rustyguard_crypto::{
     StaticInitiatorConfig, StaticPeerConfig,
 };
 use tai64::Tai64N;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::{PublicKey, ReusableSecret, StaticSecret};
 
 fn main() {
     divan::main()
@@ -27,7 +27,7 @@ fn handshake(b: Bencher) {
             &mut hs,
             &StaticInitiatorConfig::new(ssk_i),
             &StaticPeerConfig::new(spk_r, Some(psk)),
-            &StaticSecret::random_from_rng(thread_rng()),
+            &ReusableSecret::random_from_rng(thread_rng()),
             Tai64N::now(),
             thread_rng().gen(),
             None,

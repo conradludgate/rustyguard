@@ -11,7 +11,7 @@ rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 blake2 = { version = "0.10", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false }
 hmac = { version = "0.12" }
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets", "reusable_secrets"] }
 
 # crypto adjacent
 zeroize = "1.8"

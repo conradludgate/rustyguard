@@ -4,7 +4,7 @@ use core::{net::SocketAddr, ops::ControlFlow};
 
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
-pub use x25519_dalek::{PublicKey, StaticSecret};
+pub use x25519_dalek::{PublicKey, ReusableSecret, StaticSecret};
 
 use rand_core::{CryptoRng, RngCore};
 use rustyguard_types::{
@@ -269,7 +269,7 @@ pub fn encrypt_handshake_init(
     hs: &mut HandshakeState,
     initiator: &StaticInitiatorConfig,
     peer: &StaticPeerConfig,
-    esk_i: &StaticSecret,
+    esk_i: &ReusableSecret,
     now: Tai64N,
     sender: u32,
     cookie: Option<&Cookie>,
@@ -291,7 +291,7 @@ pub fn encrypt_handshake_init(
     hs.mix_hash(epk_i.as_bytes());
 
     // -> es:
-    let k = hs.mix_key_dh(esk_i, &peer.key);
+    let k = hs.mix_key_edh(esk_i, &peer.key);
 
     // -> s:
     let static_key = EncryptedPublicKey::encrypt_and_hash(initiator.public_key.to_bytes(), hs, &k);
@@ -411,7 +411,7 @@ pub fn decrypt_handshake_resp(
     hs: &mut HandshakeState,
     initiator: &StaticInitiatorConfig,
     peer: &StaticPeerConfig,
-    esk_i: &StaticSecret,
+    esk_i: &ReusableSecret,
 ) -> Result<(), CryptoError> {
     // IKpsk2:
     // <- e, ee, se, psk
@@ -423,7 +423,7 @@ pub fn decrypt_handshake_resp(
     hs.mix_hash(epk_r.as_bytes());
 
     // <- ee:
-    hs.mix_dh(esk_i, &epk_r);
+    hs.mix_edh(esk_i, &epk_r);
 
     // <- se:
     hs.mix_dh(&initiator.private_key, &epk_r);
@@ -443,7 +443,7 @@ mod tests {
     use chacha20poly1305::Key;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use tai64::{Tai64, Tai64N};
-    use x25519_dalek::StaticSecret;
+    use x25519_dalek::{ReusableSecret, StaticSecret};
     use zerocopy::AsBytes;
 
     use crate::{
@@ -478,7 +478,7 @@ mod tests {
 
         let mut hs1 = HandshakeState::default();
 
-        let esk_i = StaticSecret::random_from_rng(&mut rng);
+        let esk_i = ReusableSecret::random_from_rng(&mut rng);
         let mut init =
             encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
 
@@ -549,7 +549,7 @@ mod tests {
 
         let mut hs1 = HandshakeState::default();
 
-        let esk_i = StaticSecret::random_from_rng(&mut rng);
+        let esk_i = ReusableSecret::random_from_rng(&mut rng);
         let mut init =
             encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
 

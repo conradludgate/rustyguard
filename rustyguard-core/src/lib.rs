@@ -32,7 +32,7 @@ use rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_cookie,
     encrypt_handshake_resp, CookieState, CryptoError, DecryptionKey, EncryptionKey, HandshakeState,
-    HasMac, Key, Mac, StaticInitiatorConfig, StaticPeerConfig,
+    HasMac, Key, Mac, ReusableSecret, StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, HandshakeResp, MSG_COOKIE, MSG_DATA, MSG_FIRST,
@@ -210,8 +210,7 @@ enum SessionState {
 
 #[derive(Zeroize)]
 struct SessionHandshake {
-    // TODO: switch to ReusableSecret as this is more correct.
-    esk_i: StaticSecret,
+    esk_i: ReusableSecret,
     state: HandshakeState,
 }
 
@@ -942,7 +941,7 @@ fn new_handshake(state: &mut Sessions, peer_idx: PeerId) -> HandshakeInit {
     peer.current_handshake = Some(sender);
 
     let handshake = SessionHandshake {
-        esk_i: StaticSecret::random_from_rng(&mut state.rng),
+        esk_i: ReusableSecret::random_from_rng(&mut state.rng),
         state: HandshakeState::default(),
     };
 
