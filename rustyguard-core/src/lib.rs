@@ -22,6 +22,7 @@ use core::ops::ControlFlow;
 use core::time::Duration;
 use core::{hash::BuildHasher, net::IpAddr};
 
+use alloc::boxed::Box;
 use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 
@@ -167,49 +168,59 @@ pub struct Peer {
     /// Latest mac1 we sent the peer. Needed to decrypt any cookies.
     last_sent_mac1: Mac,
 
-    /// The inflight handshake. Only set by the initiator of a session
-    handshake: PeerHandshake,
-    // TODO(conrad): handle previous transport keys too
-    /// The current inflight transport keys used to decrypt
-    transport: PeerCipherState,
+    current_handshake: Option<u32>,
+    current_transport: Option<u32>,
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct PeerHandshake {
+struct Session {
+    peer: PeerId,
     started: Tai64N,
     sent: Tai64N,
+    state: SessionState,
+}
+
+impl Session {
+    fn should_reinit(&self, now: Tai64N, _hs: &SessionHandshake) -> bool {
+        (self.sent + REKEY_TIMEOUT < now) && (now < self.started + REKEY_ATTEMPT_TIME)
+    }
+
+    fn should_rekey(&self, now: Tai64N, ts: &SessionTransport) -> bool {
+        (self.started + REKEY_AFTER_TIME < now) || (ts.encrypt.counter >= REKEY_AFTER_MESSAGES)
+    }
+    fn should_keepalive(&self, now: Tai64N, _ts: &SessionTransport) -> bool {
+        self.sent + KEEPALIVE_TIMEOUT < now
+    }
+    fn should_reject(&self, now: Tai64N, ts: &SessionTransport) -> bool {
+        self.should_expire(now) || (ts.encrypt.counter >= REJECT_AFTER_MESSAGES)
+    }
+    fn should_expire(&self, now: Tai64N) -> bool {
+        self.started + REJECT_AFTER_TIME < now
+    }
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the larger transport state is our expected state"
+)]
+#[derive(ZeroizeOnDrop)]
+enum SessionState {
+    Handshake(SessionHandshake),
+    Transport(SessionTransport),
+}
+
+#[derive(Zeroize)]
+struct SessionHandshake {
     // TODO: switch to ReusableSecret as this is more correct.
     esk_i: StaticSecret,
     state: HandshakeState,
 }
 
 #[derive(ZeroizeOnDrop)]
-struct PeerCipherState {
-    started: Tai64N,
-    sent: Tai64N,
+struct SessionTransport {
     /// who will the outgoing messages be received by
     receiver: u32,
     encrypt: EncryptionKey,
     decrypt: DecryptionKey,
-}
-
-impl PeerHandshake {
-    fn should_reinit(&self, now: Tai64N) -> bool {
-        (self.sent + REKEY_TIMEOUT < now) && (now < self.started + REKEY_ATTEMPT_TIME)
-    }
-}
-impl PeerCipherState {
-    fn should_rekey(&self, now: Tai64N) -> bool {
-        (self.started + REKEY_AFTER_TIME < now) || (self.encrypt.counter >= REKEY_AFTER_MESSAGES)
-    }
-    fn should_keepalive(&self, now: Tai64N) -> bool {
-        self.sent + KEEPALIVE_TIMEOUT < now
-    }
-    fn should_reject(&self, now: Tai64N) -> bool {
-        (self.started == Tai64N(Tai64(0), 0))
-            || (self.started + REJECT_AFTER_TIME < now)
-            || (self.encrypt.counter >= REJECT_AFTER_MESSAGES)
-    }
 }
 
 impl Peer {
@@ -220,47 +231,52 @@ impl Peer {
             endpoint,
             latest_ts: Tai64NBytes::default(),
             cookie: None,
-            handshake: PeerHandshake {
-                started: Tai64N(Tai64(0), 0),
-                sent: Tai64N(Tai64(0), 0),
-                esk_i: StaticSecret::from([0; 32]),
-                state: HandshakeState::default(),
-            },
-            transport: PeerCipherState {
-                started: Tai64N(Tai64(0), 0),
-                sent: Tai64N(Tai64(0), 0),
-                receiver: Default::default(),
-                encrypt: EncryptionKey::new(Default::default()),
-                decrypt: DecryptionKey::new(Default::default()),
-            },
+            current_handshake: None,
+            current_transport: None,
             last_sent_mac1: [0; 16],
         }
     }
 
-    fn encrypt_message(&mut self, payload: &mut [u8], now: Tai64N) -> Option<EncryptedMetadata> {
-        let session = &mut self.transport;
-        if session.should_reject(now) {
+    fn encrypt_message(
+        &mut self,
+        sessions: &mut SessionMap,
+        payload: &mut [u8],
+        now: Tai64N,
+    ) -> Option<EncryptedMetadata> {
+        let session = self.current_transport?;
+        let session = sessions.get_mut(&session).unwrap();
+        let SessionState::Transport(ts) = &session.state else {
+            unreachable!()
+        };
+        if session.should_reject(now, ts) {
             return None;
         }
 
-        Some(self.force_encrypt(payload, now))
+        Some(self.force_encrypt(session, payload, now))
     }
 
-    fn force_encrypt(&mut self, payload: &mut [u8], now: Tai64N) -> EncryptedMetadata {
+    fn force_encrypt(
+        &mut self,
+        session: &mut Session,
+        payload: &mut [u8],
+        now: Tai64N,
+    ) -> EncryptedMetadata {
         assert_eq!(
             payload.len() % 16,
             0,
             "payload length must be rounded up to the nearest 16 byte boundary"
         );
 
-        let session = &mut self.transport;
-        let n = session.encrypt.counter;
-        let tag = session.encrypt.encrypt(payload);
+        let SessionState::Transport(ts) = &mut session.state else {
+            unreachable!()
+        };
+        let n = ts.encrypt.counter;
+        let tag = ts.encrypt.encrypt(payload);
 
         session.sent = now;
         let header = DataHeader {
             _type: little_endian::U32::new(MSG_DATA),
-            receiver: little_endian::U32::new(session.receiver),
+            receiver: little_endian::U32::new(ts.receiver),
             counter: little_endian::U64::new(n),
         };
 
@@ -272,11 +288,11 @@ impl Peer {
     }
 }
 
-pub struct MessageEncrypter<'p>(&'p mut Peer, Tai64N);
+pub struct MessageEncrypter<'p>(&'p mut Peer, &'p mut Session, Tai64N);
 
 impl MessageEncrypter<'_> {
     pub fn encrypt(self, payload: &mut [u8]) -> EncryptedMetadata {
-        self.0.force_encrypt(payload, self.1)
+        self.0.force_encrypt(self.1, payload, self.2)
     }
 
     /// Encrypts the payload and attaches the wireguard framing in-place.
@@ -292,6 +308,10 @@ impl MessageEncrypter<'_> {
 
 type Tai64NBytes = [u8; 12];
 
+// session IDs are chosen randomly by us, thus, are not vulnerable to hashdos
+// and don't need a high-quality hasher
+type SessionMap = HashMap<u32, Box<Session>, FixedState>;
+
 pub struct Sessions {
     config: Config,
     rng: StdRng,
@@ -303,9 +323,7 @@ pub struct Sessions {
     last_rate_reset: Tai64N,
     ip_rate_limit: CountMinSketch,
 
-    // session IDs are chosen randomly by us, thus, are not vulnerable to hashdos
-    // and don't need a high-quality hasher
-    peers_by_session: HashMap<u32, SessionType, FixedState>,
+    peers_by_session2: SessionMap,
 
     timers: BinaryHeap<TimerEntry>,
 }
@@ -334,15 +352,10 @@ impl Ord for TimerEntry {
 
 #[derive(Debug)]
 enum TimerEntryType {
-    InitAttempt { peer_idx: PeerId },
-    RekeyAttempt { peer_idx: PeerId },
-    Keepalive { peer_idx: PeerId },
-}
-
-#[derive(Debug)]
-enum SessionType {
-    Handshake(PeerId),
-    Cipher(PeerId),
+    InitAttempt { session_id: u32 },
+    RekeyAttempt { session_id: u32 },
+    Keepalive { session_id: u32 },
+    ExpireTransport { session_id: u32 },
 }
 
 impl Sessions {
@@ -355,7 +368,7 @@ impl Sessions {
             last_rate_reset: Tai64N(Tai64(0), 0),
             ip_rate_limit: CountMinSketch::with_params(10.0 / 20_000.0, 0.01, rng),
             rng: StdRng::from_rng(rng).unwrap(),
-            peers_by_session: HashMap::default(),
+            peers_by_session2: HashMap::default(),
             timers: BinaryHeap::new(),
         }
     }
@@ -386,40 +399,60 @@ impl Sessions {
         while self.timers.peek().is_some_and(|t| t.time < self.now) {
             let entry = self.timers.pop().unwrap().kind;
             match entry {
-                TimerEntryType::InitAttempt { peer_idx } => {
+                TimerEntryType::InitAttempt { session_id }
+                | TimerEntryType::RekeyAttempt { session_id } => {
+                    let session = self.peers_by_session2.get_mut(&session_id).unwrap();
+                    let peer_idx = session.peer;
                     let peer = &mut self.config.peers[peer_idx];
+
                     // only re-init if
                     // 1. it's been REKEY_TIMEOUT seconds since our last attempt
                     // 2. it's not been more than REKEY_ATTEMPT_TIME seconds since we started
                     // 3. the session needs to be re-init
-                    if peer.handshake.should_reinit(self.now)
-                        && peer.transport.should_rekey(self.now)
-                    {
+                    let should_reinit = match &session.state {
+                        SessionState::Handshake(hs) => session.should_reinit(self.now, hs),
+                        SessionState::Transport(ts) => session.should_rekey(self.now, ts),
+                    };
+
+                    if should_reinit {
                         return Some(MaintenanceMsg {
                             socket: peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before"),
                             data: MaintenanceRepr::Init(new_handshake(self, peer_idx)),
                         });
                     }
                 }
-                TimerEntryType::RekeyAttempt { peer_idx } => {
+                TimerEntryType::ExpireTransport { session_id } => {
+                    let session = self.peers_by_session2.get_mut(&session_id).unwrap();
+
+                    let peer_idx = session.peer;
                     let peer = &mut self.config.peers[peer_idx];
-                    if peer.transport.should_rekey(self.now) {
-                        return Some(MaintenanceMsg {
-                            socket: peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before"),
-                            data: MaintenanceRepr::Init(new_handshake(self, peer_idx)),
-                        });
+
+                    if session.should_expire(self.now) {
+                        if peer.current_transport == Some(session_id) {
+                            peer.current_transport = None;
+                        }
+                        self.peers_by_session2.remove(&session_id);
                     }
                 }
-                TimerEntryType::Keepalive { peer_idx } => {
-                    let peer = &mut self.config.peers[peer_idx];
-                    if peer.transport.should_keepalive(self.now) {
+                TimerEntryType::Keepalive { session_id } => {
+                    let session = self.peers_by_session2.get_mut(&session_id).unwrap();
+                    let peer = &mut self.config.peers[session.peer];
+
+                    let should_keepalive = match &session.state {
+                        SessionState::Handshake(_) => false,
+                        SessionState::Transport(ts) => session.should_keepalive(self.now, ts),
+                    };
+
+                    if should_keepalive {
                         let EncryptedMetadata {
                             header,
                             tag,
                             payload_len: _,
-                        } = peer.encrypt_message(&mut [], self.now).expect(
-                            "a keepalive should only be scheduled if the data keys are set",
-                        );
+                        } = peer
+                            .encrypt_message(&mut self.peers_by_session2, &mut [], self.now)
+                            .expect(
+                                "a keepalive should only be scheduled if the data keys are set",
+                            );
                         return Some(MaintenanceMsg {
                             socket: peer.endpoint.expect("a keepalive event should not be scheduled if we've never seen this endpoint before"),
                             data: MaintenanceRepr::Data(Keepalive { header, tag }),
@@ -521,7 +554,7 @@ macro_rules! allocate_session {
         let mut session_id = $state.rng.gen();
         loop {
             use hashbrown::hash_map::Entry;
-            match $state.peers_by_session.entry(session_id) {
+            match $state.peers_by_session2.entry(session_id) {
                 Entry::Occupied(_) => session_id = $state.rng.gen(),
                 Entry::Vacant(v) => break v,
             }
@@ -578,14 +611,20 @@ impl Sessions {
             return Err(Error::Rejected);
         };
 
-        match peer.encrypt_message(payload, self.now) {
+        match peer.encrypt_message(&mut self.peers_by_session2, payload, self.now) {
             // we encrypted the message in-place in payload.
             Some(metadata) => {
-                if peer.transport.encrypt.counter >= REKEY_AFTER_MESSAGES {
+                let session_id = peer.current_transport.unwrap();
+                let session = self.peers_by_session2.get_mut(&session_id).unwrap();
+                let SessionState::Transport(ts) = &session.state else {
+                    unreachable!()
+                };
+
+                if ts.encrypt.counter >= REKEY_AFTER_MESSAGES {
                     // the encryption key needs rotating. schedule a rekey attempt
                     self.timers.push(TimerEntry {
                         time: self.now,
-                        kind: TimerEntryType::RekeyAttempt { peer_idx },
+                        kind: TimerEntryType::RekeyAttempt { session_id },
                     });
                 }
                 Ok(SendMessage::Data(ep, metadata))
@@ -692,6 +731,7 @@ impl Sessions {
 
         // start a new session
         let vacant = allocate_session!(self);
+        let session_id = *vacant.key();
 
         // complete handshake
         let esk_r = StaticSecret::random_from_rng(&mut self.rng);
@@ -700,22 +740,34 @@ impl Sessions {
             data,
             &esk_r,
             &peer.static_,
-            *vacant.key(),
+            session_id,
             peer.cookie.as_ref(),
         );
         peer.last_sent_mac1 = response.mac1;
 
+        peer.current_transport = Some(session_id);
+
         // generate the encryption keys
         let (encrypt, decrypt) = hs.split(false);
-        peer.transport = PeerCipherState {
-            started: self.now,
-            sent: self.now,
+        let transport = SessionTransport {
             receiver: init_msg.sender.get(),
             encrypt,
             decrypt,
         };
+        let session = Session {
+            peer: peer_idx,
+            started: self.now,
+            sent: self.now,
+            state: SessionState::Transport(transport),
+        };
 
-        vacant.insert(SessionType::Cipher(peer_idx));
+        vacant.insert(Box::new(session));
+
+        // schedule key expiration
+        self.timers.push(TimerEntry {
+            time: self.now + REJECT_AFTER_TIME,
+            kind: TimerEntryType::ExpireTransport { session_id },
+        });
 
         // response message is always smaller than the initial message
         Ok(write_msg(msg, &response))
@@ -753,55 +805,63 @@ impl Sessions {
         // check for a session expecting this handshake response
         use hashbrown::hash_map::Entry;
         let session_id = resp_msg.receiver.get();
-        let mut session = match self.peers_by_session.entry(session_id) {
+        let session = match self.peers_by_session2.entry(session_id) {
             // session not found
             Entry::Vacant(_) => {
                 unsafe_log!("[{addr:?}] [{session_id:?}] session not found");
                 return Err(Error::Rejected);
             }
-            Entry::Occupied(o) => o,
+            Entry::Occupied(o) => o.into_mut(),
         };
-        let peer_idx = match session.get() {
+        let hs = match &mut session.state {
             // session is already past the handshake phase
-            SessionType::Cipher(_) => {
+            SessionState::Transport(_) => {
                 unsafe_log!("[{addr:?}] [{session_id:?}] session handshake already completed");
                 return Err(Error::Rejected);
             }
-            SessionType::Handshake(peer_idx) => *peer_idx,
+            SessionState::Handshake(hs) => hs,
         };
-        let peer = &mut self.config.peers[peer_idx];
+        let peer = &mut self.config.peers[session.peer];
 
         decrypt_handshake_resp(
             resp_msg,
-            &mut peer.handshake.state,
+            &mut hs.state,
             &self.config.static_,
             &peer.static_,
-            &peer.handshake.esk_i,
+            &hs.esk_i,
         )?;
+
+        let hs_session = peer.current_handshake.take();
+        debug_assert_eq!(hs_session, Some(session_id));
+        peer.current_transport = Some(session_id);
 
         peer.endpoint = Some(addr);
 
-        let (encrypt, decrypt) = peer.handshake.state.split(true);
-        peer.handshake.zeroize();
+        let (encrypt, decrypt) = hs.state.split(true);
+        hs.zeroize();
 
-        session.insert(SessionType::Cipher(peer_idx));
-        peer.transport = PeerCipherState {
-            started: self.now,
-            sent: self.now,
+        session.state = SessionState::Transport(SessionTransport {
             receiver: resp_msg.sender.get(),
             encrypt,
             decrypt,
-        };
+        });
+        session.started = self.now;
+        session.sent = self.now;
 
         // schedule re-key as we were the initiator
         self.timers.push(TimerEntry {
             time: self.now + REKEY_AFTER_TIME,
-            kind: TimerEntryType::RekeyAttempt { peer_idx },
+            kind: TimerEntryType::RekeyAttempt { session_id },
+        });
+        // schedule key expiration
+        self.timers.push(TimerEntry {
+            time: self.now + REJECT_AFTER_TIME,
+            kind: TimerEntryType::ExpireTransport { session_id },
         });
 
         Ok(Message::HandshakeComplete(
-            peer_idx,
-            MessageEncrypter(peer, self.now),
+            session.peer,
+            MessageEncrypter(peer, &mut *session, self.now),
         ))
     }
 
@@ -810,11 +870,11 @@ impl Sessions {
         unsafe_log!("parsed as cookie packet");
         let cookie_msg = CookieMessage::mut_from(msg).ok_or(Error::InvalidMessage)?;
 
-        let (SessionType::Cipher(peer_idx) | SessionType::Handshake(peer_idx)) = self
-            .peers_by_session
+        let session = self
+            .peers_by_session2
             .get(&cookie_msg.receiver.get())
             .ok_or(Error::Rejected)?;
-        let peer = &mut self.config.peers[*peer_idx];
+        let peer = &mut self.config.peers[session.peer];
 
         let cookie = decrypt_cookie(
             &mut cookie_msg.cookie,
@@ -840,55 +900,77 @@ impl Sessions {
             DataHeader::message_mut_from(msg).ok_or(Error::InvalidMessage)?;
 
         let session_id = header.receiver.get();
-        let peer_idx = match self.peers_by_session.get(&session_id) {
-            Some(SessionType::Handshake(_)) | None => {
+        let Some(session) = self.peers_by_session2.get_mut(&session_id) else {
+            unsafe_log!("[{socket:?}] [{session_id:?}] session not ready");
+            return Err(Error::Rejected);
+        };
+        let ts = match &mut session.state {
+            SessionState::Handshake(_) => {
                 unsafe_log!("[{socket:?}] [{session_id:?}] session not ready");
                 return Err(Error::Rejected);
             }
-            Some(SessionType::Cipher(peer_idx)) => *peer_idx,
+            SessionState::Transport(ts) => ts,
         };
-        let peer = &mut self.config.peers[peer_idx];
-
-        let session = &mut peer.transport;
+        let peer = &mut self.config.peers[session.peer];
         peer.endpoint = Some(socket);
 
         if session.sent + KEEPALIVE_TIMEOUT < self.now {
             // schedule the keepalive immediately
             self.timers.push(TimerEntry {
                 time: self.now,
-                kind: TimerEntryType::Keepalive { peer_idx },
+                kind: TimerEntryType::Keepalive { session_id },
             });
         }
 
         let payload = payload.as_bytes_mut();
-        session
-            .decrypt
-            .decrypt(header.counter.get(), payload, tag)?;
+        ts.decrypt.decrypt(header.counter.get(), payload, tag)?;
 
-        Ok((peer_idx, payload))
+        Ok((session.peer, payload))
     }
 }
 
 fn new_handshake(state: &mut Sessions, peer_idx: PeerId) -> HandshakeInit {
     let peer = &mut state.config.peers[peer_idx];
 
+    let old_handshake = peer
+        .current_handshake
+        .and_then(|session| state.peers_by_session2.remove(&session));
+
     // start a new session
     let vacant = allocate_session!(state);
     let sender = *vacant.key();
+    peer.current_handshake = Some(sender);
 
-    vacant.insert(SessionType::Handshake(peer_idx));
-    peer.handshake = PeerHandshake {
-        started: peer.handshake.started,
-        sent: state.now,
+    let handshake = SessionHandshake {
         esk_i: StaticSecret::random_from_rng(&mut state.rng),
         state: HandshakeState::default(),
     };
 
+    let session = match old_handshake {
+        Some(mut session) => {
+            session.sent = state.now;
+            session.state = SessionState::Handshake(handshake);
+            session
+        }
+        None => Box::new(Session {
+            peer: peer_idx,
+            started: state.now,
+            sent: state.now,
+            state: SessionState::Handshake(handshake),
+        }),
+    };
+
+    let session_id = *vacant.key();
+    let session = vacant.insert(session);
+    let SessionState::Handshake(handshake) = &mut session.state else {
+        unreachable!()
+    };
+
     let msg = rustyguard_crypto::encrypt_handshake_init(
-        &mut peer.handshake.state,
+        &mut handshake.state,
         &state.config.static_,
         &peer.static_,
-        &peer.handshake.esk_i,
+        &handshake.esk_i,
         state.now,
         sender,
         peer.cookie.as_ref(),
@@ -896,7 +978,7 @@ fn new_handshake(state: &mut Sessions, peer_idx: PeerId) -> HandshakeInit {
 
     state.timers.push(TimerEntry {
         time: state.now + REKEY_TIMEOUT,
-        kind: TimerEntryType::InitAttempt { peer_idx },
+        kind: TimerEntryType::InitAttempt { session_id },
     });
 
     msg
