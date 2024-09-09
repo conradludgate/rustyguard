@@ -1,5 +1,6 @@
 use core::hash::{BuildHasher, Hash};
 
+use foldhash::quality::FixedState;
 use libm::{ceil, log};
 use rand_core::RngCore;
 
@@ -12,7 +13,7 @@ use alloc::vec::Vec;
 /// <https://en.wikipedia.org/wiki/Count%E2%80%93min_sketch>
 pub struct CountMinSketch {
     // one for each depth
-    hashers: Vec<foldhash::quality::FixedState>,
+    hashers: Vec<FixedState>,
     width: usize,
     depth: usize,
     // buckets, width*depth
@@ -64,7 +65,7 @@ impl CountMinSketch {
     fn new(width: usize, depth: usize, rng: &mut dyn CryptoRng) -> Self {
         Self {
             hashers: (0..depth)
-                .map(|_| foldhash::quality::FixedState::with_seed(rng.next_u64()))
+                .map(|_| FixedState::with_seed(rng.next_u64()))
                 .collect(),
             width,
             depth,
@@ -85,8 +86,11 @@ impl CountMinSketch {
         min
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self, rng: &mut dyn CryptoRng) {
         self.buckets.fill(0);
+        self.hashers
+            .iter_mut()
+            .for_each(|hasher| *hasher = FixedState::with_seed(rng.next_u64()));
     }
 }
 
@@ -211,7 +215,7 @@ mod tests {
         for i in 1..=5 {
             assert_eq!(sketch.count(&0), i);
         }
-        sketch.reset();
+        sketch.reset(&mut rng);
         assert_eq!(sketch.count(&0), 1);
     }
 }

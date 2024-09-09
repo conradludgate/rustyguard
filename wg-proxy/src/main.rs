@@ -18,7 +18,7 @@ type PeerId = DefaultKey;
 
 #[tokio::main]
 async fn main() {
-    let cookie_state = RwLock::new(CookieState::default());
+    let cookie_state = RwLock::new(CookieState::new(&mut OsRng));
     cookie_state.write().unwrap().generate(&mut OsRng);
 
     // used to talk to external peers only

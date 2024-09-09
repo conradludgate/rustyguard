@@ -78,12 +78,18 @@ pub fn cookie_key(spk: &PublicKey) -> Key {
     hash([&LABEL_COOKIE, spk.as_bytes()]).into()
 }
 
-#[derive(Zeroize, ZeroizeOnDrop, Default)]
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct CookieState {
     key: Key,
 }
 
 impl CookieState {
+    pub fn new(rng: &mut (impl CryptoRng + RngCore)) -> Self {
+        let mut key = Key::default();
+        rng.fill_bytes(&mut key);
+        Self { key }
+    }
+
     pub fn generate(&mut self, rng: &mut (impl CryptoRng + RngCore)) {
         rng.fill_bytes(&mut self.key);
     }
@@ -472,8 +478,7 @@ mod tests {
 
         let now = Tai64N(Tai64(1), 2);
 
-        let mut cookie_state = CookieState::default();
-        cookie_state.generate(&mut rng);
+        let cookie_state = CookieState::new(&mut rng);
         let cookie = cookie_state.new_cookie("192.168.1.1:1234".parse().unwrap());
 
         let mut hs1 = HandshakeState::default();
@@ -543,8 +548,7 @@ mod tests {
 
         let now = Tai64N(Tai64(1), 2);
 
-        let mut cookie_state = CookieState::default();
-        cookie_state.generate(&mut rng);
+        let cookie_state = CookieState::new(&mut rng);
         let cookie = cookie_state.new_cookie("192.168.1.1:1234".parse().unwrap());
 
         let mut hs1 = HandshakeState::default();
