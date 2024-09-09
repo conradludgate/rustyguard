@@ -7,7 +7,8 @@ use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
 use rand::rngs::OsRng;
-use rustyguard_core::{Config, Message, Peer, PublicKey, Sessions, StaticSecret};
+use rustyguard_core::{Config, Message, PublicKey, Sessions, StaticSecret};
+use rustyguard_crypto::StaticPeerConfig;
 use tai64::Tai64N;
 
 /// 16-byte aligned packet of 2048 bytes.
@@ -58,7 +59,7 @@ fn main() {
     for peer in args.peer {
         let pk = Base64::decode_vec(&peer).unwrap();
         let peer_pk = PublicKey::from(<[u8; 32]>::try_from(pk).unwrap());
-        config.insert_peer(Peer::new(peer_pk, None, None));
+        config.insert_peer(StaticPeerConfig::new(peer_pk, None, None));
     }
 
     let mut sessions = Sessions::new(config, &mut OsRng);
@@ -79,7 +80,7 @@ fn main() {
         match sessions.recv_message(addr, &mut buf.0[..n]) {
             Err(err) => println!("error: {err:?}"),
             Ok(Message::Noop) => println!("noop"),
-            Ok(Message::HandshakeComplete(_peer, _encryptor)) => {}
+            Ok(Message::HandshakeComplete(_encryptor)) => {}
             Ok(Message::Read(peer, buf)) => {
                 if buf.is_empty() {
                     continue;

@@ -3,9 +3,8 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use base64ct::{Base64, Encoding};
 use ini::Ini;
 use rand::rngs::OsRng;
-use rustyguard_core::{
-    Config, DataHeader, Message, Peer, PeerId, PublicKey, Sessions, StaticSecret,
-};
+use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticSecret};
+use rustyguard_crypto::StaticPeerConfig;
 use tai64::Tai64N;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadBuf},
@@ -21,7 +20,7 @@ async fn main() {
     let mut peer_net = iptrie::RTrieMap::with_root(PeerId::sentinal());
     for peer in args.peers {
         let peer_pk = PublicKey::from(<[u8; 32]>::try_from(&*peer.key).unwrap());
-        let id = rg_config.insert_peer(Peer::new(
+        let id = rg_config.insert_peer(StaticPeerConfig::new(
             peer_pk,
             None,
             peer.endpoint
@@ -67,7 +66,7 @@ async fn main() {
                 match sessions.recv_message(addr, ep_buf.filled_mut()) {
                     Err(e) => println!("error: {e:?}"),
                     Ok(Message::Noop) => println!("noop"),
-                    Ok(Message::HandshakeComplete(_peer, _encryptor)) => {
+                    Ok(Message::HandshakeComplete(_encryptor)) => {
                         // TODO(conrad): resend queued message.
                         // _encryptor.encrypt_and_frame(payload_buffer)
                         // endpoint.send_to(payload_buffer, addr).await.unwrap()

@@ -220,6 +220,8 @@ pub struct StaticPeerConfig {
     pub mac1_key: Key,
     /// Cached cookie_key: calculated using `cookie_key(&self.key)`
     pub cookie_key: Key,
+    /// Default internet endpoint
+    pub endpoint: Option<SocketAddr>,
 }
 
 pub struct StaticInitiatorConfig {
@@ -234,12 +236,13 @@ pub struct StaticInitiatorConfig {
 }
 
 impl StaticPeerConfig {
-    pub fn new(key: PublicKey, preshared_key: Option<Key>) -> Self {
+    pub fn new(key: PublicKey, preshared_key: Option<Key>, endpoint: Option<SocketAddr>) -> Self {
         Self {
             mac1_key: mac1_key(&key),
             cookie_key: cookie_key(&key),
             key,
             preshared_key: preshared_key.unwrap_or_default(),
+            endpoint,
         }
     }
 }
@@ -467,8 +470,8 @@ mod tests {
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 
-        let peer_i = StaticPeerConfig::new((&sk_i).into(), Some(psk));
-        let peer_r = StaticPeerConfig::new((&sk_r).into(), Some(psk));
+        let peer_i = StaticPeerConfig::new((&sk_i).into(), Some(psk), None);
+        let peer_r = StaticPeerConfig::new((&sk_r).into(), Some(psk), None);
 
         let init_i = StaticInitiatorConfig::new(sk_i);
         let init_r = StaticInitiatorConfig::new(sk_r);
@@ -541,7 +544,7 @@ mod tests {
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 
-        let peer_r = StaticPeerConfig::new((&sk_r).into(), Some(psk));
+        let peer_r = StaticPeerConfig::new((&sk_r).into(), Some(psk), None);
 
         let init_i = StaticInitiatorConfig::new(sk_i);
         let init_r = StaticInitiatorConfig::new(sk_r);

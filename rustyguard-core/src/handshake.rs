@@ -35,33 +35,42 @@ macro_rules! allocate_session {
 impl Sessions {
     #[inline(never)]
     pub(crate) fn handle_handshake_init<'m>(
-        &mut self,
+        &self,
         addr: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<&'m mut [u8], Error> {
+        let mut state_ref = self.dynamic.borrow_mut();
+        let state = &mut *state_ref;
+
         unsafe_log!("[{addr:?}] parsed as handshake init packet");
         let init_msg = HandshakeInit::mut_from(msg).ok_or(Error::InvalidMessage)?;
 
-        let overload = self.overloaded(addr.ip());
-        let init_msg = match HandshakeInit::verify(
+        let overload = state.overloaded(addr.ip());
+
+        // try verify the MACs
+        let verify_mac = HandshakeInit::verify(
             init_msg,
             &self.config.static_,
             overload,
-            &self.cookie,
+            &state.cookie,
             addr,
-        )? {
-            // cookie message is always smaller than the initial message
+        )?;
+        let init_msg = match verify_mac {
+            // macs are valid
+            ControlFlow::Continue(msg) => msg,
+            // the mac1 was valid, but we need a valid mac2 as well.
             ControlFlow::Break(cookie) => {
+                // cookie message is always smaller than the initial message
                 return Ok(self.write_cookie_message(
                     init_msg.mac1,
                     init_msg.sender.get(),
                     cookie,
                     msg,
-                ))
+                ));
             }
-            ControlFlow::Continue(msg) => msg,
         };
 
+        // start new handshake state.
         let mut hs = HandshakeState::default();
 
         let data = decrypt_handshake_init(init_msg, &mut hs, &self.config.static_)?;
@@ -72,7 +81,8 @@ impl Sessions {
             .config
             .get_peer_idx(&data.static_key())
             .ok_or(Error::Rejected)?;
-        let peer = &mut self.config.peers[peer_idx];
+        let peer_config = &self.config.peers[peer_idx];
+        let peer = &mut state.peers[peer_idx];
 
         unsafe_log!("peer id: {peer_idx:?}");
         // check for potential replay attack
@@ -82,16 +92,16 @@ impl Sessions {
         peer.latest_ts = *data.timestamp();
 
         // start a new session
-        let vacant = allocate_session!(self);
+        let vacant = allocate_session!(state);
         let session_id = *vacant.key();
 
         // complete handshake
-        let esk_r = StaticSecret::random_from_rng(&mut self.rng);
+        let esk_r = StaticSecret::random_from_rng(&mut state.rng);
         let response = encrypt_handshake_resp(
             &mut hs,
             data,
             &esk_r,
-            &peer.static_,
+            peer_config,
             session_id,
             peer.cookie.as_ref(),
         );
@@ -108,16 +118,16 @@ impl Sessions {
         };
         let session = Session {
             peer: peer_idx,
-            started: self.now,
-            sent: self.now,
+            started: state.now,
+            sent: state.now,
             state: SessionState::Transport(transport),
         };
 
         vacant.insert(Box::new(session));
 
         // schedule key expiration
-        self.timers.push(TimerEntry {
-            time: self.now + REJECT_AFTER_TIME,
+        state.timers.push(TimerEntry {
+            time: state.now + REJECT_AFTER_TIME,
             kind: TimerEntryType::ExpireTransport { session_id },
         });
 
@@ -126,20 +136,23 @@ impl Sessions {
     }
 
     #[inline(never)]
-    pub(crate) fn handle_handshake_resp<'s, 'm>(
-        &'s mut self,
+    pub(crate) fn handle_handshake_resp<'m>(
+        &self,
         addr: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<Message<'m, 's>, Error> {
+    ) -> Result<Message<'m>, Error> {
+        let mut state_ref = self.dynamic.borrow_mut();
+        let state = &mut *state_ref;
+
         unsafe_log!("[{addr:?}] parsed as handshake resp packet");
         let resp_msg = HandshakeResp::mut_from(msg).ok_or(Error::InvalidMessage)?;
 
-        let overload = self.overloaded(addr.ip());
+        let overload = state.overloaded(addr.ip());
         let resp_msg = match HandshakeResp::verify(
             resp_msg,
             &self.config.static_,
             overload,
-            &self.cookie,
+            &state.cookie,
             addr,
         )? {
             // cookie message is always smaller than the initial message
@@ -157,7 +170,7 @@ impl Sessions {
         // check for a session expecting this handshake response
         use hashbrown::hash_map::Entry;
         let session_id = resp_msg.receiver.get();
-        let session = match self.peers_by_session2.entry(session_id) {
+        let session = match state.peers_by_session2.entry(session_id) {
             // session not found
             Entry::Vacant(_) => {
                 unsafe_log!("[{addr:?}] [{session_id:?}] session not found");
@@ -173,13 +186,14 @@ impl Sessions {
             }
             SessionState::Handshake(hs) => hs,
         };
-        let peer = &mut self.config.peers[session.peer];
+        let peer_config = &self.config.peers[session.peer];
+        let peer = &mut state.peers[session.peer];
 
         decrypt_handshake_resp(
             resp_msg,
             &mut hs.state,
             &self.config.static_,
-            &peer.static_,
+            peer_config,
             &hs.esk_i,
         )?;
 
@@ -197,40 +211,43 @@ impl Sessions {
             encrypt,
             decrypt,
         });
-        session.started = self.now;
-        session.sent = self.now;
+        session.started = state.now;
+        session.sent = state.now;
 
         // schedule re-key as we were the initiator
-        self.timers.push(TimerEntry {
-            time: self.now + REKEY_AFTER_TIME,
+        state.timers.push(TimerEntry {
+            time: state.now + REKEY_AFTER_TIME,
             kind: TimerEntryType::RekeyAttempt { session_id },
         });
         // schedule key expiration
-        self.timers.push(TimerEntry {
-            time: self.now + REJECT_AFTER_TIME,
+        state.timers.push(TimerEntry {
+            time: state.now + REJECT_AFTER_TIME,
             kind: TimerEntryType::ExpireTransport { session_id },
         });
 
-        Ok(Message::HandshakeComplete(
-            session.peer,
-            MessageEncrypter(peer, &mut *session, self.now),
-        ))
+        Ok(Message::HandshakeComplete(MessageEncrypter(
+            session_id, state.now,
+        )))
     }
 
     #[inline(never)]
-    pub(crate) fn handle_cookie(&mut self, msg: &mut [u8]) -> Result<(), Error> {
+    pub(crate) fn handle_cookie(&self, msg: &mut [u8]) -> Result<(), Error> {
+        let mut state_ref = self.dynamic.borrow_mut();
+        let state = &mut *state_ref;
+
         unsafe_log!("parsed as cookie packet");
         let cookie_msg = CookieMessage::mut_from(msg).ok_or(Error::InvalidMessage)?;
 
-        let session = self
+        let session = state
             .peers_by_session2
             .get(&cookie_msg.receiver.get())
             .ok_or(Error::Rejected)?;
-        let peer = &mut self.config.peers[session.peer];
+        let peer_config = &self.config.peers[session.peer];
+        let peer = &mut state.peers[session.peer];
 
         let cookie = decrypt_cookie(
             &mut cookie_msg.cookie,
-            &peer.static_.cookie_key,
+            &peer_config.cookie_key,
             &cookie_msg.nonce,
             &peer.last_sent_mac1,
         )?;
@@ -241,8 +258,11 @@ impl Sessions {
     }
 }
 
-pub(crate) fn new_handshake(state: &mut Sessions, peer_idx: PeerId) -> HandshakeInit {
-    let peer = &mut state.config.peers[peer_idx];
+pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeInit {
+    let mut state_ref = sessions.dynamic.borrow_mut();
+    let state = &mut *state_ref;
+    let peer_config = &sessions.config.peers[peer_idx];
+    let peer = &mut state.peers[peer_idx];
 
     let old_handshake = peer
         .current_handshake
@@ -280,8 +300,8 @@ pub(crate) fn new_handshake(state: &mut Sessions, peer_idx: PeerId) -> Handshake
 
     let msg = rustyguard_crypto::encrypt_handshake_init(
         &mut handshake.state,
-        &state.config.static_,
-        &peer.static_,
+        &sessions.config.static_,
+        peer_config,
         &handshake.esk_i,
         state.now,
         sender,

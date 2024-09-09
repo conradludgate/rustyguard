@@ -38,7 +38,10 @@ pub(crate) enum TimerEntryType {
     ExpireTransport { session_id: u32 },
 }
 
-pub(crate) fn tick_timers(state: &mut Sessions) -> Option<MaintenanceMsg> {
+pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
+    let mut state_ref = sessions.dynamic.borrow_mut();
+    let state = &mut *state_ref;
+
     while state.timers.peek().is_some_and(|t| t.time < state.now) {
         let entry = state.timers.pop().unwrap().kind;
         match entry {
@@ -46,7 +49,7 @@ pub(crate) fn tick_timers(state: &mut Sessions) -> Option<MaintenanceMsg> {
             | TimerEntryType::RekeyAttempt { session_id } => {
                 let session = state.peers_by_session2.get_mut(&session_id).unwrap();
                 let peer_idx = session.peer;
-                let peer = &mut state.config.peers[peer_idx];
+                let peer = &sessions.config.peers[peer_idx];
 
                 // only re-init if
                 // 1. it's been REKEY_TIMEOUT seconds since our last attempt
@@ -60,7 +63,7 @@ pub(crate) fn tick_timers(state: &mut Sessions) -> Option<MaintenanceMsg> {
                 if should_reinit {
                     return Some(MaintenanceMsg {
                             socket: peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before"),
-                            data: MaintenanceRepr::Init(new_handshake(state, peer_idx)),
+                            data: MaintenanceRepr::Init(new_handshake(sessions, peer_idx)),
                         });
                 }
             }
@@ -68,7 +71,7 @@ pub(crate) fn tick_timers(state: &mut Sessions) -> Option<MaintenanceMsg> {
                 let session = state.peers_by_session2.get_mut(&session_id).unwrap();
 
                 let peer_idx = session.peer;
-                let peer = &mut state.config.peers[peer_idx];
+                let peer = &mut state.peers[peer_idx];
 
                 if session.should_expire(state.now) {
                     if peer.current_transport == Some(session_id) {
@@ -79,7 +82,7 @@ pub(crate) fn tick_timers(state: &mut Sessions) -> Option<MaintenanceMsg> {
             }
             TimerEntryType::Keepalive { session_id } => {
                 let session = state.peers_by_session2.get_mut(&session_id).unwrap();
-                let peer = &mut state.config.peers[session.peer];
+                let peer = &mut state.peers[session.peer];
 
                 let should_keepalive = match &session.state {
                     SessionState::Handshake(_) => false,

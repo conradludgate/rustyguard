@@ -26,7 +26,7 @@ fn handshake(b: Bencher) {
         let init = encrypt_handshake_init(
             &mut hs,
             &StaticInitiatorConfig::new(ssk_i),
-            &StaticPeerConfig::new(spk_r, Some(psk)),
+            &StaticPeerConfig::new(spk_r, Some(psk), None),
             &ReusableSecret::random_from_rng(thread_rng()),
             Tai64N::now(),
             thread_rng().gen(),
@@ -36,7 +36,7 @@ fn handshake(b: Bencher) {
         (
             init,
             StaticInitiatorConfig::new(ssk_r),
-            StaticPeerConfig::new(spk_i, Some(psk)),
+            StaticPeerConfig::new(spk_i, Some(psk), None),
         )
     })
     .bench_local_values(|(mut msg, config, peer)| {

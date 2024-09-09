@@ -3,11 +3,10 @@ use core::net::SocketAddr;
 use divan::{black_box, Bencher};
 use rand::{thread_rng, RngCore};
 use rustyguard_core::{PublicKey, StaticSecret};
-use rustyguard_crypto::Key;
-use tai64::Tai64N;
+use rustyguard_crypto::{Key, StaticPeerConfig};
 use zerocopy::AsBytes;
 
-use rustyguard_core::{Config, Peer, PeerId, Sessions};
+use rustyguard_core::{Config, PeerId, Sessions};
 
 fn main() {
     divan::main()
@@ -19,11 +18,10 @@ fn session_with_peer(
     preshared_key: Key,
     endpoint: SocketAddr,
 ) -> (Sessions, PeerId) {
-    let peer = Peer::new(peer_public_key, Some(preshared_key), Some(endpoint));
+    let peer = StaticPeerConfig::new(peer_public_key, Some(preshared_key), Some(endpoint));
     let mut config = Config::new(secret_key);
     let id = config.insert_peer(peer);
-    let mut sessions = Sessions::new(config, &mut thread_rng());
-    sessions.turn(Tai64N::now(), &mut thread_rng());
+    let sessions = Sessions::new(config, &mut thread_rng());
     (sessions, id)
 }
 
@@ -81,17 +79,14 @@ fn roundtrip_impl(
     // send the handshake response to the client
     let encryptor = {
         match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-            rustyguard_core::Message::HandshakeComplete(peer_idx, encryptor) => {
-                assert_eq!(peer_idx, peer_i);
-                encryptor
-            }
+            rustyguard_core::Message::HandshakeComplete(encryptor) => encryptor,
             _ => panic!("expecting noop"),
         }
     };
 
     // wrap the messasge and encode into buffer
     let data_msg = {
-        let metadata = encryptor.encrypt(&mut msg);
+        let metadata = encryptor.encrypt(&sessions_i, &mut msg);
         buf.0[..16].copy_from_slice(metadata.header.as_bytes());
         buf.0[16..32].copy_from_slice(&msg);
         buf.0[32..48].copy_from_slice(&metadata.tag.0);
