@@ -1,17 +1,3 @@
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//                    Version 2, December 2004
-//
-// Copyleft (ↄ) meh. <meh@schizofreni.co> | http://meh.schizofreni.co
-//
-// Everyone is permitted to copy and distribute verbatim or modified
-// copies of this license document, and changing it is allowed as long
-// as the name is changed.
-//
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
-//
-//  0. You just DO WHAT THE FUCK YOU WANT TO.
-
 use std::io;
 use std::io::{IoSlice, Read, Write};
 
@@ -21,30 +7,26 @@ use futures_core::ready;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use crate::tun::platform::posix::Fd;
 use crate::tun::platform::{Device, Queue};
 
 /// An async TUN device wrapper around a TUN device.
 pub struct AsyncDevice {
-    inner: AsyncFd<Device>,
+    inner: AsyncFd<Fd>,
 }
 
 impl AsyncDevice {
     /// Create a new `AsyncDevice` wrapping around a `Device`.
-    pub fn new(device: Device) -> io::Result<AsyncDevice> {
+    #[allow(unused_mut)]
+    pub fn new(mut device: Device) -> io::Result<AsyncDevice> {
         device.set_nonblock()?;
         Ok(AsyncDevice {
-            inner: AsyncFd::new(device)?,
+            #[cfg(target_os = "macos")]
+            inner: AsyncFd::new(device.queue.tun)?,
+            #[cfg(target_os = "linux")]
+            inner: AsyncFd::new(device.queues.remove(0).tun)?,
         })
     }
-    // /// Returns a shared reference to the underlying Device object
-    // pub fn get_ref(&self) -> &Device {
-    //     self.inner.get_ref()
-    // }
-
-    // /// Returns a mutable reference to the underlying Device object
-    // pub fn get_mut(&mut self) -> &mut Device {
-    //     self.inner.get_mut()
-    // }
 }
 
 impl AsyncRead for AsyncDevice {
@@ -124,15 +106,6 @@ pub struct AsyncQueue {
 //         Ok(AsyncQueue {
 //             inner: AsyncFd::new(queue)?,
 //         })
-//     }
-//     /// Returns a shared reference to the underlying Queue object
-//     pub fn get_ref(&self) -> &Queue {
-//         self.inner.get_ref()
-//     }
-
-//     /// Returns a mutable reference to the underlying Queue object
-//     pub fn get_mut(&mut self) -> &mut Queue {
-//         self.inner.get_mut()
 //     }
 // }
 

@@ -1,20 +1,7 @@
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//                    Version 2, December 2004
-//
-// Copyleft (ↄ) meh. <meh@schizofreni.co> | http://meh.schizofreni.co
-//
-// Everyone is permitted to copy and distribute verbatim or modified
-// copies of this license document, and changing it is allowed as long
-// as the name is changed.
-//
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
-//
-//  0. You just DO WHAT THE FUCK YOU WANT TO.
 #![allow(unused_variables)]
 
 use crate::tun::{
-    configuration::{Configuration, Layer},
+    configuration::Configuration,
     device::Device as D,
     error::*,
     platform::{
@@ -37,9 +24,9 @@ use std::{
 
 /// A TUN device using the TUN macOS driver.
 pub struct Device {
-    name: String,
-    queue: Queue,
-    ctl: Fd,
+    pub(crate) name: String,
+    pub(crate) queue: Queue,
+    pub(crate) ctl: Fd,
 }
 
 impl Device {
@@ -58,10 +45,6 @@ impl Device {
         } else {
             0u32
         };
-
-        if config.layer.filter(|l| *l != Layer::L3).is_some() {
-            return Err(Error::UnsupportedLayer);
-        }
 
         let queues_number = config.queues.unwrap_or(1);
         if queues_number != 1 {
@@ -161,17 +144,6 @@ impl Device {
         }
     }
 
-    // /// Split the interface into a `Reader` and `Writer`.
-    // pub fn split(self) -> (posix::Reader, posix::Writer) {
-    //     let fd = Arc::new(self.queue.tun);
-    //     (posix::Reader(fd.clone()), posix::Writer(fd.clone()))
-    // }
-
-    // /// Return whether the device has packet information
-    // pub fn has_packet_information(&self) -> bool {
-    //     self.queue.has_packet_information()
-    // }
-
     /// Set non-blocking mode
     pub fn set_nonblock(&self) -> io::Result<()> {
         self.queue.set_nonblock()
@@ -205,15 +177,6 @@ impl Write for Device {
 impl D for Device {
     type Queue = Queue;
 
-    // fn name(&self) -> Result<String> {
-    //     Ok(self.name.clone())
-    // }
-
-    // // XXX: Cannot set interface name on Darwin.
-    // fn set_name(&mut self, value: &str) -> Result<()> {
-    //     Err(Error::InvalidName)
-    // }
-
     fn enabled(&mut self, value: bool) -> Result<()> {
         unsafe {
             let mut req = self.request();
@@ -232,16 +195,6 @@ impl D for Device {
         }
     }
 
-    // fn address(&self) -> Result<Ipv4Addr> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifaddr(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         SockAddr::new(&req.ifru.addr).map(Into::into)
-    //     }
-    // }
-
     fn set_address(&mut self, value: Ipv4Addr) -> Result<()> {
         unsafe {
             let mut req = self.request();
@@ -252,16 +205,6 @@ impl D for Device {
             Ok(())
         }
     }
-
-    // fn destination(&self) -> Result<Ipv4Addr> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifdstaddr(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         SockAddr::new(&req.ifru.dstaddr).map(Into::into)
-    //     }
-    // }
 
     fn set_destination(&mut self, value: Ipv4Addr) -> Result<()> {
         unsafe {
@@ -274,16 +217,6 @@ impl D for Device {
         }
     }
 
-    // fn broadcast(&self) -> Result<Ipv4Addr> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifbrdaddr(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         SockAddr::new(&req.ifru.broadaddr).map(Into::into)
-    //     }
-    // }
-
     fn set_broadcast(&mut self, value: Ipv4Addr) -> Result<()> {
         unsafe {
             let mut req = self.request();
@@ -294,16 +227,6 @@ impl D for Device {
             Ok(())
         }
     }
-
-    // fn netmask(&self) -> Result<Ipv4Addr> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifnetmask(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         SockAddr::unchecked(&req.ifru.addr).map(Into::into)
-    //     }
-    // }
 
     fn set_netmask(&mut self, value: Ipv4Addr) -> Result<()> {
         unsafe {
@@ -316,16 +239,6 @@ impl D for Device {
         }
     }
 
-    // fn mtu(&self) -> Result<i32> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifmtu(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         Ok(req.ifru.mtu)
-    //     }
-    // }
-
     fn set_mtu(&mut self, value: i32) -> Result<()> {
         unsafe {
             let mut req = self.request();
@@ -336,14 +249,6 @@ impl D for Device {
             Ok(())
         }
     }
-
-    // fn queue(&mut self, index: usize) -> Option<&mut Self::Queue> {
-    //     if index > 0 {
-    //         return None;
-    //     }
-
-    //     Some(&mut self.queue)
-    // }
 }
 
 impl AsRawFd for Device {
@@ -359,15 +264,10 @@ impl IntoRawFd for Device {
 }
 
 pub struct Queue {
-    tun: Fd,
+    pub(crate) tun: Fd,
 }
 
 impl Queue {
-    // pub fn has_packet_information(&self) -> bool {
-    //     // on macos this is always the case
-    //     true
-    // }
-
     pub fn set_nonblock(&self) -> io::Result<()> {
         self.tun.set_nonblock()
     }

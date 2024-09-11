@@ -1,17 +1,3 @@
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//                    Version 2, December 2004
-//
-// Copyleft (ↄ) meh. <meh@schizofreni.co> | http://meh.schizofreni.co
-//
-// Everyone is permitted to copy and distribute verbatim or modified
-// copies of this license document, and changing it is allowed as long
-// as the name is changed.
-//
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
-//
-//  0. You just DO WHAT THE FUCK YOU WANT TO.
-
 use libc::{
     self, c_char, c_short, ifreq, AF_INET, IFF_MULTI_QUEUE, IFF_NO_PI, IFF_RUNNING, IFF_TUN,
     IFF_UP, IFNAMSIZ, O_RDWR, SOCK_DGRAM,
@@ -27,7 +13,7 @@ use std::{
 };
 
 use crate::tun::{
-    configuration::{Configuration, Layer},
+    configuration::Configuration,
     device::Device as D,
     error::*,
     platform::linux::sys::*,
@@ -37,7 +23,7 @@ use crate::tun::{
 /// A TUN device using the TUN/TAP Linux driver.
 pub struct Device {
     name: String,
-    queues: Vec<Queue>,
+    pub(crate) queues: Vec<Queue>,
     ctl: Fd,
 }
 
@@ -71,7 +57,7 @@ impl Device {
                 );
             }
 
-            let device_type: c_short = config.layer.unwrap_or(Layer::L3).into();
+            let device_type: c_short = IFF_TUN as c_short;
 
             let queues_num = config.queues.unwrap_or(1);
             if queues_num < 1 {
@@ -80,10 +66,8 @@ impl Device {
 
             let iff_no_pi = IFF_NO_PI as c_short;
             let iff_multi_queue = IFF_MULTI_QUEUE as c_short;
-            let packet_information = config.platform.packet_information;
-            req.ifr_ifru.ifru_flags = device_type
-                | if packet_information { 0 } else { iff_no_pi }
-                | if queues_num > 1 { iff_multi_queue } else { 0 };
+            req.ifr_ifru.ifru_flags =
+                device_type | iff_no_pi | if queues_num > 1 { iff_multi_queue } else { 0 };
 
             for _ in 0..queues_num {
                 let tun = Fd::new(libc::open(b"/dev/net/tun\0".as_ptr() as *const _, O_RDWR))
@@ -91,10 +75,7 @@ impl Device {
 
                 tunsetiff(tun.0, &mut req as *mut _ as *mut _)?;
 
-                queues.push(Queue {
-                    tun,
-                    // pi_enabled: config.platform.packet_information,
-                });
+                queues.push(Queue { tun });
             }
 
             let ctl = Fd::new(libc::socket(AF_INET, SOCK_DGRAM, 0))?;
@@ -190,33 +171,6 @@ impl Write for Device {
 impl D for Device {
     type Queue = Queue;
 
-    // fn name(&self) -> Result<String> {
-    //     Ok(self.name.clone())
-    // }
-
-    // fn set_name(&mut self, value: &str) -> Result<()> {
-    //     unsafe {
-    //         let name = CString::new(value)?;
-
-    //         if name.as_bytes_with_nul().len() > IFNAMSIZ {
-    //             return Err(Error::NameTooLong);
-    //         }
-
-    //         let mut req = self.request();
-    //         ptr::copy_nonoverlapping(
-    //             name.as_ptr() as *const c_char,
-    //             req.ifr_ifru.ifru_newname.as_mut_ptr(),
-    //             value.len(),
-    //         );
-
-    //         siocsifname(self.ctl.as_raw_fd(), &req)?;
-
-    //         self.name = value.into();
-
-    //         Ok(())
-    //     }
-    // }
-
     fn enabled(&mut self, value: bool) -> Result<()> {
         unsafe {
             let mut req = self.request();
@@ -235,16 +189,6 @@ impl D for Device {
         }
     }
 
-    // fn address(&self) -> Result<Ipv4Addr> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifaddr(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         SockAddr::new(&req.ifr_ifru.ifru_addr).map(Into::into)
-    //     }
-    // }
-
     fn set_address(&mut self, value: Ipv4Addr) -> Result<()> {
         unsafe {
             let mut req = self.request();
@@ -255,16 +199,6 @@ impl D for Device {
             Ok(())
         }
     }
-
-    // fn destination(&self) -> Result<Ipv4Addr> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifdstaddr(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         SockAddr::new(&req.ifr_ifru.ifru_dstaddr).map(Into::into)
-    //     }
-    // }
 
     fn set_destination(&mut self, value: Ipv4Addr) -> Result<()> {
         unsafe {
@@ -277,16 +211,6 @@ impl D for Device {
         }
     }
 
-    // fn broadcast(&self) -> Result<Ipv4Addr> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifbrdaddr(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         SockAddr::new(&req.ifr_ifru.ifru_broadaddr).map(Into::into)
-    //     }
-    // }
-
     fn set_broadcast(&mut self, value: Ipv4Addr) -> Result<()> {
         unsafe {
             let mut req = self.request();
@@ -297,16 +221,6 @@ impl D for Device {
             Ok(())
         }
     }
-
-    // fn netmask(&self) -> Result<Ipv4Addr> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifnetmask(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         SockAddr::new(&req.ifr_ifru.ifru_netmask).map(Into::into)
-    //     }
-    // }
 
     fn set_netmask(&mut self, value: Ipv4Addr) -> Result<()> {
         unsafe {
@@ -319,16 +233,6 @@ impl D for Device {
         }
     }
 
-    // fn mtu(&self) -> Result<i32> {
-    //     unsafe {
-    //         let mut req = self.request();
-
-    //         siocgifmtu(self.ctl.as_raw_fd(), &mut req)?;
-
-    //         Ok(req.ifr_ifru.ifru_mtu)
-    //     }
-    // }
-
     fn set_mtu(&mut self, value: i32) -> Result<()> {
         unsafe {
             let mut req = self.request();
@@ -339,10 +243,6 @@ impl D for Device {
             Ok(())
         }
     }
-
-    // fn queue(&mut self, index: usize) -> Option<&mut Self::Queue> {
-    //     self.queues.get_mut(index)
-    // }
 }
 
 impl AsRawFd for Device {
@@ -360,15 +260,10 @@ impl IntoRawFd for Device {
 }
 
 pub struct Queue {
-    tun: Fd,
-    // pi_enabled: bool,
+    pub(crate) tun: Fd,
 }
 
 impl Queue {
-    // pub fn has_packet_information(&mut self) -> bool {
-    //     self.pi_enabled
-    // }
-
     pub fn set_nonblock(&self) -> io::Result<()> {
         self.tun.set_nonblock()
     }
@@ -407,14 +302,5 @@ impl AsRawFd for Queue {
 impl IntoRawFd for Queue {
     fn into_raw_fd(self) -> RawFd {
         self.tun.into_raw_fd()
-    }
-}
-
-impl From<Layer> for c_short {
-    fn from(layer: Layer) -> Self {
-        match layer {
-            // Layer::L2 => IFF_TAP as c_short,
-            Layer::L3 => IFF_TUN as c_short,
-        }
     }
 }

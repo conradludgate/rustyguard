@@ -1,17 +1,3 @@
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//                    Version 2, December 2004
-//
-// Copyleft (ↄ) meh. <meh@schizofreni.co> | http://meh.schizofreni.co
-//
-// Everyone is permitted to copy and distribute verbatim or modified
-// copies of this license document, and changing it is allowed as long
-// as the name is changed.
-//
-//            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-//   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
-//
-//  0. You just DO WHAT THE FUCK YOU WANT TO.
-
 //! Bindings to internal macOS stuff.
 
 use libc::{c_char, c_int, c_short, c_uint, c_ushort, c_void, sockaddr, IFNAMSIZ};
@@ -53,22 +39,6 @@ pub struct ifdevmtu {
     pub min: c_int,
     pub max: c_int,
 }
-
-// #[repr(C)]
-// #[derive(Copy, Clone)]
-// pub union ifku {
-//     pub ptr: *mut c_void,
-//     pub value: c_int,
-// }
-
-// #[allow(non_camel_case_types)]
-// #[repr(C)]
-// #[derive(Copy, Clone)]
-// pub struct ifkpi {
-//     pub module_id: c_uint,
-//     pub type_: c_uint,
-//     pub ifku: ifku,
-// }
 
 #[repr(C)]
 #[derive(Copy, Clone)]
