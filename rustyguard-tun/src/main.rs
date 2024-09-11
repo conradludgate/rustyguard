@@ -11,6 +11,8 @@ use tokio::{
     net::UdpSocket,
 };
 
+mod tun;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = TunConfig::parse();

@@ -1,13 +1,13 @@
 target/test/wg-kernel.phony:
-	mkdir -p target/test
-	touch target/test/wg-kernel.phony
 	orb create ubuntu:noble wg-kernel
 	orb -m wg-kernel -u root apt install -y wireguard
+	mkdir -p target/test
+	touch target/test/wg-kernel.phony
 
 target/test/rg-kernel.phony:
+	orb create ubuntu:noble rg-kernel
 	mkdir -p target/test
 	touch target/test/rg-kernel.phony
-	orb create ubuntu:noble rg-kernel
 
 target/test/wg-kernel.key: target/test/wg-kernel.phony
 	orb -m wg-kernel -u root sh -c "wg genkey | tee private.key | wg pubkey" > target/test/wg-kernel.key
@@ -20,7 +20,7 @@ build-tun:
 	cross build --bin rustyguard-tun --target aarch64-unknown-linux-gnu --release
 
 .PHONY: wg-kernel
-wg-kernel: target/test/wg-kernel.phony
+wg-kernel: target/test/wg-kernel.key
 	orb -m wg-kernel -u root wg setconf wg0 rustyguard-tun/test-data/wg.conf
 	orb -m wg-kernel -u root wg show
 

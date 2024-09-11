@@ -12,9 +12,24 @@ rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 rand = "0.8"
 tai64 = "4.0"
 base64ct = { version = "1.6", features = ["alloc"] }
-tun = { version = "0.6", features = ["async"], git = "https://github.com/conradludgate/rust-tun" }
-tokio = { version = "1", features = ["full"] }
+# tun = { version = "0.6", features = ["async"], git = "https://github.com/conradludgate/rust-tun" }
 ipnet = { version = "2.9" }
 iptrie = "0.8"
 packet = "0.1"
 rust-ini = "0.21"
+
+byteorder = { version = "1" }
+bytes = { version = "1" }
+futures-core = { version = "0.3" }
+libc = "0.2"
+nix = { version = "0.29", features = ["ioctl", "socket", "fs"] }
+log = "0.4"
+thiserror = "1"
+
+# [target.'cfg(target_os = "macos")'.dependencies]
+tokio = { version = "1", features = ["rt", "net", "io-util", "macros", "time"] }
+# tokio-util = { version = "0.7", features = ["codec"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+glommio = "0.9.0"
+
