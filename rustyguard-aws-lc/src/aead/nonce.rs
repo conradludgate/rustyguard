@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: ISC
 // Modifications copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR ISC
+// Modifications copyright Conrad Ludgate. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0 OR ISC
 
-// use crate::endian::{ArrayEncoding, BigEndian, Encoding, FromArray, LittleEndian};
 use crate::error;
 
 /// A nonce for a single AEAD opening or sealing operation.

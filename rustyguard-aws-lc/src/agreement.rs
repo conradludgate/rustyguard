@@ -13,15 +13,13 @@ use crate::error::{KeyRejected, Unspecified};
 use crate::hex;
 use crate::ptr::LcPtr;
 use aws_lc::{
-    CBS_init, EVP_PKEY_derive, EVP_PKEY_derive_init, EVP_PKEY_derive_set_peer,
-    EVP_PKEY_get_raw_private_key, EVP_PKEY_get_raw_public_key, EVP_PKEY_id,
-    EVP_PKEY_new_raw_private_key, EVP_PKEY_new_raw_public_key, EVP_parse_public_key, CBS, EVP_PKEY,
-    EVP_PKEY_X25519,
+    EVP_PKEY_derive, EVP_PKEY_derive_init, EVP_PKEY_derive_set_peer, EVP_PKEY_get_raw_private_key,
+    EVP_PKEY_get_raw_public_key, EVP_PKEY_new_raw_private_key, EVP_PKEY_new_raw_public_key,
+    EVP_PKEY, EVP_PKEY_X25519,
 };
 
 use core::fmt;
 use core::fmt::{Debug, Formatter};
-use core::mem::MaybeUninit;
 use core::ptr::null_mut;
 
 /// A private key for use (only) with `agree`. The
@@ -228,14 +226,13 @@ impl UnparsedPublicKey {
 /// `error_value` on internal failure.
 #[inline]
 #[allow(clippy::missing_panics_doc)]
-pub fn agree<F, R, E>(
+pub fn agree<F, R>(
     my_private_key: &PrivateKey,
     peer_public_key: &UnparsedPublicKey,
-    error_value: E,
     kdf: F,
-) -> Result<R, E>
+) -> Result<R, Unspecified>
 where
-    F: FnOnce(&[u8]) -> Result<R, E>,
+    F: FnOnce(&[u8]) -> R,
 {
     let peer_pub_bytes = peer_public_key.bytes.as_ref();
 
@@ -243,9 +240,9 @@ where
 
     let secret: &[u8] =
         x25519_diffie_hellman(&mut buffer, &my_private_key.inner_key, peer_pub_bytes)
-            .or(Err(error_value))?;
+            .or(Err(Unspecified))?;
 
-    kdf(secret)
+    Ok(kdf(secret))
 }
 
 const MAX_AGREEMENT_SECRET_LEN: usize = 32;
@@ -281,8 +278,7 @@ fn x25519_diffie_hellman<'a>(
 pub(crate) fn try_parse_x25519_public_key_bytes(
     key_bytes: &[u8],
 ) -> Result<LcPtr<EVP_PKEY>, Unspecified> {
-    try_parse_x25519_subject_public_key_info_bytes(key_bytes)
-        .or(try_parse_x25519_public_key_raw_bytes(key_bytes))
+    try_parse_x25519_public_key_raw_bytes(key_bytes)
 }
 
 fn try_parse_x25519_public_key_raw_bytes(key_bytes: &[u8]) -> Result<LcPtr<EVP_PKEY>, Unspecified> {
@@ -299,24 +295,6 @@ fn try_parse_x25519_public_key_raw_bytes(key_bytes: &[u8]) -> Result<LcPtr<EVP_P
             key_bytes.len(),
         )
     })?)
-}
-
-fn try_parse_x25519_subject_public_key_info_bytes(
-    key_bytes: &[u8],
-) -> Result<LcPtr<EVP_PKEY>, Unspecified> {
-    // Try to parse as SubjectPublicKeyInfo first
-    let mut cbs = {
-        let mut cbs = MaybeUninit::<CBS>::uninit();
-        unsafe {
-            CBS_init(cbs.as_mut_ptr(), key_bytes.as_ptr(), key_bytes.len());
-            cbs.assume_init()
-        }
-    };
-    let evp_pkey = LcPtr::new(unsafe { EVP_parse_public_key(&mut cbs) })?;
-    if EVP_PKEY_X25519 != unsafe { EVP_PKEY_id(*evp_pkey.as_const()) } {
-        return Err(Unspecified);
-    }
-    Ok(evp_pkey)
 }
 
 #[cfg(test)]
@@ -359,9 +337,8 @@ mod tests {
         let be_private_key_buffer = my_private.as_bytes().unwrap();
         let be_private_key = PrivateKey::from_private_key(be_private_key_buffer.as_ref()).unwrap();
         {
-            let result = agree(&be_private_key, &peer_public, (), |key_material| {
+            let result = agree(&be_private_key, &peer_public, |key_material| {
                 assert_eq!(key_material, &output[..]);
-                Ok(())
             });
             assert_eq!(result, Ok(()));
         }
@@ -370,16 +347,14 @@ mod tests {
         assert_eq!(computed_public.as_ref(), &my_public[..]);
 
         {
-            let result = agree(&my_private, &peer_public, (), |key_material| {
+            let result = agree(&my_private, &peer_public, |key_material| {
                 assert_eq!(key_material, &output[..]);
-                Ok(())
             });
             assert_eq!(result, Ok(()));
         }
         {
-            let result = agree(&my_private, &peer_public, (), |key_material| {
+            let result = agree(&my_private, &peer_public, |key_material| {
                 assert_eq!(key_material, &output[..]);
-                Ok(())
             });
             assert_eq!(result, Ok(()));
         }
@@ -445,18 +420,16 @@ mod tests {
 
         for peer_public in peer_public_keys {
             let peer_public = UnparsedPublicKey::new(peer_public);
-            let result = agree(&my_private, &peer_public, (), |key_material| {
+            let result = agree(&my_private, &peer_public, |key_material| {
                 results.push(key_material.to_vec());
-                Ok(())
             });
             assert_eq!(result, Ok(()));
         }
 
         for my_public in my_public_keys {
             let my_public = UnparsedPublicKey::new(my_public);
-            let result = agree(&peer_private, &my_public, (), |key_material| {
+            let result = agree(&peer_private, &my_public, |key_material| {
                 results.push(key_material.to_vec());
-                Ok(())
             });
             assert_eq!(result, Ok(()));
         }

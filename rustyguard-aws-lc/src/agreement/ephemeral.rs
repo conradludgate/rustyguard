@@ -51,35 +51,25 @@ impl EphemeralPrivateKey {
 /// details on how keys are to be encoded and what constitutes a valid key for
 /// that algorithm.
 ///
-/// `error_value` is the value to return if an error occurs before `kdf` is
-/// called, e.g. when decoding of the peer's public key fails or when the public
-/// key is otherwise invalid.
-///
 /// After the key agreement is done, `agree_ephemeral` calls `kdf` with the raw
 /// key material from the key agreement operation and then returns what `kdf`
 /// returns.
-// # FIPS
-// Use this function with one of the following key algorithms:
-// * `ECDH_P256`
-// * `ECDH_P384`
-// * `ECDH_P521`
-//
+///
 /// # Errors
 /// `error_value` on internal failure.
 #[inline]
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::missing_panics_doc)]
 #[allow(clippy::module_name_repetitions)]
-pub fn agree_ephemeral<F, R, E>(
+pub fn agree_ephemeral<F, R>(
     my_private_key: &EphemeralPrivateKey,
     peer_public_key: &UnparsedPublicKey,
-    error_value: E,
     kdf: F,
-) -> Result<R, E>
+) -> Result<R, Unspecified>
 where
-    F: FnOnce(&[u8]) -> Result<R, E>,
+    F: FnOnce(&[u8]) -> R,
 {
-    agree(&my_private_key.0, peer_public_key, error_value, kdf)
+    agree(&my_private_key.0, peer_public_key, kdf)
 }
 
 #[cfg(test)]
@@ -174,9 +164,8 @@ mod tests {
         let computed_public = my_private.compute_public_key().unwrap();
         assert_eq!(computed_public.as_ref(), &my_public[..]);
 
-        let result = agreement::agree_ephemeral(&my_private, &peer_public, (), |key_material| {
+        let result = agreement::agree_ephemeral(&my_private, &peer_public, |key_material| {
             assert_eq!(key_material, &output[..]);
-            Ok(())
         });
         assert_eq!(result, Ok(()));
     }
@@ -250,9 +239,8 @@ mod tests {
                     check_computed_public_key(&myq_format, &my_public, &computed_public);
 
                     let result =
-                        agreement::agree_ephemeral(&my_private, &peer_public, (), |key_material| {
+                        agreement::agree_ephemeral(&my_private, &peer_public, |key_material| {
                             assert_eq!(key_material, &output[..]);
-                            Ok(())
                         });
                     assert_eq!(
                         result,
@@ -261,7 +249,7 @@ mod tests {
                         test::to_hex(my_private_bytes)
                     );
                 } else {
-                    fn kdf_not_called(_: &[u8]) -> Result<(), ()> {
+                    fn kdf_not_called(_: &[u8]) {
                         panic!(
                             "The KDF was called during ECDH when the peer's \
                          public key is invalid."
@@ -272,7 +260,6 @@ mod tests {
                     assert!(agreement::agree_ephemeral(
                         &dummy_private_key,
                         &peer_public,
-                        (),
                         kdf_not_called
                     )
                     .is_err());
@@ -300,8 +287,8 @@ mod tests {
         let mut rng = test::rand::FixedSliceRandom { bytes: private_key };
         let private_key = agreement::EphemeralPrivateKey::generate(&mut rng)?;
         let public_key = agreement::UnparsedPublicKey::new(public_key.try_into().unwrap());
-        agreement::agree_ephemeral(&private_key, &public_key, Unspecified, |agreed_value| {
-            Ok(Vec::from(agreed_value))
+        agreement::agree_ephemeral(&private_key, &public_key, |agreed_value| {
+            Vec::from(agreed_value)
         })
     }
 }
