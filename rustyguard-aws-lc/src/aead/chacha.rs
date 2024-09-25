@@ -43,6 +43,44 @@ impl ChaChaKey {
     }
 
     #[inline]
+    pub(crate) fn open_in_place<'in_out>(
+        &self,
+        nonce: Nonce,
+        aad: &[u8],
+        in_out: &'in_out mut [u8],
+    ) -> Result<&'in_out mut [u8], Unspecified> {
+        let ciphertext_and_tag_len = in_out.len();
+        let ciphertext_len = ciphertext_and_tag_len
+            .checked_sub(TAG_LEN)
+            .ok_or(Unspecified)?;
+
+        let nonce = nonce.as_ref();
+
+        debug_assert_eq!(nonce.len(), NONCE_LEN);
+
+        let mut out_len = 0;
+        if 1 != (unsafe {
+            EVP_AEAD_CTX_open(
+                *self.ctx.as_const(),
+                in_out.as_mut_ptr(),
+                &mut out_len,
+                ciphertext_len,
+                nonce.as_ptr(),
+                nonce.len(),
+                in_out.as_ptr(),
+                ciphertext_len + TAG_LEN,
+                aad.as_ptr(),
+                aad.len(),
+            )
+        }) {
+            return Err(Unspecified);
+        }
+
+        // `ciphertext_len` is also the plaintext length.
+        Ok(&mut in_out[..ciphertext_len])
+    }
+
+    #[inline]
     pub(crate) fn open_within<'in_out>(
         &self,
         nonce: Nonce,

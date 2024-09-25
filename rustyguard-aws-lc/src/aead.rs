@@ -83,7 +83,7 @@ impl LessSafeKey {
     where
         A: AsRef<[u8]>,
     {
-        self.key.open_within(nonce, aad.as_ref(), in_out, 0..)
+        self.key.open_in_place(nonce, aad.as_ref(), in_out)
     }
 
     /// Like [`OpeningKey::open_within()`], except it accepts an arbitrary nonce.
@@ -184,36 +184,7 @@ impl XLessSafeKey {
     where
         A: AsRef<[u8]>,
     {
-        self.key.open_within(nonce, aad.as_ref(), in_out, 0..)
-    }
-
-    /// Like [`OpeningKey::open_within()`], except it accepts an arbitrary nonce.
-    ///
-    /// `nonce` must be unique for every use of the key to open data.
-    ///
-    /// Prefer [`RandomizedNonceKey::open_in_place`].
-    ///
-    // # FIPS
-    // Use this method with one of the following algorithms:
-    // * `AES_128_GCM`
-    // * `AES_256_GCM`
-    //
-    /// # Errors
-    /// `error::Unspecified` when ciphertext is invalid.
-    #[inline]
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn open_within<'in_out, A>(
-        &self,
-        nonce: XNonce,
-        aad: Aad<A>,
-        in_out: &'in_out mut [u8],
-        ciphertext_and_tag: RangeFrom<usize>,
-    ) -> Result<&'in_out mut [u8], Unspecified>
-    where
-        A: AsRef<[u8]>,
-    {
-        self.key
-            .open_within(nonce, aad.as_ref(), in_out, ciphertext_and_tag)
+        self.key.open_in_place(nonce, aad.as_ref(), in_out)
     }
 
     /// Like `SealingKey::seal_in_place_separate_tag()`, except it accepts an

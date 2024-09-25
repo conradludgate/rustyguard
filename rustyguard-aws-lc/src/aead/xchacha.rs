@@ -14,7 +14,7 @@ use aws_lc::{
     EVP_AEAD_CTX_open, EVP_AEAD_CTX_seal_scatter, EVP_aead_xchacha20_poly1305, EVP_AEAD_CTX,
 };
 use core::fmt::Debug;
-use core::{mem::MaybeUninit, ops::RangeFrom, ptr::null};
+use core::{mem::MaybeUninit, ptr::null};
 
 /// An AEAD key without a designated role or nonce sequence.
 pub struct XChaChaKey {
@@ -43,46 +43,38 @@ impl XChaChaKey {
     }
 
     #[inline]
-    pub(crate) fn open_within<'in_out>(
+    pub(crate) fn open_in_place<'in_out>(
         &self,
         nonce: XNonce,
         aad: &[u8],
         in_out: &'in_out mut [u8],
-        ciphertext_and_tag: RangeFrom<usize>,
     ) -> Result<&'in_out mut [u8], Unspecified> {
-        let in_prefix_len = ciphertext_and_tag.start;
-        let ciphertext_and_tag_len = in_out.len().checked_sub(in_prefix_len).ok_or(Unspecified)?;
+        let ciphertext_and_tag_len = in_out.len();
         let ciphertext_len = ciphertext_and_tag_len
             .checked_sub(TAG_LEN)
             .ok_or(Unspecified)?;
 
-        let in_out_open: &mut [u8] = &mut in_out[in_prefix_len..];
         let nonce = nonce.as_ref();
 
         debug_assert_eq!(nonce.len(), XNONCE_LEN);
-
-        let plaintext_len = in_out_open.len() - TAG_LEN;
 
         let mut out_len = 0;
         if 1 != (unsafe {
             EVP_AEAD_CTX_open(
                 *self.ctx.as_const(),
-                in_out_open.as_mut_ptr(),
+                in_out.as_mut_ptr(),
                 &mut out_len,
-                plaintext_len,
+                ciphertext_len,
                 nonce.as_ptr(),
                 nonce.len(),
-                in_out_open.as_ptr(),
-                plaintext_len + TAG_LEN,
+                in_out.as_ptr(),
+                ciphertext_len + TAG_LEN,
                 aad.as_ptr(),
                 aad.len(),
             )
         }) {
             return Err(Unspecified);
         }
-
-        // shift the plaintext to the left
-        in_out.copy_within(in_prefix_len..in_prefix_len + ciphertext_len, 0);
 
         // `ciphertext_len` is also the plaintext length.
         Ok(&mut in_out[..ciphertext_len])
