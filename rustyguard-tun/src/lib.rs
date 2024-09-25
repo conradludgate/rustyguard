@@ -5,7 +5,6 @@ use ini::Ini;
 use ipnet::Ipv4Net;
 use iptrie::{LCTrieMap, RTrieMap};
 use rand::rngs::OsRng;
-use rustyguard_aws_lc::encoding::{AsBigEndian, Curve25519SeedBin};
 use rustyguard_core::{
     Config, DataHeader, Message, PeerId, PrivateKey, Sessions, UnparsedPublicKey,
 };
@@ -113,7 +112,7 @@ impl TunConfig {
             }
             None => {
                 let private_key = PrivateKey::generate().unwrap();
-                let c: Curve25519SeedBin = private_key.as_be_bytes().unwrap();
+                let c = private_key.as_bytes().unwrap();
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
                 println!(
                     "public key: {}",

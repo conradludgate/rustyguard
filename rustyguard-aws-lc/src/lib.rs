@@ -145,11 +145,9 @@ pub mod aead;
 pub mod agreement;
 pub mod error;
 
-mod buffer;
 mod cbs;
 mod cipher;
 mod debug;
-pub mod encoding;
 mod evp_pkey;
 mod hex;
 mod iv;

@@ -7,7 +7,6 @@ use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
 use rand::rngs::OsRng;
-use rustyguard_aws_lc::encoding::{AsBigEndian, Curve25519SeedBin};
 use rustyguard_core::{Config, Message, PrivateKey, Sessions, UnparsedPublicKey};
 use rustyguard_crypto::StaticPeerConfig;
 use tai64::Tai64N;
@@ -44,7 +43,7 @@ fn main() {
         }
         None => {
             let private_key = PrivateKey::generate().unwrap();
-            let c: Curve25519SeedBin = private_key.as_be_bytes().unwrap();
+            let c = private_key.as_bytes().unwrap();
             println!("private key: {}", Base64::encode_string(c.as_ref()));
             println!(
                 "public key: {}",

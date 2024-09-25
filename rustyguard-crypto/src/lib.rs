@@ -308,11 +308,7 @@ pub fn encrypt_handshake_init(
     let k = hs.mix_key_dh(esk_i, &peer.key);
 
     // -> s:
-    let static_key = EncryptedPublicKey::encrypt_and_hash(
-        initiator.public_key.as_ref().try_into().unwrap(),
-        hs,
-        &k,
-    );
+    let static_key = EncryptedPublicKey::encrypt_and_hash(*initiator.public_key.as_ref(), hs, &k);
 
     // -> ss:
     let k = hs.mix_key_dh(&initiator.private_key, &peer.key);
@@ -324,7 +320,7 @@ pub fn encrypt_handshake_init(
     let mut msg = HandshakeInit {
         _type: little_endian::U32::new(MSG_FIRST),
         sender: little_endian::U32::new(sender),
-        ephemeral_key: epk_i.as_ref().try_into().unwrap(),
+        ephemeral_key: *epk_i.as_ref(),
         static_key,
         timestamp,
         mac1: [0; 16],
@@ -411,7 +407,7 @@ pub fn encrypt_handshake_resp(
         _type: little_endian::U32::new(MSG_SECOND),
         sender: little_endian::U32::new(sender),
         receiver: data.0.sender,
-        ephemeral_key: epk_r.as_ref().try_into().unwrap(),
+        ephemeral_key: *epk_r.as_ref(),
         empty,
         mac1: [0; 16],
         mac2: [0; 16],
@@ -471,7 +467,7 @@ mod tests {
     };
 
     fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-        UnparsedPublicKey::new(s.compute_public_key().unwrap().as_ref().try_into().unwrap())
+        UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
     }
 
     fn gen_sk(r: &mut StdRng) -> PrivateKey {

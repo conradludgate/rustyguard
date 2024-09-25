@@ -10,7 +10,6 @@ pub use ephemeral::{agree_ephemeral, EphemeralPrivateKey};
 use crate::error::{KeyRejected, Unspecified};
 use crate::hex;
 use crate::ptr::LcPtr;
-use alloc::vec::Vec;
 use aws_lc::{
     CBS_init, EVP_PKEY_CTX_new_id, EVP_PKEY_derive, EVP_PKEY_derive_init, EVP_PKEY_derive_set_peer,
     EVP_PKEY_get_raw_private_key, EVP_PKEY_get_raw_public_key, EVP_PKEY_id, EVP_PKEY_keygen,
@@ -18,7 +17,6 @@ use aws_lc::{
     EVP_parse_public_key, CBS, EVP_PKEY, EVP_PKEY_X25519,
 };
 
-use crate::encoding::{AsBigEndian, Curve25519SeedBin};
 use core::fmt;
 use core::fmt::{Debug, Formatter};
 use core::mem::MaybeUninit;
@@ -82,6 +80,19 @@ impl PrivateKey {
         Ok(Self::new(evp_pkey))
     }
 
+    pub fn as_bytes(&self) -> Result<[u8; 32], Unspecified> {
+        let evp_pkey = self.inner_key.as_const();
+        let mut buffer = [0u8; 32];
+        let mut out_len = 32;
+        if unsafe {
+            EVP_PKEY_get_raw_private_key(*evp_pkey, buffer.as_mut_ptr(), &mut out_len) != 1
+        } {
+            return Err(Unspecified);
+        }
+        debug_assert_eq!(32, out_len);
+        Ok(buffer)
+    }
+
     #[cfg(test)]
     #[allow(clippy::missing_errors_doc, missing_docs)]
     pub fn generate_for_test(rng: &dyn crate::rand::SecureRandom) -> Result<Self, Unspecified> {
@@ -122,32 +133,12 @@ impl PrivateKey {
             return Err(Unspecified);
         }
 
+        assert_eq!(out_len, 32);
+
         Ok(PublicKey {
             inner_key: self.inner_key.clone(),
             public_key: buffer,
-            len: out_len,
         })
-    }
-}
-
-impl AsBigEndian<Curve25519SeedBin<'static>> for PrivateKey {
-    /// Exposes the seed encoded as a big-endian fixed-length integer.
-    ///
-    /// Only X25519 is supported.
-    ///
-    /// # Errors
-    /// `error::Unspecified` if serialization failed.
-    fn as_be_bytes(&self) -> Result<Curve25519SeedBin<'static>, Unspecified> {
-        let evp_pkey = self.inner_key.as_const();
-        let mut buffer = [0u8; 32];
-        let mut out_len = 32;
-        if 1 != unsafe {
-            EVP_PKEY_get_raw_private_key(*evp_pkey, buffer.as_mut_ptr(), &mut out_len)
-        } {
-            return Err(Unspecified);
-        }
-        debug_assert_eq!(32, out_len);
-        Ok(Curve25519SeedBin::new(Vec::from(buffer)))
     }
 }
 
@@ -175,7 +166,6 @@ const MAX_PUBLIC_KEY_LEN: usize = 32;
 pub struct PublicKey {
     inner_key: LcPtr<EVP_PKEY>,
     public_key: [u8; MAX_PUBLIC_KEY_LEN],
-    len: usize,
 }
 
 unsafe impl Send for PublicKey {}
@@ -186,17 +176,17 @@ impl Debug for PublicKey {
         write!(
             f,
             "PublicKey {{ bytes: \"{}\" }}",
-            hex::encode(&self.public_key[0..self.len])
+            hex::encode(self.public_key)
         )
     }
 }
 
-impl AsRef<[u8]> for PublicKey {
+impl AsRef<[u8; 32]> for PublicKey {
     /// Serializes the public key in an uncompressed form (X9.62) using the
     /// Octet-String-to-Elliptic-Curve-Point algorithm in
     /// [SEC 1: Elliptic Curve Cryptography, Version 2.0].
-    fn as_ref(&self) -> &[u8] {
-        &self.public_key[0..self.len]
+    fn as_ref(&self) -> &[u8; 32] {
+        &self.public_key
     }
 }
 
@@ -205,7 +195,6 @@ impl Clone for PublicKey {
         PublicKey {
             inner_key: self.inner_key.clone(),
             public_key: self.public_key,
-            len: self.len,
         }
     }
 }
@@ -356,7 +345,6 @@ fn try_parse_x25519_subject_public_key_info_bytes(
 #[cfg(test)]
 mod tests {
     use crate::agreement::{agree, PrivateKey, PublicKey, UnparsedPublicKey};
-    use crate::encoding::{AsBigEndian, Curve25519SeedBin};
     use crate::{rand, test};
 
     use std::vec::Vec;
@@ -388,7 +376,7 @@ mod tests {
             "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
         );
 
-        let be_private_key_buffer: Curve25519SeedBin = my_private.as_be_bytes().unwrap();
+        let be_private_key_buffer = my_private.as_bytes().unwrap();
         let be_private_key = PrivateKey::from_private_key(be_private_key_buffer.as_ref()).unwrap();
         {
             let result = agree(&be_private_key, &peer_public, (), |key_material| {
@@ -499,7 +487,7 @@ mod tests {
     }
 
     fn public_key_formats_helper(public_key: &PublicKey) -> Vec<[u8; 32]> {
-        vec![public_key.as_ref().try_into().unwrap()]
+        vec![*public_key.as_ref()]
     }
 
     #[test]

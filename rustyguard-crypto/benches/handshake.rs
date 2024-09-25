@@ -12,7 +12,7 @@ fn main() {
 }
 
 fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-    UnparsedPublicKey::new(s.compute_public_key().unwrap().as_ref().try_into().unwrap())
+    UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
 }
 
 fn gen_sk() -> PrivateKey {

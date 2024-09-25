@@ -8,7 +8,6 @@ publish = false
 rustyguard-core = { version = "0.1", path = "../rustyguard-core" }
 rustyguard-crypto = { version = "0.1", path = "../rustyguard-crypto" }
 rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
-rustyguard-aws-lc = { version = "0.1", path = "../rustyguard-aws-lc" }
 
 rand = "0.8"
 tai64 = "4.0"
