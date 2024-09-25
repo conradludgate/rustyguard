@@ -31,8 +31,7 @@ use handshake::new_handshake;
 use hashbrown::{HashMap, HashTable};
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, HandshakeState, Mac,
-    StaticInitiatorConfig, StaticPeerConfig,
+    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -213,7 +212,7 @@ enum SessionState {
 #[derive(Zeroize)]
 struct SessionHandshake {
     #[zeroize(skip)]
-    esk_i: PrivateKey,
+    esk_i: EphemeralPrivateKey,
     state: HandshakeState,
 }
 

@@ -4,6 +4,8 @@ use rustyguard_aws_lc::aead::ChaChaKey;
 use rustyguard_aws_lc::aead::LessSafeKey;
 use rustyguard_aws_lc::aead::Nonce;
 use rustyguard_aws_lc::agreement::agree;
+use rustyguard_aws_lc::agreement::agree_ephemeral;
+use rustyguard_aws_lc::agreement::EphemeralPrivateKey;
 use rustyguard_aws_lc::agreement::PrivateKey;
 use rustyguard_aws_lc::agreement::UnparsedPublicKey;
 use rustyguard_types::EncryptedEmpty;
@@ -120,6 +122,15 @@ impl HandshakeState {
 
     pub fn mix_key_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey) -> Key {
         agree(sk, pk, (), |prk| Ok(self.mix_key(prk))).unwrap()
+    }
+
+    pub fn mix_edh(&mut self, sk: &EphemeralPrivateKey, pk: &UnparsedPublicKey) {
+        let [c] = agree_ephemeral(sk, pk, (), |prk| Ok(hkdf(&self.chain, prk))).unwrap();
+        self.chain = c;
+    }
+
+    pub fn mix_key_edh(&mut self, sk: &EphemeralPrivateKey, pk: &UnparsedPublicKey) -> Key {
+        agree_ephemeral(sk, pk, (), |prk| Ok(self.mix_key(prk))).unwrap()
     }
 
     fn mix_key(&mut self, b: &[u8]) -> Key {

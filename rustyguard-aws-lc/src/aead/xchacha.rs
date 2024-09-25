@@ -11,30 +11,30 @@ use super::{Nonce, MAX_TAG_LEN, NONCE_LEN};
 use super::{Tag, TAG_LEN};
 use crate::error::Unspecified;
 use aws_lc::{
-    EVP_AEAD_CTX_open, EVP_AEAD_CTX_seal_scatter, EVP_aead_chacha20_poly1305, EVP_AEAD_CTX,
+    EVP_AEAD_CTX_open, EVP_AEAD_CTX_seal_scatter, EVP_aead_xchacha20_poly1305, EVP_AEAD_CTX,
 };
 use core::fmt::Debug;
 use core::{mem::MaybeUninit, ops::RangeFrom, ptr::null};
 
 /// An AEAD key without a designated role or nonce sequence.
-pub struct ChaChaKey {
+pub struct XChaChaKey {
     ctx: LcPtr<EVP_AEAD_CTX>,
 }
 
-unsafe impl Send for ChaChaKey {}
-unsafe impl Sync for ChaChaKey {}
+unsafe impl Send for XChaChaKey {}
+unsafe impl Sync for XChaChaKey {}
 
 #[allow(clippy::missing_fields_in_debug)]
-impl Debug for ChaChaKey {
+impl Debug for XChaChaKey {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> Result<(), core::fmt::Error> {
-        f.debug_struct("ChaChaKey").finish()
+        f.debug_struct("XChaChaKey").finish()
     }
 }
 
-impl ChaChaKey {
+impl XChaChaKey {
     /// Constructs an `ChaChaKey`.
     pub fn new(key_bytes: &[u8]) -> Result<Self, Unspecified> {
-        let ctx = build_context(EVP_aead_chacha20_poly1305, key_bytes, TAG_LEN)?;
+        let ctx = build_context(EVP_aead_xchacha20_poly1305, key_bytes, TAG_LEN)?;
 
         Ok(Self { ctx })
     }

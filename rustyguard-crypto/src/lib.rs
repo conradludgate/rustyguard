@@ -5,7 +5,7 @@ use core::{net::SocketAddr, ops::ControlFlow};
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
 use rustyguard_aws_lc::agreement::PublicKey;
-pub use rustyguard_aws_lc::agreement::{PrivateKey, UnparsedPublicKey};
+pub use rustyguard_aws_lc::agreement::{EphemeralPrivateKey, PrivateKey, UnparsedPublicKey};
 
 use rand_core::{CryptoRng, RngCore};
 use rustyguard_types::{
@@ -283,7 +283,7 @@ pub fn encrypt_handshake_init(
     hs: &mut HandshakeState,
     initiator: &StaticInitiatorConfig,
     peer: &StaticPeerConfig,
-    esk_i: &PrivateKey,
+    esk_i: &EphemeralPrivateKey,
     now: Tai64N,
     sender: u32,
     cookie: Option<&Cookie>,
@@ -305,7 +305,7 @@ pub fn encrypt_handshake_init(
     hs.mix_hash(epk_i.as_ref());
 
     // -> es:
-    let k = hs.mix_key_dh(esk_i, &peer.key);
+    let k = hs.mix_key_edh(esk_i, &peer.key);
 
     // -> s:
     let static_key = EncryptedPublicKey::encrypt_and_hash(*initiator.public_key.as_ref(), hs, &k);
@@ -374,7 +374,7 @@ pub fn decrypt_handshake_init<'m>(
 pub fn encrypt_handshake_resp(
     hs: &mut HandshakeState,
     data: &DecryptedHandshakeInit,
-    esk_r: &PrivateKey,
+    esk_r: &EphemeralPrivateKey,
     peer: &StaticPeerConfig,
     sender: u32,
     cookie: Option<&Cookie>,
@@ -390,11 +390,11 @@ pub fn encrypt_handshake_resp(
 
     // <- ee
     let epk_i = UnparsedPublicKey::new(data.0.ephemeral_key);
-    hs.mix_dh(esk_r, &epk_i);
+    hs.mix_edh(esk_r, &epk_i);
 
     // <- se
     let spk_i = UnparsedPublicKey::new(data.0.static_key.msg);
-    hs.mix_dh(esk_r, &spk_i);
+    hs.mix_edh(esk_r, &spk_i);
 
     // <- psk
     let k = hs.mix_key_and_hash(&peer.preshared_key);
@@ -425,7 +425,7 @@ pub fn decrypt_handshake_resp(
     hs: &mut HandshakeState,
     initiator: &StaticInitiatorConfig,
     peer: &StaticPeerConfig,
-    esk_i: &PrivateKey,
+    esk_i: &EphemeralPrivateKey,
 ) -> Result<(), CryptoError> {
     // IKpsk2:
     // <- e, ee, se, psk
@@ -437,7 +437,7 @@ pub fn decrypt_handshake_resp(
     hs.mix_hash(epk_r.bytes());
 
     // <- ee:
-    hs.mix_dh(esk_i, &epk_r);
+    hs.mix_edh(esk_i, &epk_r);
 
     // <- se:
     hs.mix_dh(&initiator.private_key, &epk_r);
@@ -456,7 +456,7 @@ pub fn decrypt_handshake_resp(
 mod tests {
     use chacha20poly1305::Key;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use rustyguard_aws_lc::agreement::{PrivateKey, UnparsedPublicKey};
+    use rustyguard_aws_lc::agreement::{EphemeralPrivateKey, PrivateKey, UnparsedPublicKey};
     use tai64::{Tai64, Tai64N};
     use zerocopy::AsBytes;
 
@@ -471,9 +471,7 @@ mod tests {
     }
 
     fn gen_sk(r: &mut StdRng) -> PrivateKey {
-        let mut b = [0u8; 32];
-        r.fill_bytes(&mut b);
-        PrivateKey::from_private_key(&b).unwrap()
+        PrivateKey::generate(r).unwrap()
     }
 
     #[test]
@@ -501,7 +499,7 @@ mod tests {
 
         let mut hs1 = HandshakeState::default();
 
-        let esk_i = gen_sk(&mut rng);
+        let esk_i = EphemeralPrivateKey::generate(&mut rng).unwrap();
         let mut init =
             encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
 
@@ -514,7 +512,7 @@ mod tests {
         assert_eq!(init.static_key().bytes(), peer_i.key.bytes());
         assert_eq!(init.timestamp(), &now.to_bytes());
 
-        let esk_r = gen_sk(&mut rng);
+        let esk_r = EphemeralPrivateKey::generate(&mut rng).unwrap();
         let mut resp = encrypt_handshake_resp(&mut hs2, init, &esk_r, &peer_i, 2, None);
 
         resp.verify_mac1(&init_i.mac1_key).unwrap();
@@ -575,7 +573,7 @@ mod tests {
 
         let mut hs1 = HandshakeState::default();
 
-        let esk_i = gen_sk(&mut rng);
+        let esk_i = EphemeralPrivateKey::generate(&mut rng).unwrap();
         let mut init =
             encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
 

@@ -275,7 +275,9 @@ fn seal_with_less_safe_key(
     in_out: &mut Vec<u8>,
 ) -> Result<(), error::Unspecified> {
     let key = make_less_safe_key(key);
-    key.seal_in_place_append_tag(nonce, aad, in_out)
+    let tag = key.seal_in_place_separate_tag(nonce, aad, in_out)?;
+    in_out.extend_from_slice(tag.as_ref());
+    Ok(())
 }
 
 fn open_with_less_safe_key<'a>(

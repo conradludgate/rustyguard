@@ -53,13 +53,14 @@ fn test_aead_append_within(config: &AeadConfig, in_out: &[u8]) -> Result<Vec<u8>
     let plaintext = in_out.to_owned();
     println!("Plaintext: {plaintext:?}");
     let mut sized_in_out = in_out.to_vec();
-    sealing_key
-        .seal_in_place_append_tag(
+    let tag = sealing_key
+        .seal_in_place_separate_tag(
             Nonce::try_assume_unique_for_key(&config.nonce).unwrap(),
             config.aad(),
             &mut sized_in_out,
         )
         .map_err(|x| x.to_string())?;
+    sized_in_out.extend_from_slice(tag.as_ref());
 
     let (cipher_text, tag_value) = sized_in_out.split_at_mut(plaintext.len());
 
@@ -70,11 +71,10 @@ fn test_aead_append_within(config: &AeadConfig, in_out: &[u8]) -> Result<Vec<u8>
     println!("Tag: {tag_value:?}");
 
     let result_plaintext = sealing_key
-        .open_within(
+        .open_in_place(
             Nonce::try_assume_unique_for_key(&config.nonce).unwrap(),
             config.aad(),
             &mut sized_in_out,
-            0..,
         )
         .map_err(|x| x.to_string())?;
 
