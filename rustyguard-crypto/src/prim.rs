@@ -204,7 +204,7 @@ macro_rules! encrypted {
 
                 let out = Self {
                     msg,
-                    tag: Tag(tag.as_ref().try_into().unwrap()),
+                    tag: Tag(*tag.as_ref()),
                 };
                 state.mix_hash(out.as_bytes());
 
@@ -242,7 +242,7 @@ impl EncryptionKey {
             .seal_in_place_separate_tag(nonce, Aad::empty(), payload)
             .unwrap();
 
-        Tag(tag.as_ref().try_into().unwrap())
+        Tag(*tag.as_ref())
     }
 
     pub fn counter(&self) -> u64 {

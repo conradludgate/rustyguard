@@ -11,33 +11,11 @@ use std::sync::OnceLock;
 
 #[test]
 fn aead_chacha20_poly1305() {
-    test_aead_all(test_file!("data/aead_chacha20_poly1305_tests.txt"));
-}
-
-/// Tests all combinations of sealer and opener functions
-fn test_aead_all(test_file: test::File) {
-    let sealers = vec![seal_with_less_safe_key];
-    let openers = vec![open_with_less_safe_key];
-
-    for seal in &sealers {
-        for open in &openers {
-            test_aead(seal, open, test_file);
-        }
-    }
+    test_aead(test_file!("data/aead_chacha20_poly1305_tests.txt"));
 }
 
 #[allow(clippy::too_many_lines)]
-fn test_aead<Seal, Open>(seal: Seal, open: Open, test_file: test::File)
-where
-    Seal: Fn(&[u8], Nonce, aead::Aad<&[u8]>, &mut Vec<u8>) -> Result<(), error::Unspecified>,
-    Open: for<'a> Fn(
-        &[u8],
-        Nonce,
-        aead::Aad<&[u8]>,
-        &'a mut [u8],
-        RangeFrom<usize>,
-    ) -> Result<&'a mut [u8], error::Unspecified>,
-{
+fn test_aead(test_file: test::File) {
     // TLS record headers are 5 bytes long.
     // TLS explicit nonces for AES-GCM are 8 bytes long.
     static MINIMAL_IN_PREFIX_LENS: [usize; 36] = [
@@ -109,7 +87,7 @@ where
 
         let mut s_in_out = plaintext.clone();
         let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes).unwrap();
-        let s_result = seal(
+        let s_result = seal_with_less_safe_key(
             &key_bytes[..],
             nonce,
             aead::Aad::from(&aad[..]),
@@ -145,7 +123,7 @@ where
 
             let o_in_out_clone = o_in_out.clone();
             let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes).unwrap();
-            let o_result = open(
+            let o_result = open_with_less_safe_key(
                 &key_bytes,
                 nonce,
                 aead::Aad::from(&aad[..]),
@@ -166,7 +144,6 @@ where
                             aad.as_slice(),
                             &o_in_out_clone,
                             in_prefix_len,
-                            &open,
                         );
                     }
                 }
@@ -184,22 +161,13 @@ where
     });
 }
 
-fn aead_open_bad_tag<Open>(
+fn aead_open_bad_tag(
     key_bytes: &[u8],
     nonce_bytes: &[u8],
     aad_bytes: &[u8],
     in_out: &[u8],
     in_prefix_len: usize,
-    open: Open,
-) where
-    Open: for<'a> Fn(
-        &[u8],
-        Nonce,
-        aead::Aad<&[u8]>,
-        &'a mut [u8],
-        RangeFrom<usize>,
-    ) -> Result<&'a mut [u8], error::Unspecified>,
-{
+) {
     let mut in_out = Vec::from(in_out);
     let in_out_len = in_out.len();
     in_out[in_out_len - 1] ^= 0x08;
@@ -207,52 +175,34 @@ fn aead_open_bad_tag<Open>(
     let aad_bytes = Vec::from(aad_bytes);
     let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes).unwrap();
     let aad = aead::Aad::from(aad_bytes.as_slice());
-    let err_result = open(key_bytes, nonce, aad, &mut in_out, in_prefix_len..);
+    let err_result = open_with_less_safe_key(key_bytes, nonce, aad, &mut in_out, in_prefix_len..);
     assert!(err_result.is_err());
 }
 
-fn aead_open_bad_nonce<Open>(
+fn aead_open_bad_nonce(
     key_bytes: &[u8],
     nonce_bytes: &[u8],
     aad_bytes: &[u8],
     in_out: &[u8],
     in_prefix_len: usize,
-    open: Open,
-) where
-    Open: for<'a> Fn(
-        &[u8],
-        Nonce,
-        aead::Aad<&[u8]>,
-        &'a mut [u8],
-        RangeFrom<usize>,
-    ) -> Result<&'a mut [u8], error::Unspecified>,
-{
+) {
     let mut in_out = Vec::from(in_out);
     let mut nonce_bytes = Vec::from(nonce_bytes);
     nonce_bytes[NONCE_LEN - 1] ^= 0x80;
     let aad_bytes = Vec::from(aad_bytes);
     let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes).unwrap();
     let aad = aead::Aad::from(aad_bytes.as_slice());
-    let err_result = open(key_bytes, nonce, aad, &mut in_out, in_prefix_len..);
+    let err_result = open_with_less_safe_key(key_bytes, nonce, aad, &mut in_out, in_prefix_len..);
     assert!(err_result.is_err());
 }
 
-fn aead_open_bad_aad<Open>(
+fn aead_open_bad_aad(
     key_bytes: &[u8],
     nonce_bytes: &[u8],
     aad_bytes: &[u8],
     in_out: &[u8],
     in_prefix_len: usize,
-    open: Open,
-) where
-    Open: for<'a> Fn(
-        &[u8],
-        Nonce,
-        aead::Aad<&[u8]>,
-        &'a mut [u8],
-        RangeFrom<usize>,
-    ) -> Result<&'a mut [u8], error::Unspecified>,
-{
+) {
     let mut in_out = Vec::from(in_out);
     let nonce_bytes = Vec::from(nonce_bytes);
     let mut aad_bytes = Vec::from(aad_bytes);
@@ -264,7 +214,7 @@ fn aead_open_bad_aad<Open>(
     }
     let nonce = Nonce::try_assume_unique_for_key(&nonce_bytes).unwrap();
     let aad = aead::Aad::from(aad_bytes.as_slice());
-    let err_result = open(key_bytes, nonce, aad, &mut in_out, in_prefix_len..);
+    let err_result = open_with_less_safe_key(key_bytes, nonce, aad, &mut in_out, in_prefix_len..);
     assert!(err_result.is_err());
 }
 

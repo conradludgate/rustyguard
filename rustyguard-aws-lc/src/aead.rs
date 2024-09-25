@@ -177,7 +177,7 @@ impl XLessSafeKey {
     #[inline]
     pub fn open_in_place<'in_out, A>(
         &self,
-        nonce: Nonce,
+        nonce: XNonce,
         aad: Aad<A>,
         in_out: &'in_out mut [u8],
     ) -> Result<&'in_out mut [u8], Unspecified>
@@ -204,7 +204,7 @@ impl XLessSafeKey {
     #[allow(clippy::needless_pass_by_value)]
     pub fn open_within<'in_out, A>(
         &self,
-        nonce: Nonce,
+        nonce: XNonce,
         aad: Aad<A>,
         in_out: &'in_out mut [u8],
         ciphertext_and_tag: RangeFrom<usize>,
@@ -232,7 +232,7 @@ impl XLessSafeKey {
     #[allow(clippy::needless_pass_by_value)]
     pub fn seal_in_place_separate_tag<A>(
         &self,
-        nonce: Nonce,
+        nonce: XNonce,
         aad: Aad<A>,
         in_out: &mut [u8],
     ) -> Result<Tag, Unspecified>
@@ -254,11 +254,11 @@ impl Debug for XLessSafeKey {
 /// An authentication tag.
 #[must_use]
 #[repr(C)]
-pub struct Tag([u8; MAX_TAG_LEN], usize);
+pub struct Tag([u8; TAG_LEN]);
 
-impl AsRef<[u8]> for Tag {
-    fn as_ref(&self) -> &[u8] {
-        self.0[..self.1].as_ref()
+impl AsRef<[u8; TAG_LEN]> for Tag {
+    fn as_ref(&self) -> &[u8; TAG_LEN] {
+        &self.0
     }
 }
 
@@ -267,6 +267,3 @@ const MAX_KEY_LEN: usize = 32;
 
 // All the AEADs we support use 128-bit tags.
 const TAG_LEN: usize = 16;
-
-/// The maximum length of a tag for the algorithms in this module.
-pub const MAX_TAG_LEN: usize = TAG_LEN;

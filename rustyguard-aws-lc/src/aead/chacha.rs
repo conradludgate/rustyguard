@@ -7,7 +7,7 @@
 use crate::ptr::LcPtr;
 
 use super::aead_ctx::build_context;
-use super::{Nonce, MAX_TAG_LEN, NONCE_LEN};
+use super::{Nonce, NONCE_LEN};
 use super::{Tag, TAG_LEN};
 use crate::error::Unspecified;
 use aws_lc::{
@@ -92,7 +92,7 @@ impl ChaChaKey {
         aad: &[u8],
         in_out: &mut [u8],
     ) -> Result<(Nonce, Tag), Unspecified> {
-        let mut tag = [0u8; MAX_TAG_LEN];
+        let mut tag = [0u8; TAG_LEN];
         let mut out_tag_len = MaybeUninit::<usize>::uninit();
         {
             let nonce = nonce.as_ref();
@@ -119,6 +119,9 @@ impl ChaChaKey {
                 return Err(Unspecified);
             }
         }
-        Ok((nonce, Tag(tag, unsafe { out_tag_len.assume_init() })))
+
+        unsafe { assert_eq!(out_tag_len.assume_init(), 16) }
+
+        Ok((nonce, Tag(tag)))
     }
 }

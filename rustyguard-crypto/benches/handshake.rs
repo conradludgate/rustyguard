@@ -1,9 +1,8 @@
-use chacha20poly1305::Key;
 use divan::Bencher;
 use rand::{thread_rng, Rng, RngCore};
 use rustyguard_crypto::{
     decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, EphemeralPrivateKey,
-    HandshakeState, PrivateKey, StaticInitiatorConfig, StaticPeerConfig, UnparsedPublicKey,
+    HandshakeState, Key, PrivateKey, StaticInitiatorConfig, StaticPeerConfig, UnparsedPublicKey,
 };
 use tai64::Tai64N;
 

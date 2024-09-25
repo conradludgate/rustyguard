@@ -4,8 +4,11 @@ use core::{net::SocketAddr, ops::ControlFlow};
 
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
-use rustyguard_aws_lc::agreement::PublicKey;
 pub use rustyguard_aws_lc::agreement::{EphemeralPrivateKey, PrivateKey, UnparsedPublicKey};
+use rustyguard_aws_lc::{
+    aead::{Aad, XChaChaKey, XLessSafeKey, XNonce},
+    agreement::PublicKey,
+};
 
 use rand_core::{CryptoRng, RngCore};
 use rustyguard_types::{
@@ -45,10 +48,8 @@ pub fn decrypt_cookie<'c>(
     nonce: &[u8; 24],
     aad: &[u8],
 ) -> Result<&'c mut Cookie, CryptoError> {
-    use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
-
-    XChaCha20Poly1305::new(key)
-        .decrypt_in_place_detached(nonce.into(), aad, &mut cookie.msg.0, (&cookie.tag.0).into())
+    XLessSafeKey::new(XChaChaKey::new(key).unwrap())
+        .open_in_place(XNonce::from(nonce), Aad::from(aad), cookie.as_bytes_mut())
         .map_err(|_| CryptoError::DecryptionError)?;
 
     Ok(&mut cookie.msg)
@@ -60,15 +61,13 @@ pub fn encrypt_cookie(
     nonce: &[u8; 24],
     aad: &[u8],
 ) -> EncryptedCookie {
-    use chacha20poly1305::{AeadInPlace, KeyInit, XChaCha20Poly1305};
-
-    let tag = XChaCha20Poly1305::new(key)
-        .encrypt_in_place_detached(nonce.into(), aad, &mut cookie.0)
-        .expect("cookie message should not be larger than max message size");
+    let tag = XLessSafeKey::new(XChaChaKey::new(key).unwrap())
+        .seal_in_place_separate_tag(XNonce::from(nonce), Aad::from(aad), &mut cookie.0)
+        .unwrap();
 
     EncryptedCookie {
         msg: cookie,
-        tag: Tag(tag.into()),
+        tag: Tag(*tag.as_ref()),
     }
 }
 
@@ -173,7 +172,7 @@ pub trait HasMac: FromBytes + AsBytes + Sized {
 macro_rules! mac_protected {
     ($i:ident, $t:ident) => {
         impl HasMac for $i {
-            fn compute_mac1(&self, mac1_key: &chacha20poly1305::Key) -> Mac {
+            fn compute_mac1(&self, mac1_key: &crate::Key) -> Mac {
                 let offset = core::mem::offset_of!($i, mac1);
                 let bytes = self.as_bytes();
                 prim::mac(mac1_key, &bytes[..offset])
@@ -454,7 +453,6 @@ pub fn decrypt_handshake_resp(
 
 #[cfg(test)]
 mod tests {
-    use chacha20poly1305::Key;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use rustyguard_aws_lc::agreement::{EphemeralPrivateKey, PrivateKey, UnparsedPublicKey};
     use tai64::{Tai64, Tai64N};
@@ -462,7 +460,7 @@ mod tests {
 
     use crate::{
         decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_init,
-        encrypt_handshake_resp, CookieState, HandshakeState, HasMac, StaticInitiatorConfig,
+        encrypt_handshake_resp, CookieState, HandshakeState, HasMac, Key, StaticInitiatorConfig,
         StaticPeerConfig,
     };
 

@@ -31,7 +31,8 @@ use handshake::new_handshake;
 use hashbrown::{HashMap, HashTable};
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig
+    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, EphemeralPrivateKey,
+    HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -494,9 +495,9 @@ impl Sessions {
         cookie: Cookie,
         buf: &'b mut [u8],
     ) -> &'b mut [u8] {
-        // Generating a random nonce and encrypting the cookie takes 1.3us
-        // on my M2 Max. Total time to verify the handshake msg is 2.5us.
-        // This brings us to 400k handshakes processed per second.
+        // Generating a random nonce and encrypting the cookie takes 900ns
+        // on my M2 Max. Total time to verify the handshake msg is 2us.
+        // This brings us to 500k handshakes processed per second.
         // As I said above, this should be parallisable with an rng per thread.
         let mut nonce = [0u8; 24];
         self.dynamic.borrow_mut().rng.fill_bytes(&mut nonce);

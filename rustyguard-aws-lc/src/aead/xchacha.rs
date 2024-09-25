@@ -7,8 +7,8 @@
 use crate::ptr::LcPtr;
 
 use super::aead_ctx::build_context;
-use super::{Nonce, MAX_TAG_LEN, NONCE_LEN};
 use super::{Tag, TAG_LEN};
+use super::{XNonce, XNONCE_LEN};
 use crate::error::Unspecified;
 use aws_lc::{
     EVP_AEAD_CTX_open, EVP_AEAD_CTX_seal_scatter, EVP_aead_xchacha20_poly1305, EVP_AEAD_CTX,
@@ -42,7 +42,7 @@ impl XChaChaKey {
     #[inline]
     pub(crate) fn open_within<'in_out>(
         &self,
-        nonce: Nonce,
+        nonce: XNonce,
         aad: &[u8],
         in_out: &'in_out mut [u8],
         ciphertext_and_tag: RangeFrom<usize>,
@@ -56,7 +56,7 @@ impl XChaChaKey {
         let in_out: &mut [u8] = &mut in_out[in_prefix_len..];
         let nonce = nonce.as_ref();
 
-        debug_assert_eq!(nonce.len(), NONCE_LEN);
+        debug_assert_eq!(nonce.len(), XNONCE_LEN);
 
         let plaintext_len = in_out.len() - TAG_LEN;
 
@@ -88,16 +88,16 @@ impl XChaChaKey {
     #[inline]
     pub(crate) fn seal_in_place_separate_tag(
         &self,
-        nonce: Nonce,
+        nonce: XNonce,
         aad: &[u8],
         in_out: &mut [u8],
-    ) -> Result<(Nonce, Tag), Unspecified> {
-        let mut tag = [0u8; MAX_TAG_LEN];
+    ) -> Result<(XNonce, Tag), Unspecified> {
+        let mut tag = [0u8; TAG_LEN];
         let mut out_tag_len = MaybeUninit::<usize>::uninit();
         {
             let nonce = nonce.as_ref();
 
-            debug_assert_eq!(nonce.len(), NONCE_LEN);
+            debug_assert_eq!(nonce.len(), XNONCE_LEN);
 
             if 1 != (unsafe {
                 EVP_AEAD_CTX_seal_scatter(
@@ -119,6 +119,9 @@ impl XChaChaKey {
                 return Err(Unspecified);
             }
         }
-        Ok((nonce, Tag(tag, unsafe { out_tag_len.assume_init() })))
+
+        unsafe { assert_eq!(out_tag_len.assume_init(), 16) }
+
+        Ok((nonce, Tag(tag)))
     }
 }
