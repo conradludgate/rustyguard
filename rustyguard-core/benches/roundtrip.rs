@@ -29,7 +29,7 @@ fn session_with_peer(
 struct AlignedPacket([u8; 256]);
 
 fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-    UnparsedPublicKey::new(s.compute_public_key().unwrap().as_ref().try_into().unwrap())
+    UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
 }
 
 #[divan::bench(sample_count = 100, sample_size = 100)]
