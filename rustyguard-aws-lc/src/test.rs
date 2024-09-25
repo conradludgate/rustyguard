@@ -219,9 +219,7 @@ impl TestCase {
                     }
                     Some(b'"') => {
                         if s.next().is_some() {
-                            panic!(
-                                "characters after the closing quote of a quoted string."
-                            );
+                            panic!("characters after the closing quote of a quoted string.");
                         }
                         break;
                     }
@@ -419,6 +417,7 @@ fn parse_test_case(
 ///
 /// These are only used for testing KATs where a random number should be generated.
 pub mod rand {
+    #[cfg(test)]
     use crate::error;
 
     /// An implementation of `SecureRandom` that always fills the output slice
@@ -428,8 +427,9 @@ pub mod rand {
         pub byte: u8,
     }
 
-    impl crate::rand::sealed::SecureRandom for FixedByteRandom {
-        fn fill_impl(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
+    #[cfg(test)]
+    impl crate::rand::SecureRandom for FixedByteRandom {
+        fn fill(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
             dest.fill(self.byte);
             Ok(())
         }
@@ -443,9 +443,10 @@ pub mod rand {
         pub bytes: &'a [u8],
     }
 
-    impl crate::rand::sealed::SecureRandom for FixedSliceRandom<'_> {
+    #[cfg(test)]
+    impl crate::rand::SecureRandom for FixedSliceRandom<'_> {
         #[inline]
-        fn fill_impl(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
+        fn fill(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
             dest.copy_from_slice(self.bytes);
             Ok(())
         }
@@ -467,8 +468,9 @@ pub mod rand {
         pub current: core::cell::UnsafeCell<usize>,
     }
 
-    impl crate::rand::sealed::SecureRandom for FixedSliceSequenceRandom<'_> {
-        fn fill_impl(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
+    #[cfg(test)]
+    impl crate::rand::SecureRandom for FixedSliceSequenceRandom<'_> {
+        fn fill(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
             let current = unsafe { *self.current.get() };
             let bytes = self.bytes[current];
             dest.copy_from_slice(bytes);
@@ -490,7 +492,7 @@ pub mod rand {
 
 #[cfg(test)]
 mod tests {
-    use crate::rand::sealed::SecureRandom;
+    use crate::rand::SecureRandom;
     use crate::test::rand::{FixedByteRandom, FixedSliceRandom, FixedSliceSequenceRandom};
     use crate::test::{from_dirty_hex, to_hex_upper};
     use crate::{error, test};
@@ -500,7 +502,7 @@ mod tests {
     fn fixed_byte_random() {
         let fbr = FixedByteRandom { byte: 42 };
         let mut bs = [0u8; 42];
-        fbr.fill_impl(&mut bs).expect("filled");
+        fbr.fill(&mut bs).expect("filled");
         assert_eq!([42u8; 42], bs);
     }
 
@@ -508,7 +510,7 @@ mod tests {
     fn fixed_slice_random() {
         let fbr = FixedSliceRandom { bytes: &[42u8; 42] };
         let mut bs = [0u8; 42];
-        fbr.fill_impl(&mut bs).expect("fill");
+        fbr.fill(&mut bs).expect("fill");
     }
 
     #[test]
@@ -517,7 +519,7 @@ mod tests {
     )]
     fn fixed_slice_random_length_mismatch() {
         let fbr = FixedSliceRandom { bytes: &[42u8; 42] };
-        let _: Result<(), error::Unspecified> = fbr.fill_impl(&mut []);
+        let _: Result<(), error::Unspecified> = fbr.fill(&mut []);
     }
 
     #[test]
@@ -527,10 +529,10 @@ mod tests {
             current: UnsafeCell::new(0),
         };
         let mut bs_one = [0u8; 7];
-        fbr.fill_impl(&mut bs_one).expect("fill");
+        fbr.fill(&mut bs_one).expect("fill");
         assert_eq!([7u8; 7], bs_one);
         let mut bs_two = [42u8; 42];
-        fbr.fill_impl(&mut bs_two).expect("filled");
+        fbr.fill(&mut bs_two).expect("filled");
         assert_eq!([42u8; 42], bs_two);
     }
 
@@ -542,7 +544,7 @@ mod tests {
             current: UnsafeCell::new(0),
         };
         let mut bs_one = [0u8; 7];
-        let _: Result<(), error::Unspecified> = fbr.fill_impl(&mut bs_one);
+        let _: Result<(), error::Unspecified> = fbr.fill(&mut bs_one);
     }
 
     // TODO: This test is causing a thread panic which prevents capture with should_panic
@@ -553,7 +555,7 @@ mod tests {
     //         bytes: &[&[42u8; 42]],
     //         current: UnsafeCell::new(0),
     //     };
-    //     let _: Result<(), error::Unspecified> = fbr.fill_impl(&mut []);
+    //     let _: Result<(), error::Unspecified> = fbr.fill(&mut []);
     // }
 
     #[test]

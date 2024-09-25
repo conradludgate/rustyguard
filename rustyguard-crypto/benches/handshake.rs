@@ -3,7 +3,7 @@ use divan::Bencher;
 use rand::{thread_rng, Rng, RngCore};
 use rustyguard_crypto::{
     decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, HandshakeState,
-    PrivateKey, StaticInitiatorConfig, StaticPeerConfig, UnparsedPublicKey, X25519,
+    PrivateKey, StaticInitiatorConfig, StaticPeerConfig, UnparsedPublicKey,
 };
 use tai64::Tai64N;
 
@@ -11,17 +11,14 @@ fn main() {
     divan::main()
 }
 
-fn pk(s: &PrivateKey) -> UnparsedPublicKey<[u8; 32]> {
-    UnparsedPublicKey::new(
-        &X25519,
-        s.compute_public_key().unwrap().as_ref().try_into().unwrap(),
-    )
+fn pk(s: &PrivateKey) -> UnparsedPublicKey {
+    UnparsedPublicKey::new(s.compute_public_key().unwrap().as_ref().try_into().unwrap())
 }
 
 fn gen_sk() -> PrivateKey {
     let mut b = [0u8; 32];
     thread_rng().fill_bytes(&mut b);
-    PrivateKey::from_private_key(&X25519, &b).unwrap()
+    PrivateKey::from_private_key(&b).unwrap()
 }
 
 #[divan::bench(sample_count = 100, sample_size = 100)]

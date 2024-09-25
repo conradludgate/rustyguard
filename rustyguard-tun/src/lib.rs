@@ -7,7 +7,7 @@ use iptrie::{LCTrieMap, RTrieMap};
 use rand::rngs::OsRng;
 use rustyguard_aws_lc::encoding::{AsBigEndian, Curve25519SeedBin};
 use rustyguard_core::{
-    Config, DataHeader, Message, PeerId, PrivateKey, Sessions, UnparsedPublicKey, X25519,
+    Config, DataHeader, Message, PeerId, PrivateKey, Sessions, UnparsedPublicKey,
 };
 use rustyguard_crypto::StaticPeerConfig;
 
@@ -104,7 +104,7 @@ impl TunConfig {
     pub fn key(&self) -> PrivateKey {
         match &self.interface.key {
             Some(key) => {
-                let private_key = PrivateKey::from_private_key(&X25519, key).unwrap();
+                let private_key = PrivateKey::from_private_key(key).unwrap();
                 println!(
                     "public key: {}",
                     Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
@@ -112,7 +112,7 @@ impl TunConfig {
                 private_key
             }
             None => {
-                let private_key = PrivateKey::generate(&X25519).unwrap();
+                let private_key = PrivateKey::generate().unwrap();
                 let c: Curve25519SeedBin = private_key.as_be_bytes().unwrap();
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
                 println!(
@@ -129,8 +129,7 @@ impl TunConfig {
 
         let mut peer_net = RTrieMap::with_root(PeerId::sentinal());
         for peer in self.peers {
-            let peer_pk =
-                UnparsedPublicKey::new(&X25519, <[u8; 32]>::try_from(&*peer.key).unwrap());
+            let peer_pk = UnparsedPublicKey::new(<[u8; 32]>::try_from(&*peer.key).unwrap());
             let id = rg_config.insert_peer(StaticPeerConfig::new(
                 peer_pk,
                 None,

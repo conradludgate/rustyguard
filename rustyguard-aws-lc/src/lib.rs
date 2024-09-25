@@ -145,7 +145,6 @@ pub mod aead;
 pub mod agreement;
 pub mod error;
 
-mod rand;
 mod buffer;
 mod cbs;
 mod cipher;
@@ -155,5 +154,6 @@ mod evp_pkey;
 mod hex;
 mod iv;
 mod ptr;
+mod rand;
 
 pub mod test;

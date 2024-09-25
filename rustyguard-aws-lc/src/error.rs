@@ -7,8 +7,8 @@
 
 extern crate std;
 
-use core::num::TryFromIntError;
 use core::error::Error;
+use core::num::TryFromIntError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unspecified;

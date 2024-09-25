@@ -113,12 +113,12 @@ impl HandshakeState {
         self.chain = c;
     }
 
-    pub fn mix_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey<[u8; 32]>) {
+    pub fn mix_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey) {
         let [c] = agree(sk, pk, (), |prk| Ok(hkdf(&self.chain, prk))).unwrap();
         self.chain = c;
     }
 
-    pub fn mix_key_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey<[u8; 32]>) -> Key {
+    pub fn mix_key_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey) -> Key {
         agree(sk, pk, (), |prk| Ok(self.mix_key(prk))).unwrap()
     }
 
@@ -140,8 +140,7 @@ impl HandshakeState {
     }
 
     pub fn split(&mut self, initiator: bool) -> (EncryptionKey, DecryptionKey) {
-        let [k1, k2] =
-            hkdf(&self.chain, &[]).map(|k| ChaChaKey::new(&k[..]).unwrap());
+        let [k1, k2] = hkdf(&self.chain, &[]).map(|k| ChaChaKey::new(&k[..]).unwrap());
         self.zeroize();
 
         if initiator {

@@ -61,8 +61,8 @@ impl<T> AsRef<[u8]> for Buffer<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::vec;
     use super::*;
+    use std::vec;
 
     #[test]
     fn test_new() {

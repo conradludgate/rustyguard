@@ -43,7 +43,7 @@ use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, AsBytes, FromBytes, FromZeroes};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub use rustyguard_crypto::{PrivateKey, UnparsedPublicKey, X25519};
+pub use rustyguard_crypto::{PrivateKey, UnparsedPublicKey};
 pub use rustyguard_types::DataHeader;
 pub use tai64::Tai64N;
 
@@ -148,7 +148,7 @@ impl Config {
         }
     }
 
-    fn get_peer_idx(&self, pk: &UnparsedPublicKey<[u8; 32]>) -> Option<PeerId> {
+    fn get_peer_idx(&self, pk: &UnparsedPublicKey) -> Option<PeerId> {
         let peers = &self.peers;
         self.peers_by_pubkey
             .find(self.pubkey_hasher.hash_one(pk.bytes()), |&i| {
@@ -652,28 +652,25 @@ mod tests {
         rngs::{OsRng, StdRng},
         Rng, RngCore, SeedableRng,
     };
-    use rustyguard_crypto::{Key, StaticPeerConfig, X25519};
+    use rustyguard_crypto::{Key, StaticPeerConfig};
     use tai64::Tai64N;
     use zerocopy::AsBytes;
 
     use crate::{Config, PeerId, Sessions};
 
-    fn pk(s: &PrivateKey) -> UnparsedPublicKey<[u8; 32]> {
-        UnparsedPublicKey::new(
-            &X25519,
-            s.compute_public_key().unwrap().as_ref().try_into().unwrap(),
-        )
+    fn pk(s: &PrivateKey) -> UnparsedPublicKey {
+        UnparsedPublicKey::new(s.compute_public_key().unwrap().as_ref().try_into().unwrap())
     }
 
     fn gen_sk(r: &mut impl Rng) -> PrivateKey {
         let mut b = [0u8; 32];
         r.fill_bytes(&mut b);
-        PrivateKey::from_private_key(&X25519, &b).unwrap()
+        PrivateKey::from_private_key(&b).unwrap()
     }
 
     fn session_with_peer(
         secret_key: PrivateKey,
-        peer_public_key: UnparsedPublicKey<[u8; 32]>,
+        peer_public_key: UnparsedPublicKey,
         preshared_key: Key,
         endpoint: SocketAddr,
     ) -> (PeerId, Sessions) {

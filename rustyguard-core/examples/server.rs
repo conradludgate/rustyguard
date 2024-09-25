@@ -3,12 +3,12 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use rustyguard_aws_lc::encoding::{AsBigEndian, Curve25519SeedBin};
 use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
 use rand::rngs::OsRng;
-use rustyguard_core::{Config, Message, PrivateKey, Sessions, UnparsedPublicKey, X25519};
+use rustyguard_aws_lc::encoding::{AsBigEndian, Curve25519SeedBin};
+use rustyguard_core::{Config, Message, PrivateKey, Sessions, UnparsedPublicKey};
 use rustyguard_crypto::StaticPeerConfig;
 use tai64::Tai64N;
 
@@ -35,7 +35,7 @@ fn main() {
     let private_key = match args.key {
         Some(key) => {
             let pk = Base64::decode_vec(&key).unwrap();
-            let private_key = PrivateKey::from_private_key(&X25519, &pk).unwrap();
+            let private_key = PrivateKey::from_private_key(&pk).unwrap();
             println!(
                 "public key: {}",
                 Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
@@ -43,7 +43,7 @@ fn main() {
             private_key
         }
         None => {
-            let private_key = PrivateKey::generate(&X25519).unwrap();
+            let private_key = PrivateKey::generate().unwrap();
             let c: Curve25519SeedBin = private_key.as_be_bytes().unwrap();
             println!("private key: {}", Base64::encode_string(c.as_ref()));
             println!(
@@ -57,7 +57,7 @@ fn main() {
     let mut config = Config::new(private_key);
     for peer in args.peer {
         let pk = Base64::decode_vec(&peer).unwrap();
-        let peer_pk = UnparsedPublicKey::new(&X25519, <[u8; 32]>::try_from(pk).unwrap());
+        let peer_pk = UnparsedPublicKey::new(<[u8; 32]>::try_from(pk).unwrap());
         config.insert_peer(StaticPeerConfig::new(peer_pk, None, None));
     }
 

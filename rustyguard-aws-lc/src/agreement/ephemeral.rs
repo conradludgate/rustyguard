@@ -1,9 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR ISC
 
-use crate::agreement::{agree, Algorithm, PrivateKey, PublicKey, UnparsedPublicKey};
+use crate::agreement::{agree, PrivateKey, PublicKey, UnparsedPublicKey};
 use crate::error::Unspecified;
-use crate::rand::SecureRandom;
 use core::fmt;
 use core::fmt::{Debug, Formatter};
 
@@ -15,11 +14,7 @@ pub struct EphemeralPrivateKey(PrivateKey);
 
 impl Debug for EphemeralPrivateKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "EphemeralPrivateKey {{ algorithm: {:?} }}",
-            self.0.inner_key.algorithm()
-        )
+        write!(f, "EphemeralPrivateKey",)
     }
 }
 
@@ -27,27 +22,16 @@ impl EphemeralPrivateKey {
     #[inline]
     /// Generate a new ephemeral private key for the given algorithm.
     ///
-    /// # *ring* Compatibility
-    ///  Our implementation ignores the `SecureRandom` parameter.
-    // # FIPS
-    // Use this function with one of the following algorithms:
-    // * `ECDH_P256`
-    // * `ECDH_P384`
-    // * `ECDH_P521`
-    //
     /// # Errors
     /// `error::Unspecified` when operation fails due to internal error.
-    pub fn generate(alg: &'static Algorithm, _rng: &dyn SecureRandom) -> Result<Self, Unspecified> {
-        Ok(Self(PrivateKey::generate(alg)?))
+    pub fn generate() -> Result<Self, Unspecified> {
+        Ok(Self(PrivateKey::generate()?))
     }
 
     #[cfg(test)]
     #[allow(clippy::missing_errors_doc, missing_docs)]
-    pub fn generate_for_test(
-        alg: &'static Algorithm,
-        rng: &dyn SecureRandom,
-    ) -> Result<Self, Unspecified> {
-        Ok(Self(PrivateKey::generate_for_test(alg, rng)?))
+    pub fn generate_for_test(rng: &dyn crate::rand::SecureRandom) -> Result<Self, Unspecified> {
+        Ok(Self(PrivateKey::generate_for_test(rng)?))
     }
 
     /// Computes the public key from the private key.
@@ -57,21 +41,12 @@ impl EphemeralPrivateKey {
     pub fn compute_public_key(&self) -> Result<PublicKey, Unspecified> {
         self.0.compute_public_key()
     }
-
-    /// The algorithm for the private key.
-    #[inline]
-    #[must_use]
-    pub fn algorithm(&self) -> &'static Algorithm {
-        self.0.algorithm()
-    }
 }
 
 /// Performs a key agreement with an ephemeral private key and the given public
 /// key.
 ///
-/// `my_private_key` is the ephemeral private key to use. Since it is moved, it
-/// will not be usable after calling `agree_ephemeral`, thus guaranteeing that
-/// the key is used for only one key agreement.
+/// `my_private_key` is the ephemeral private key to use.
 ///
 /// `peer_public_key` is the peer's public key. `agree_ephemeral` will return
 /// `Err(error_value)` if it does not match `my_private_key's` algorithm/curve.
@@ -99,9 +74,9 @@ impl EphemeralPrivateKey {
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::missing_panics_doc)]
 #[allow(clippy::module_name_repetitions)]
-pub fn agree_ephemeral<B: AsRef<[u8]>, F, R, E>(
-    my_private_key: EphemeralPrivateKey,
-    peer_public_key: &UnparsedPublicKey<B>,
+pub fn agree_ephemeral<F, R, E>(
+    my_private_key: &EphemeralPrivateKey,
+    peer_public_key: &UnparsedPublicKey,
     error_value: E,
     kdf: F,
 ) -> Result<R, E>
@@ -116,7 +91,7 @@ mod tests {
     use std::format;
     use std::vec::Vec;
 
-    use crate::agreement::{AlgorithmID, PublicKey};
+    use crate::agreement::PublicKey;
     use crate::error::Unspecified;
     use crate::{agreement, rand, test, test_file};
 
@@ -173,12 +148,12 @@ mod tests {
 
     #[test]
     fn test_agreement_x25519() {
-        let alg = &agreement::X25519;
         let peer_public = agreement::UnparsedPublicKey::new(
-            alg,
             test::from_dirty_hex(
                 "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
-            ),
+            )
+            .try_into()
+            .unwrap(),
         );
 
         let my_private = test::from_dirty_hex(
@@ -187,7 +162,7 @@ mod tests {
 
         let my_private = {
             let rng = test::rand::FixedSliceRandom { bytes: &my_private };
-            agreement::EphemeralPrivateKey::generate_for_test(alg, &rng).unwrap()
+            agreement::EphemeralPrivateKey::generate_for_test(&rng).unwrap()
         };
 
         let my_public = test::from_dirty_hex(
@@ -197,141 +172,15 @@ mod tests {
             "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
         );
 
-        assert_eq!(my_private.algorithm(), alg);
-
         let computed_public = my_private.compute_public_key().unwrap();
         assert_eq!(computed_public.as_ref(), &my_public[..]);
 
-        assert_eq!(computed_public.algorithm(), alg);
-
-        let result = agreement::agree_ephemeral(my_private, &peer_public, (), |key_material| {
+        let result = agreement::agree_ephemeral(&my_private, &peer_public, (), |key_material| {
             assert_eq!(key_material, &output[..]);
             Ok(())
         });
         assert_eq!(result, Ok(()));
     }
-
-    // #[test]
-    // fn test_agreement_ecdh_p256() {
-    //     let alg = &agreement::ECDH_P256;
-    //     let peer_public = agreement::UnparsedPublicKey::new(
-    //         alg,
-    //         test::from_dirty_hex(
-    //             "04D12DFB5289C8D4F81208B70270398C342296970A0BCCB74C736FC7554494BF6356FBF3CA366CC23E8157854C13C58D6AAC23F046ADA30F8353E74F33039872AB",
-    //         ),
-    //     );
-    //     assert_eq!(peer_public.algorithm(), alg);
-    //     assert_eq!(peer_public.bytes(), &peer_public.bytes);
-
-    //     let my_private = test::from_dirty_hex(
-    //         "C88F01F510D9AC3F70A292DAA2316DE544E9AAB8AFE84049C62A9C57862D1433",
-    //     );
-
-    //     let my_private = {
-    //         let rng = test::rand::FixedSliceRandom { bytes: &my_private };
-    //         agreement::EphemeralPrivateKey::generate_for_test(alg, &rng).unwrap()
-    //     };
-
-    //     let my_public = test::from_dirty_hex(
-    //         "04DAD0B65394221CF9B051E1FECA5787D098DFE637FC90B9EF945D0C37725811805271A0461CDB8252D61F1C456FA3E59AB1F45B33ACCF5F58389E0577B8990BB3",
-    //     );
-    //     let output = test::from_dirty_hex(
-    //         "D6840F6B42F6EDAFD13116E0E12565202FEF8E9ECE7DCE03812464D04B9442DE",
-    //     );
-
-    //     assert_eq!(my_private.algorithm(), alg);
-
-    //     let computed_public = my_private.compute_public_key().unwrap();
-    //     assert_eq!(computed_public.as_ref(), &my_public[..]);
-
-    //     assert_eq!(computed_public.algorithm(), alg);
-
-    //     let result = agreement::agree_ephemeral(my_private, &peer_public, (), |key_material| {
-    //         assert_eq!(key_material, &output[..]);
-    //         Ok(())
-    //     });
-    //     assert_eq!(result, Ok(()));
-    // }
-
-    // #[test]
-    // fn test_agreement_ecdh_p384() {
-    //     let alg = &agreement::ECDH_P384;
-    //     let peer_public = agreement::UnparsedPublicKey::new(
-    //         alg,
-    //         test::from_dirty_hex(
-    //             "04E558DBEF53EECDE3D3FCCFC1AEA08A89A987475D12FD950D83CFA41732BC509D0D1AC43A0336DEF96FDA41D0774A3571DCFBEC7AACF3196472169E838430367F66EEBE3C6E70C416DD5F0C68759DD1FFF83FA40142209DFF5EAAD96DB9E6386C",
-    //         ),
-    //     );
-
-    //     let my_private = test::from_dirty_hex(
-    //         "099F3C7034D4A2C699884D73A375A67F7624EF7C6B3C0F160647B67414DCE655E35B538041E649EE3FAEF896783AB194",
-    //     );
-
-    //     let my_private = {
-    //         let rng = test::rand::FixedSliceRandom { bytes: &my_private };
-    //         agreement::EphemeralPrivateKey::generate_for_test(alg, &rng).unwrap()
-    //     };
-
-    //     let my_public = test::from_dirty_hex(
-    //         "04667842D7D180AC2CDE6F74F37551F55755C7645C20EF73E31634FE72B4C55EE6DE3AC808ACB4BDB4C88732AEE95F41AA9482ED1FC0EEB9CAFC4984625CCFC23F65032149E0E144ADA024181535A0F38EEB9FCFF3C2C947DAE69B4C634573A81C",
-    //     );
-    //     let output = test::from_dirty_hex(
-    //         "11187331C279962D93D604243FD592CB9D0A926F422E47187521287E7156C5C4D603135569B9E9D09CF5D4A270F59746",
-    //     );
-
-    //     assert_eq!(my_private.algorithm(), alg);
-
-    //     let computed_public = my_private.compute_public_key().unwrap();
-    //     assert_eq!(computed_public.as_ref(), &my_public[..]);
-
-    //     assert_eq!(computed_public.algorithm(), alg);
-
-    //     let result = agreement::agree_ephemeral(my_private, &peer_public, (), |key_material| {
-    //         assert_eq!(key_material, &output[..]);
-    //         Ok(())
-    //     });
-    //     assert_eq!(result, Ok(()));
-    // }
-
-    // #[test]
-    // fn test_agreement_ecdh_p521() {
-    //     let alg = &agreement::ECDH_P521;
-    //     let peer_public = agreement::UnparsedPublicKey::new(
-    //         alg,
-    //         test::from_dirty_hex(
-    //             "0401a32099b02c0bd85371f60b0dd20890e6c7af048c8179890fda308b359dbbc2b7a832bb8c6526c4af99a7ea3f0b3cb96ae1eb7684132795c478ad6f962e4a6f446d017627357b39e9d7632a1370b3e93c1afb5c851b910eb4ead0c9d387df67cde85003e0e427552f1cd09059aad0262e235cce5fba8cedc4fdc1463da76dcd4b6d1a46",
-    //         ),
-    //     );
-
-    //     let my_private = test::from_dirty_hex(
-    //         "00df14b1f1432a7b0fb053965fd8643afee26b2451ecb6a8a53a655d5fbe16e4c64ce8647225eb11e7fdcb23627471dffc5c2523bd2ae89957cba3a57a23933e5a78",
-    //     );
-
-    //     let my_private = {
-    //         let rng = test::rand::FixedSliceRandom { bytes: &my_private };
-    //         agreement::EphemeralPrivateKey::generate_for_test(alg, &rng).unwrap()
-    //     };
-
-    //     let my_public = test::from_dirty_hex(
-    //         "04004e8583bbbb2ecd93f0714c332dff5ab3bc6396e62f3c560229664329baa5138c3bb1c36428abd4e23d17fcb7a2cfcc224b2e734c8941f6f121722d7b6b9415457601cf0874f204b0363f020864672fadbf87c8811eb147758b254b74b14fae742159f0f671a018212bbf25b8519e126d4cad778cfff50d288fd39ceb0cac635b175ec0",
-    //     );
-    //     let output = test::from_dirty_hex(
-    //         "01aaf24e5d47e4080c18c55ea35581cd8da30f1a079565045d2008d51b12d0abb4411cda7a0785b15d149ed301a3697062f42da237aa7f07e0af3fd00eb1800d9c41",
-    //     );
-
-    //     assert_eq!(my_private.algorithm(), alg);
-
-    //     let computed_public = my_private.compute_public_key().unwrap();
-    //     assert_eq!(computed_public.as_ref(), &my_public[..]);
-
-    //     assert_eq!(computed_public.algorithm(), alg);
-
-    //     let result = agreement::agree_ephemeral(my_private, &peer_public, (), |key_material| {
-    //         assert_eq!(key_material, &output[..]);
-    //         Ok(())
-    //     });
-    //     assert_eq!(result, Ok(()));
-    // }
 
     #[test]
     fn agreement_traits() {
@@ -340,73 +189,50 @@ mod tests {
         let rng = rand::SystemRandom::new();
 
         let ephemeral_private_key =
-            agreement::EphemeralPrivateKey::generate_for_test(&agreement::X25519, &rng).unwrap();
+            agreement::EphemeralPrivateKey::generate_for_test(&rng).unwrap();
 
         test::compile_time_assert_send::<agreement::EphemeralPrivateKey>();
         test::compile_time_assert_sync::<agreement::EphemeralPrivateKey>();
 
         assert_eq!(
             format!("{:?}", &ephemeral_private_key),
-            "EphemeralPrivateKey { algorithm: Algorithm { curve: Curve25519 } }"
+            "EphemeralPrivateKey"
         );
     }
 
     fn check_computed_public_key(
-        algorithm: &AlgorithmID,
         expected_format: &str,
         expected_public_key_bytes: &[u8],
         computed_public: &PublicKey,
     ) {
-        match (algorithm, expected_format) {
-            (_, "X509") => {
-                // let der = AsDer::<PublicKeyX509Der>::as_der(computed_public)
-                //     .expect("serialize to uncompressed format");
-                // assert_eq!(
-                //     expected_public_key_bytes,
-                //     der.as_ref(),
-                //     "hex: {:x?}",
-                //     der.as_ref()
-                // );
-            }
-            // (
-            //     AlgorithmID::ECDH_P256 | AlgorithmID::ECDH_P384 | AlgorithmID::ECDH_P521,
-            //     "COMPRESSED",
-            // ) => {
-            //     let bin = AsBigEndian::<EcPublicKeyCompressedBin>::as_be_bytes(computed_public)
-            //         .expect("serialize to compressed format");
-            //     assert_eq!(expected_public_key_bytes, bin.as_ref());
-            // }
-            // (
-            //     AlgorithmID::ECDH_P256 | AlgorithmID::ECDH_P384 | AlgorithmID::ECDH_P521,
-            //     "UNCOMPRESSED" | "",
-            // ) => {
-            //     let bin = AsBigEndian::<EcPublicKeyUncompressedBin>::as_be_bytes(computed_public)
-            //         .expect("serialize to uncompressed format");
-            //     assert_eq!(expected_public_key_bytes, bin.as_ref());
-            //     assert_eq!(expected_public_key_bytes, computed_public.as_ref());
-            // }
-            (AlgorithmID::X25519, "") => {
+        match expected_format {
+            "X509" => {}
+            "" => {
                 assert_eq!(expected_public_key_bytes, computed_public.as_ref());
             }
-            (ai, pf) => {
-                panic!("Unexpected PeerFormat={pf:?} for {ai:?}")
+            pf => {
+                panic!("Unexpected PeerFormat={pf:?}")
             }
         }
     }
 
     #[test]
     fn agreement_agree_ephemeral() {
-        let rng = rand::SystemRandom::new();
-
         test::run(
             test_file!("data/agreement_tests.txt"),
             |section, test_case| {
                 assert_eq!(section, "");
 
                 let curve_name = test_case.consume_string("Curve");
-                let alg = alg_from_curve_name(&curve_name);
+                assert_eq!(curve_name, "X25519");
+
+                let mut peer_public = test_case.consume_bytes("PeerQ");
+                if peer_public.len() != 32 {
+                    peer_public = [0; 32].to_vec();
+                }
+
                 let peer_public =
-                    agreement::UnparsedPublicKey::new(alg, test_case.consume_bytes("PeerQ"));
+                    agreement::UnparsedPublicKey::new(peer_public.try_into().unwrap());
 
                 let myq_format = test_case
                     .consume_optional_string("MyQFormat")
@@ -418,21 +244,17 @@ mod tests {
                         let rng = test::rand::FixedSliceRandom {
                             bytes: &my_private_bytes,
                         };
-                        agreement::EphemeralPrivateKey::generate_for_test(alg, &rng)?
+                        agreement::EphemeralPrivateKey::generate_for_test(&rng)?
                     };
                     let my_public = test_case.consume_bytes("MyQ");
                     let output = test_case.consume_bytes("Output");
 
-                    assert_eq!(my_private.algorithm(), alg);
-
                     let computed_public = my_private.compute_public_key().unwrap();
 
-                    check_computed_public_key(&alg.id, &myq_format, &my_public, &computed_public);
-
-                    assert_eq!(my_private.algorithm(), alg);
+                    check_computed_public_key(&myq_format, &my_public, &computed_public);
 
                     let result =
-                        agreement::agree_ephemeral(my_private, &peer_public, (), |key_material| {
+                        agreement::agree_ephemeral(&my_private, &peer_public, (), |key_material| {
                             assert_eq!(key_material, &output[..]);
                             Ok(())
                         });
@@ -449,9 +271,9 @@ mod tests {
                          public key is invalid."
                         );
                     }
-                    let dummy_private_key = agreement::EphemeralPrivateKey::generate(alg, &rng)?;
+                    let dummy_private_key = agreement::EphemeralPrivateKey::generate()?;
                     assert!(agreement::agree_ephemeral(
-                        dummy_private_key,
+                        &dummy_private_key,
                         &peer_public,
                         (),
                         kdf_not_called
@@ -473,24 +295,15 @@ mod tests {
         }
     }
 
-    fn alg_from_curve_name(curve_name: &str) -> &'static agreement::Algorithm {
-        if curve_name == "X25519" {
-            &agreement::X25519
-        } else {
-            panic!("Unsupported curve: {curve_name}");
-        }
-    }
-
     fn x25519(private_key: &[u8], public_key: &[u8]) -> Vec<u8> {
         try_x25519(private_key, public_key).unwrap()
     }
 
     fn try_x25519(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, Unspecified> {
         let rng = test::rand::FixedSliceRandom { bytes: private_key };
-        let private_key =
-            agreement::EphemeralPrivateKey::generate_for_test(&agreement::X25519, &rng)?;
-        let public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, public_key);
-        agreement::agree_ephemeral(private_key, &public_key, Unspecified, |agreed_value| {
+        let private_key = agreement::EphemeralPrivateKey::generate_for_test(&rng)?;
+        let public_key = agreement::UnparsedPublicKey::new(public_key.try_into().unwrap());
+        agreement::agree_ephemeral(&private_key, &public_key, Unspecified, |agreed_value| {
             Ok(Vec::from(agreed_value))
         })
     }

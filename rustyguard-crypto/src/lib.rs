@@ -2,10 +2,10 @@
 
 use core::{net::SocketAddr, ops::ControlFlow};
 
-use rustyguard_aws_lc::agreement::PublicKey;
-pub use rustyguard_aws_lc::agreement::{PrivateKey, UnparsedPublicKey, X25519};
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
+use rustyguard_aws_lc::agreement::PublicKey;
+pub use rustyguard_aws_lc::agreement::{PrivateKey, UnparsedPublicKey};
 
 use rand_core::{CryptoRng, RngCore};
 use rustyguard_types::{
@@ -214,7 +214,7 @@ mac_protected!(HandshakeResp, MSG_SECOND);
 
 pub struct StaticPeerConfig {
     /// Peer's public key.
-    pub key: UnparsedPublicKey<[u8; 32]>,
+    pub key: UnparsedPublicKey,
     /// Peer's preshared key.
     pub preshared_key: Key,
     /// Cached mac1_key: calculated using `mac1_key(&self.key)`
@@ -238,7 +238,7 @@ pub struct StaticInitiatorConfig {
 
 impl StaticPeerConfig {
     pub fn new(
-        key: UnparsedPublicKey<[u8; 32]>,
+        key: UnparsedPublicKey,
         preshared_key: Option<Key>,
         endpoint: Option<SocketAddr>,
     ) -> Self {
@@ -270,8 +270,8 @@ pub struct DecryptedHandshakeInit(HandshakeInit);
 
 impl DecryptedHandshakeInit {
     #[inline(always)]
-    pub fn static_key(&self) -> UnparsedPublicKey<[u8; 32]> {
-        UnparsedPublicKey::new(&X25519, self.0.static_key.msg)
+    pub fn static_key(&self) -> UnparsedPublicKey {
+        UnparsedPublicKey::new(self.0.static_key.msg)
     }
     #[inline(always)]
     pub fn timestamp(&self) -> &[u8; 12] {
@@ -356,13 +356,13 @@ pub fn decrypt_handshake_init<'m>(
     hs.mix_hash(&init.ephemeral_key);
 
     // -> es:
-    let epk_i = UnparsedPublicKey::new(&X25519, init.ephemeral_key);
+    let epk_i = UnparsedPublicKey::new(init.ephemeral_key);
     let k = hs.mix_key_dh(&receiver.private_key, &epk_i);
 
     unsafe_log!("decrypting static key");
     // -> s:
     let spk_i = init.static_key.decrypt_and_hash(hs, &k)?;
-    let spk_i = UnparsedPublicKey::new(&X25519, *spk_i);
+    let spk_i = UnparsedPublicKey::new(*spk_i);
     unsafe_log!("decrypted public key {spk_i:?}");
 
     // -> ss:
@@ -393,11 +393,11 @@ pub fn encrypt_handshake_resp(
     hs.mix_hash(epk_r.as_ref());
 
     // <- ee
-    let epk_i = UnparsedPublicKey::new(&X25519, data.0.ephemeral_key);
+    let epk_i = UnparsedPublicKey::new(data.0.ephemeral_key);
     hs.mix_dh(esk_r, &epk_i);
 
     // <- se
-    let spk_i = UnparsedPublicKey::new(&X25519, data.0.static_key.msg);
+    let spk_i = UnparsedPublicKey::new(data.0.static_key.msg);
     hs.mix_dh(esk_r, &spk_i);
 
     // <- psk
@@ -436,7 +436,7 @@ pub fn decrypt_handshake_resp(
 
     // <- e:
     // wireguard goes off-spec here with mix-chain.
-    let epk_r = UnparsedPublicKey::new(&X25519, resp.ephemeral_key);
+    let epk_r = UnparsedPublicKey::new(resp.ephemeral_key);
     hs.mix_chain(epk_r.bytes());
     hs.mix_hash(epk_r.bytes());
 
@@ -458,9 +458,9 @@ pub fn decrypt_handshake_resp(
 
 #[cfg(test)]
 mod tests {
-    use rustyguard_aws_lc::agreement::{PrivateKey, UnparsedPublicKey, X25519};
     use chacha20poly1305::Key;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use rustyguard_aws_lc::agreement::{PrivateKey, UnparsedPublicKey};
     use tai64::{Tai64, Tai64N};
     use zerocopy::AsBytes;
 
@@ -470,17 +470,14 @@ mod tests {
         StaticPeerConfig,
     };
 
-    fn pk(s: &PrivateKey) -> UnparsedPublicKey<[u8; 32]> {
-        UnparsedPublicKey::new(
-            &X25519,
-            s.compute_public_key().unwrap().as_ref().try_into().unwrap(),
-        )
+    fn pk(s: &PrivateKey) -> UnparsedPublicKey {
+        UnparsedPublicKey::new(s.compute_public_key().unwrap().as_ref().try_into().unwrap())
     }
 
     fn gen_sk(r: &mut StdRng) -> PrivateKey {
         let mut b = [0u8; 32];
         r.fill_bytes(&mut b);
-        PrivateKey::from_private_key(&X25519, &b).unwrap()
+        PrivateKey::from_private_key(&b).unwrap()
     }
 
     #[test]

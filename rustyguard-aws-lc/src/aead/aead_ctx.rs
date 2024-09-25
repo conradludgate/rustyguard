@@ -9,7 +9,9 @@ use crate::cipher::chacha;
 // use crate::cipher::aes::{AES_128_KEY_LEN, AES_256_KEY_LEN};
 use crate::error::Unspecified;
 use crate::ptr::LcPtr;
-use aws_lc::{EVP_AEAD_CTX_init, EVP_AEAD_CTX_zero, EVP_aead_chacha20_poly1305, OPENSSL_malloc, EVP_AEAD_CTX};
+use aws_lc::{
+    EVP_AEAD_CTX_init, EVP_AEAD_CTX_zero, EVP_aead_chacha20_poly1305, OPENSSL_malloc, EVP_AEAD_CTX,
+};
 
 // pub(crate) enum AeadDirection {
 //     Open,
