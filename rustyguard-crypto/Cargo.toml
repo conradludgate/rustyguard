@@ -11,12 +11,10 @@ rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 blake2 = { version = "0.10", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false }
 hmac = { version = "0.12" }
-x25519-dalek = { version = "2.0", features = ["static_secrets", "reusable_secrets"] }
-
 aws-lc-rs = "1.9.0"
 
 # crypto adjacent
-zeroize = "1.8"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 # other helpful things
 rand_core = { version = "0.6", default-features = false }
