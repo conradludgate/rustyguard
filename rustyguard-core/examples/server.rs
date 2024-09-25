@@ -42,7 +42,7 @@ fn main() {
             private_key
         }
         None => {
-            let private_key = PrivateKey::generate().unwrap();
+            let private_key = PrivateKey::generate(&mut OsRng).unwrap();
             let c = private_key.as_bytes().unwrap();
             println!("private key: {}", Base64::encode_string(c.as_ref()));
             println!(

@@ -1047,6 +1047,8 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-sys",
  "hex",
+ "rand",
+ "rand_core",
  "regex",
  "zeroize",
 ]

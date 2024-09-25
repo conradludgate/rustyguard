@@ -18,10 +18,12 @@ features = ["unstable"]
 
 [dependencies]
 aws-lc-sys = { version = "0.21.0" }
+rand_core = "0.6"
 zeroize = "1.7"
 
 [dev-dependencies]
 hex = "0.4.3"
+rand = "0.8"
 regex = "1.10.6"
 
 [lints.rust]

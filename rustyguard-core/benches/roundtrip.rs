@@ -38,8 +38,8 @@ fn roundtrip(b: Bencher) {
     let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
 
     b.with_inputs(|| {
-        let ssk_i = PrivateKey::generate().unwrap();
-        let ssk_r = PrivateKey::generate().unwrap();
+        let ssk_i = PrivateKey::generate(&mut thread_rng()).unwrap();
+        let ssk_r = PrivateKey::generate(&mut thread_rng()).unwrap();
         let spk_i = pk(&ssk_i);
         let spk_r = pk(&ssk_r);
         let mut psk = Key::default();

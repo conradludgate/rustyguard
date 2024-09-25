@@ -26,6 +26,12 @@ impl From<core::array::TryFromSliceError> for Unspecified {
     }
 }
 
+impl From<rand_core::Error> for Unspecified {
+    fn from(_: rand_core::Error) -> Self {
+        Self
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct KeyRejected(&'static str);
 

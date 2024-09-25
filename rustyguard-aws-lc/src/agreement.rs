@@ -6,15 +6,17 @@
 mod ephemeral;
 
 pub use ephemeral::{agree_ephemeral, EphemeralPrivateKey};
+use rand_core::{CryptoRng, RngCore};
+use zeroize::Zeroizing;
 
 use crate::error::{KeyRejected, Unspecified};
 use crate::hex;
 use crate::ptr::LcPtr;
 use aws_lc::{
-    CBS_init, EVP_PKEY_CTX_new_id, EVP_PKEY_derive, EVP_PKEY_derive_init, EVP_PKEY_derive_set_peer,
-    EVP_PKEY_get_raw_private_key, EVP_PKEY_get_raw_public_key, EVP_PKEY_id, EVP_PKEY_keygen,
-    EVP_PKEY_keygen_init, EVP_PKEY_new_raw_private_key, EVP_PKEY_new_raw_public_key,
-    EVP_parse_public_key, CBS, EVP_PKEY, EVP_PKEY_X25519,
+    CBS_init, EVP_PKEY_derive, EVP_PKEY_derive_init, EVP_PKEY_derive_set_peer,
+    EVP_PKEY_get_raw_private_key, EVP_PKEY_get_raw_public_key, EVP_PKEY_id,
+    EVP_PKEY_new_raw_private_key, EVP_PKEY_new_raw_public_key, EVP_parse_public_key, CBS, EVP_PKEY,
+    EVP_PKEY_X25519,
 };
 
 use core::fmt;
@@ -57,8 +59,10 @@ impl PrivateKey {
     ///
     /// # Errors
     /// `error::Unspecified` when operation fails due to internal error.
-    pub fn generate() -> Result<Self, Unspecified> {
-        Ok(Self::new(generate_x25519()?))
+    pub fn generate(rng: &mut (impl RngCore + CryptoRng)) -> Result<Self, Unspecified> {
+        let mut b = Zeroizing::new([0; 32]);
+        rng.try_fill_bytes(&mut *b)?;
+        Self::from_x25519_private_key(&b)
     }
 
     /// Constructs an ECDH key from private key bytes
@@ -93,15 +97,6 @@ impl PrivateKey {
         Ok(buffer)
     }
 
-    #[cfg(test)]
-    #[allow(clippy::missing_errors_doc, missing_docs)]
-    pub fn generate_for_test(rng: &dyn crate::rand::SecureRandom) -> Result<Self, Unspecified> {
-        let mut priv_key = [0u8; 32];
-        rng.fill(&mut priv_key)?;
-        Self::from_x25519_private_key(&priv_key)
-    }
-
-    #[cfg(test)]
     fn from_x25519_private_key(priv_key: &[u8; 32]) -> Result<Self, Unspecified> {
         let pkey = LcPtr::new(unsafe {
             EVP_PKEY_new_raw_private_key(
@@ -140,24 +135,6 @@ impl PrivateKey {
             public_key: buffer,
         })
     }
-}
-
-pub(crate) fn generate_x25519() -> Result<LcPtr<EVP_PKEY>, Unspecified> {
-    let mut pkey_ctx = LcPtr::new(unsafe { EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, null_mut()) })?;
-
-    if 1 != unsafe { EVP_PKEY_keygen_init(*pkey_ctx.as_mut()) } {
-        return Err(Unspecified);
-    }
-
-    let mut pkey: *mut EVP_PKEY = null_mut();
-
-    if 1 != (unsafe { EVP_PKEY_keygen(*pkey_ctx.as_mut(), &mut pkey) }) {
-        return Err(Unspecified);
-    }
-
-    let pkey = LcPtr::new(pkey)?;
-
-    Ok(pkey)
 }
 
 const MAX_PUBLIC_KEY_LEN: usize = 32;
@@ -344,8 +321,11 @@ fn try_parse_x25519_subject_public_key_info_bytes(
 
 #[cfg(test)]
 mod tests {
+    use rand::thread_rng;
+    use rand_core::OsRng;
+
     use crate::agreement::{agree, PrivateKey, PublicKey, UnparsedPublicKey};
-    use crate::{rand, test};
+    use crate::test;
 
     use std::vec::Vec;
     use std::{format, vec};
@@ -365,8 +345,8 @@ mod tests {
         );
 
         let my_private = {
-            let rng = test::rand::FixedSliceRandom { bytes: &my_private };
-            PrivateKey::generate_for_test(&rng).unwrap()
+            let mut rng = test::rand::FixedSliceRandom { bytes: &my_private };
+            PrivateKey::generate(&mut rng).unwrap()
         };
 
         let my_public = test::from_dirty_hex(
@@ -411,15 +391,14 @@ mod tests {
         use regex;
         use regex::Regex;
 
-        let rng = rand::SystemRandom::new();
-        let private_key = PrivateKey::generate_for_test(&rng).unwrap();
+        let private_key = PrivateKey::generate(&mut OsRng).unwrap();
 
         test::compile_time_assert_send::<PrivateKey>();
         test::compile_time_assert_sync::<PrivateKey>();
 
         assert_eq!(format!("{:?}", &private_key), "PrivateKey");
 
-        let ephemeral_private_key = PrivateKey::generate_for_test(&rng).unwrap();
+        let ephemeral_private_key = PrivateKey::generate(&mut OsRng).unwrap();
 
         test::compile_time_assert_send::<PrivateKey>();
         test::compile_time_assert_sync::<PrivateKey>();
@@ -454,8 +433,8 @@ mod tests {
 
     #[test]
     fn test_agreement_random() {
-        let peer_private = PrivateKey::generate().unwrap();
-        let my_private = PrivateKey::generate().unwrap();
+        let peer_private = PrivateKey::generate(&mut thread_rng()).unwrap();
+        let my_private = PrivateKey::generate(&mut thread_rng()).unwrap();
 
         let peer_public_keys =
             public_key_formats_helper(&peer_private.compute_public_key().unwrap());
@@ -492,7 +471,7 @@ mod tests {
 
     #[test]
     fn private_key_drop() {
-        let private_key = PrivateKey::generate().unwrap();
+        let private_key = PrivateKey::generate(&mut thread_rng()).unwrap();
         let public_key = private_key.compute_public_key().unwrap();
         // PublicKey maintains a reference counted pointer to private keys EVP_PKEY so we test that with drop
         drop(private_key);

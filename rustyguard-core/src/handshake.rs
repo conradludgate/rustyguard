@@ -3,7 +3,7 @@ use core::ops::ControlFlow;
 
 use crate::time::{TimerEntry, TimerEntryType};
 use alloc::boxed::Box;
-use rand::{Rng, RngCore};
+use rand::Rng;
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
     HandshakeState, HasMac, PrivateKey,
@@ -94,14 +94,7 @@ impl Sessions {
         let session_id = *vacant.key();
 
         // complete handshake
-        let esk_r = {
-            let mut esk_r = [0u8; 32];
-            state.rng.fill_bytes(&mut esk_r);
-
-            let sk = PrivateKey::from_private_key(&esk_r).unwrap();
-            esk_r.zeroize();
-            sk
-        };
+        let esk_r = PrivateKey::generate(&mut state.rng).unwrap();
 
         let response = encrypt_handshake_resp(
             &mut hs,
@@ -279,15 +272,7 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeI
     let sender = *vacant.key();
     peer.current_handshake = Some(sender);
 
-    let esk_i = {
-        let mut esk_i = [0u8; 32];
-        state.rng.fill_bytes(&mut esk_i);
-
-        let sk = PrivateKey::from_private_key(&esk_i).unwrap();
-        esk_i.zeroize();
-        sk
-    };
-
+    let esk_i = PrivateKey::generate(&mut state.rng).unwrap();
     let handshake = SessionHandshake {
         esk_i,
         state: HandshakeState::default(),

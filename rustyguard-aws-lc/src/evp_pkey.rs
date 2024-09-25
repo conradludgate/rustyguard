@@ -1,5 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR ISC
+// Modifications copyright Conrad Ludgate. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0 OR ISC
 
 use crate::ptr::LcPtr;
 use aws_lc::{EVP_PKEY_CTX_new, EVP_PKEY_up_ref, EVP_PKEY, EVP_PKEY_CTX};

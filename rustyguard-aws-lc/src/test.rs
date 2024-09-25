@@ -416,24 +416,10 @@ fn parse_test_case(
 /// Deterministic implementations of `ring::rand::SecureRandom`.
 ///
 /// These are only used for testing KATs where a random number should be generated.
+#[cfg(test)]
 pub mod rand {
-    #[cfg(test)]
-    use crate::error;
-
-    /// An implementation of `SecureRandom` that always fills the output slice
-    /// with the given byte.
-    #[derive(Debug)]
-    pub struct FixedByteRandom {
-        pub byte: u8,
-    }
-
-    #[cfg(test)]
-    impl crate::rand::SecureRandom for FixedByteRandom {
-        fn fill(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
-            dest.fill(self.byte);
-            Ok(())
-        }
-    }
+    use rand_core::impls;
+    use rand_core::{CryptoRng, RngCore};
 
     /// An implementation of `SecureRandom` that always fills the output slice
     /// with the slice in `bytes`. The length of the slice given to `slice`
@@ -443,120 +429,30 @@ pub mod rand {
         pub bytes: &'a [u8],
     }
 
-    #[cfg(test)]
-    impl crate::rand::SecureRandom for FixedSliceRandom<'_> {
-        #[inline]
-        fn fill(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
+    impl RngCore for FixedSliceRandom<'_> {
+        fn next_u32(&mut self) -> u32 {
+            impls::next_u32_via_fill(self)
+        }
+        fn next_u64(&mut self) -> u64 {
+            impls::next_u64_via_fill(self)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
             dest.copy_from_slice(self.bytes);
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+            self.fill_bytes(dest);
             Ok(())
         }
     }
-
-    /// An implementation of `SecureRandom` where each slice in `bytes` is a
-    /// test vector for one call to `fill()`. *Not thread-safe.*
-    ///
-    /// The first slice in `bytes` is the output for the first call to
-    /// `fill()`, the second slice is the output for the second call to
-    /// `fill()`, etc. The output slice passed to `fill()` must have exactly
-    /// the length of the corresponding entry in `bytes`. `current` must be
-    /// initialized to zero. `fill()` must be called exactly once for each
-    /// entry in `bytes`.
-    #[derive(Debug)]
-    pub struct FixedSliceSequenceRandom<'a> {
-        /// The value.
-        pub bytes: &'a [&'a [u8]],
-        pub current: core::cell::UnsafeCell<usize>,
-    }
-
-    #[cfg(test)]
-    impl crate::rand::SecureRandom for FixedSliceSequenceRandom<'_> {
-        fn fill(&self, dest: &mut [u8]) -> Result<(), error::Unspecified> {
-            let current = unsafe { *self.current.get() };
-            let bytes = self.bytes[current];
-            dest.copy_from_slice(bytes);
-            // Remember that we returned this slice and prepare to return
-            // the next one, if any.
-            unsafe { *self.current.get() += 1 };
-            Ok(())
-        }
-    }
-
-    impl Drop for FixedSliceSequenceRandom<'_> {
-        fn drop(&mut self) {
-            // Ensure that `fill()` was called exactly the right number of
-            // times.
-            assert_eq!(unsafe { *self.current.get() }, self.bytes.len());
-        }
-    }
+    impl CryptoRng for FixedSliceRandom<'_> {}
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::rand::SecureRandom;
-    use crate::test::rand::{FixedByteRandom, FixedSliceRandom, FixedSliceSequenceRandom};
     use crate::test::{from_dirty_hex, to_hex_upper};
     use crate::{error, test};
-    use core::cell::UnsafeCell;
-
-    #[test]
-    fn fixed_byte_random() {
-        let fbr = FixedByteRandom { byte: 42 };
-        let mut bs = [0u8; 42];
-        fbr.fill(&mut bs).expect("filled");
-        assert_eq!([42u8; 42], bs);
-    }
-
-    #[test]
-    fn fixed_slice_random() {
-        let fbr = FixedSliceRandom { bytes: &[42u8; 42] };
-        let mut bs = [0u8; 42];
-        fbr.fill(&mut bs).expect("fill");
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "source slice length (42) does not match destination slice length (0)"
-    )]
-    fn fixed_slice_random_length_mismatch() {
-        let fbr = FixedSliceRandom { bytes: &[42u8; 42] };
-        let _: Result<(), error::Unspecified> = fbr.fill(&mut []);
-    }
-
-    #[test]
-    fn fixed_slice_sequence_random() {
-        let fbr = FixedSliceSequenceRandom {
-            bytes: &[&[7u8; 7], &[42u8; 42]],
-            current: UnsafeCell::new(0),
-        };
-        let mut bs_one = [0u8; 7];
-        fbr.fill(&mut bs_one).expect("fill");
-        assert_eq!([7u8; 7], bs_one);
-        let mut bs_two = [42u8; 42];
-        fbr.fill(&mut bs_two).expect("filled");
-        assert_eq!([42u8; 42], bs_two);
-    }
-
-    #[test]
-    #[should_panic(expected = "index out of bounds: the len is 0 but the index is 0")]
-    fn fixed_slice_sequence_random_no_remaining() {
-        let fbr = FixedSliceSequenceRandom {
-            bytes: &[],
-            current: UnsafeCell::new(0),
-        };
-        let mut bs_one = [0u8; 7];
-        let _: Result<(), error::Unspecified> = fbr.fill(&mut bs_one);
-    }
-
-    // TODO: This test is causing a thread panic which prevents capture with should_panic
-    // #[test]
-    // #[should_panic]
-    // fn fixed_slice_sequence_random_length_mismatch() {
-    //     let fbr = FixedSliceSequenceRandom {
-    //         bytes: &[&[42u8; 42]],
-    //         current: UnsafeCell::new(0),
-    //     };
-    //     let _: Result<(), error::Unspecified> = fbr.fill(&mut []);
-    // }
 
     #[test]
     fn one_ok() {
