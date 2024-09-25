@@ -23,9 +23,9 @@ rand = { version = "0.8", features = ["getrandom"] }
 insta = "1.39.0"
 
 # server example
+rustyguard-aws-lc = { version = "0.1", path = "../rustyguard-aws-lc" }
 clap = { version = "4", features = ["derive"] }
 packet = "0.1"
-aws-lc-rs = "1.9.0"
 
 [[bench]]
 name = "roundtrip"

@@ -1,10 +1,9 @@
-use aws_lc_rs::agreement::{UnparsedPublicKey, X25519};
 use chacha20poly1305::Key;
 use divan::Bencher;
 use rand::{thread_rng, Rng, RngCore};
 use rustyguard_crypto::{
     decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, HandshakeState,
-    PrivateKey, StaticInitiatorConfig, StaticPeerConfig,
+    PrivateKey, StaticInitiatorConfig, StaticPeerConfig, UnparsedPublicKey, X25519,
 };
 use tai64::Tai64N;
 

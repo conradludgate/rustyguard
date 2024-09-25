@@ -92,19 +92,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4b4d0bd25bd0b74681c0ad21497610ce1b7c91b1022cd21c80c6fbdd9476b0"
 
 [[package]]
-name = "aws-lc-rs"
-version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f95446d919226d587817a7d21379e6eb099b97b45110a7f272a444ca5c54070"
-dependencies = [
- "aws-lc-sys",
- "mirai-annotations",
- "paste",
- "untrusted",
- "zeroize",
-]
-
-[[package]]
 name = "aws-lc-sys"
 version = "0.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,12 +194,13 @@ checksum = "a12916984aab3fa6e39d655a33e09c0071eb36d6ab3aea5c2d78551f1df6d952"
 
 [[package]]
 name = "cc"
-version = "1.1.6"
+version = "1.0.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2aba8f4e9906c7ce3c73463f62a7f0c65183ada1a2d47e397cc8810827f9694f"
+checksum = "5208975e568d83b6b05cc0a063c8e7e9acc2b43bee6da15616a5b73e109d7437"
 dependencies = [
  "jobserver",
  "libc",
+ "once_cell",
 ]
 
 [[package]]
@@ -564,6 +552,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d231dfb89cfffdbc30e7fc41579ed6066ad03abda9e567ccafae602b97ec5024"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -574,11 +568,11 @@ dependencies = [
 
 [[package]]
 name = "home"
-version = "0.5.9"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3d1354bf6b7235cb4a0576c2619fd4ed18183f689b12b006a0ee7329eeff9a5"
+checksum = "5444c27eef6923071f7ebcc33e3444508466a76f7a2b93da00ed6e19f30c1ddb"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -762,12 +756,6 @@ dependencies = [
  "wasi",
  "windows-sys 0.48.0",
 ]
-
-[[package]]
-name = "mirai-annotations"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9be0862c1b3f26a88803c4a49de6889c10e608b3ee9344e6ef5b45fb37ad3d1"
 
 [[package]]
 name = "nix"
@@ -1054,10 +1042,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustyguard-aws-lc"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-sys",
+ "hex",
+ "regex",
+ "zeroize",
+]
+
+[[package]]
 name = "rustyguard-core"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "base64ct",
  "clap",
  "divan",
@@ -1066,6 +1063,7 @@ dependencies = [
  "insta",
  "packet",
  "rand",
+ "rustyguard-aws-lc",
  "rustyguard-crypto",
  "rustyguard-types",
  "rustyguard-utils",
@@ -1078,7 +1076,6 @@ dependencies = [
 name = "rustyguard-crypto"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "blake2",
  "chacha20poly1305",
  "divan",
@@ -1086,6 +1083,7 @@ dependencies = [
  "insta",
  "rand",
  "rand_core",
+ "rustyguard-aws-lc",
  "rustyguard-types",
  "rustyguard-utils",
  "tai64",
@@ -1097,7 +1095,6 @@ dependencies = [
 name = "rustyguard-tun"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
  "base64ct",
  "futures-core",
  "io-uring",
@@ -1108,6 +1105,7 @@ dependencies = [
  "packet",
  "rand",
  "rust-ini",
+ "rustyguard-aws-lc",
  "rustyguard-core",
  "rustyguard-crypto",
  "rustyguard-types",
@@ -1320,12 +1318,6 @@ dependencies = [
  "crypto-common",
  "subtle",
 ]
-
-[[package]]
-name = "untrusted"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "utf8parse"

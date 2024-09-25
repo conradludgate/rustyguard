@@ -1,9 +1,9 @@
-// #![no_std]
+#![no_std]
 
 use core::{net::SocketAddr, ops::ControlFlow};
 
-use aws_lc_rs::agreement::PublicKey;
-pub use aws_lc_rs::agreement::{PrivateKey, UnparsedPublicKey, X25519};
+use rustyguard_aws_lc::agreement::PublicKey;
+pub use rustyguard_aws_lc::agreement::{PrivateKey, UnparsedPublicKey, X25519};
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
 
@@ -17,8 +17,8 @@ use tai64::Tai64N;
 use zerocopy::{little_endian, transmute_mut, AsBytes, FromBytes, FromZeroes};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-// #[cfg(any(test, rustyguard_unsafe_logging))]
-// extern crate std;
+#[cfg(any(test, rustyguard_unsafe_logging))]
+extern crate std;
 
 macro_rules! unsafe_log {
     ($($t:tt)*) => {
@@ -458,7 +458,7 @@ pub fn decrypt_handshake_resp(
 
 #[cfg(test)]
 mod tests {
-    use aws_lc_rs::agreement::{PrivateKey, UnparsedPublicKey, X25519};
+    use rustyguard_aws_lc::agreement::{PrivateKey, UnparsedPublicKey, X25519};
     use chacha20poly1305::Key;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use tai64::{Tai64, Tai64N};

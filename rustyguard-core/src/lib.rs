@@ -1,8 +1,8 @@
-// #![no_std]
+#![no_std]
 #![forbid(unsafe_code)]
 
-// #[cfg(any(test, rustyguard_unsafe_logging))]
-// extern crate std;
+#[cfg(any(test, rustyguard_unsafe_logging))]
+extern crate std;
 
 macro_rules! unsafe_log {
     ($($t:tt)*) => {

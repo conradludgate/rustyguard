@@ -3,7 +3,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use aws_lc_rs::encoding::{AsBigEndian, Curve25519SeedBin};
+use rustyguard_aws_lc::encoding::{AsBigEndian, Curve25519SeedBin};
 use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};

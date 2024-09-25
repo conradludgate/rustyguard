@@ -1,11 +1,11 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
-use aws_lc_rs::encoding::{AsBigEndian, Curve25519SeedBin};
 use base64ct::{Base64, Encoding};
 use ini::Ini;
 use ipnet::Ipv4Net;
 use iptrie::{LCTrieMap, RTrieMap};
 use rand::rngs::OsRng;
+use rustyguard_aws_lc::encoding::{AsBigEndian, Curve25519SeedBin};
 use rustyguard_core::{
     Config, DataHeader, Message, PeerId, PrivateKey, Sessions, UnparsedPublicKey, X25519,
 };

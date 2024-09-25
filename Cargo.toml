@@ -5,6 +5,7 @@ members = [
     "rustyguard-tun",
     "rustyguard-types",
     "rustyguard-utils",
+    "rustyguard-aws-lc",
     "wg-proxy",
 ]
 resolver = "2"
