@@ -9,8 +9,8 @@ rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 rustyguard-aws-lc = { version = "0.1", path = "../rustyguard-aws-lc" }
 
 # crypto
+blake2s_simd = "1.0.2"
 blake2 = { version = "0.10", default-features = false }
-hmac = { version = "0.12" }
 
 # crypto adjacent
 zeroize = { version = "1.8", features = ["zeroize_derive"] }

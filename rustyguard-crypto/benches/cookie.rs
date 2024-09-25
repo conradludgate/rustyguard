@@ -1,5 +1,5 @@
 use divan::black_box;
-use hmac::digest::generic_array::GenericArray;
+use blake2::digest::generic_array::GenericArray;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use rustyguard_types::{Cookie, EncryptedCookie};
 

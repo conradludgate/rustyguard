@@ -1,4 +1,7 @@
-use hmac::digest::generic_array::{typenum::consts::U32, GenericArray};
+use blake2::digest::{
+    core_api::Block,
+    generic_array::{typenum::consts::U32, GenericArray},
+};
 use rustyguard_aws_lc::aead::Aad;
 use rustyguard_aws_lc::aead::ChaChaKey;
 use rustyguard_aws_lc::aead::LessSafeKey;
@@ -58,37 +61,66 @@ pub fn mac(key: &[u8], msg: &[u8]) -> Mac {
     mac.finalize().into_bytes().into()
 }
 
-fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
-    use hmac::Mac;
-    type Hmac = hmac::SimpleHmac<blake2::Blake2s256>;
+const IPAD: u8 = 0x36;
+const OPAD: u8 = 0x5C;
 
-    let mut hmac = Hmac::new_from_slice(key).unwrap();
-    for msg in msg {
-        hmac.update(msg);
+fn get_der_key(key: &Key) -> Block<blake2::Blake2s256> {
+    let mut der_key = Block::<blake2::Blake2s256>::default();
+    der_key[..key.len()].copy_from_slice(key);
+    der_key
+}
+
+fn get_pad(key: &Key) -> (Block<blake2::Blake2s256>, Block<blake2::Blake2s256>) {
+    let der_key = get_der_key(key);
+    let mut ipad_key = der_key;
+    for b in ipad_key.iter_mut() {
+        *b ^= IPAD;
     }
-    hmac.finalize().into_bytes()
+
+    let mut opad_key = der_key;
+    for b in opad_key.iter_mut() {
+        *b ^= OPAD;
+    }
+    (ipad_key, opad_key)
+}
+
+fn hmac_inner<const M: usize>(
+    ipad_key: Block<blake2::Blake2s256>,
+    opad_key: Block<blake2::Blake2s256>,
+    msg: [&[u8]; M],
+) -> Key {
+    use blake2::digest::Digest;
+
+    let mut digest = blake2::Blake2s256::new();
+    digest.update(ipad_key);
+    for msg in msg {
+        digest.update(msg);
+    }
+
+    let mut h = blake2::Blake2s256::new();
+    h.update(opad_key);
+    h.update(digest.finalize());
+    h.finalize()
+}
+
+fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
+    let (ipad_key, opad_key) = get_pad(key);
+    hmac_inner(ipad_key, opad_key, msg)
 }
 
 fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
-    use hmac::Mac;
-    type Hmac = hmac::SimpleHmac<blake2::Blake2s256>;
-
     assert!(N > 0);
     assert!(N <= 255);
 
     let mut output = [Key::default(); N];
 
-    let hmac = Hmac::new_from_slice(&hmac(key, [msg])).unwrap();
-    let mut ti = hmac.clone().chain_update([1u8]).finalize().into_bytes();
+    let (ipad_key, opad_key) = get_pad(&hmac(key, [msg]));
+
+    let mut ti = hmac_inner(ipad_key, opad_key, [&[1u8]]);
     output[0] = ti;
 
     for i in 1..N as u8 {
-        ti = hmac
-            .clone()
-            .chain_update(ti)
-            .chain_update([i + 1])
-            .finalize()
-            .into_bytes();
+        ti = hmac_inner(ipad_key, opad_key, [&ti[..], &[i + 1]]);
         output[i as usize] = ti;
     }
 
