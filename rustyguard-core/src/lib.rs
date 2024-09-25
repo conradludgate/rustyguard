@@ -1,8 +1,8 @@
-#![no_std]
+// #![no_std]
 #![forbid(unsafe_code)]
 
-#[cfg(any(test, rustyguard_unsafe_logging))]
-extern crate std;
+// #[cfg(any(test, rustyguard_unsafe_logging))]
+// extern crate std;
 
 macro_rules! unsafe_log {
     ($($t:tt)*) => {
@@ -32,7 +32,7 @@ use hashbrown::{HashMap, HashTable};
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
     encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, HandshakeState, Mac,
-    ReusableSecret, StaticInitiatorConfig, StaticPeerConfig,
+    StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -43,7 +43,7 @@ use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, AsBytes, FromBytes, FromZeroes};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub use rustyguard_crypto::{PublicKey, StaticSecret};
+pub use rustyguard_crypto::{PrivateKey, UnparsedPublicKey, X25519};
 pub use rustyguard_types::DataHeader;
 pub use tai64::Tai64N;
 
@@ -111,7 +111,7 @@ impl<P> PeerList<P> {
 }
 
 impl Config {
-    pub fn new(private_key: StaticSecret) -> Self {
+    pub fn new(private_key: PrivateKey) -> Self {
         Config {
             static_: StaticInitiatorConfig::new(private_key),
             // TODO(conrad): seed this
@@ -125,9 +125,9 @@ impl Config {
     pub fn insert_peer(&mut self, peer: StaticPeerConfig) -> PeerId {
         use hashbrown::hash_table::Entry;
         match self.peers_by_pubkey.entry(
-            self.pubkey_hasher.hash_one(peer.key),
-            |&i| self.peers[i].key == peer.key,
-            |&i| self.pubkey_hasher.hash_one(self.peers[i].key),
+            self.pubkey_hasher.hash_one(peer.key.bytes()),
+            |&i| self.peers[i].key.bytes() == peer.key.bytes(),
+            |&i| self.pubkey_hasher.hash_one(self.peers[i].key.bytes()),
         ) {
             Entry::Occupied(o) => {
                 let id = *o.get();
@@ -148,10 +148,12 @@ impl Config {
         }
     }
 
-    fn get_peer_idx(&self, pk: &PublicKey) -> Option<PeerId> {
+    fn get_peer_idx(&self, pk: &UnparsedPublicKey<[u8; 32]>) -> Option<PeerId> {
         let peers = &self.peers;
         self.peers_by_pubkey
-            .find(self.pubkey_hasher.hash_one(pk), |&i| peers[i].key == *pk)
+            .find(self.pubkey_hasher.hash_one(pk.bytes()), |&i| {
+                peers[i].key.bytes() == pk.bytes()
+            })
             .copied()
     }
 }
@@ -209,7 +211,8 @@ enum SessionState {
 
 #[derive(Zeroize)]
 struct SessionHandshake {
-    esk_i: ReusableSecret,
+    #[zeroize(skip)]
+    esk_i: PrivateKey,
     state: HandshakeState,
 }
 
@@ -643,21 +646,34 @@ impl Sessions {
 mod tests {
     use core::net::SocketAddr;
 
-    use crate::{PublicKey, StaticSecret};
+    use crate::{PrivateKey, UnparsedPublicKey};
     use alloc::boxed::Box;
     use rand::{
         rngs::{OsRng, StdRng},
-        RngCore, SeedableRng,
+        Rng, RngCore, SeedableRng,
     };
-    use rustyguard_crypto::{Key, StaticPeerConfig};
+    use rustyguard_crypto::{Key, StaticPeerConfig, X25519};
     use tai64::Tai64N;
     use zerocopy::AsBytes;
 
     use crate::{Config, PeerId, Sessions};
 
+    fn pk(s: &PrivateKey) -> UnparsedPublicKey<[u8; 32]> {
+        UnparsedPublicKey::new(
+            &X25519,
+            s.compute_public_key().unwrap().as_ref().try_into().unwrap(),
+        )
+    }
+
+    fn gen_sk(r: &mut impl Rng) -> PrivateKey {
+        let mut b = [0u8; 32];
+        r.fill_bytes(&mut b);
+        PrivateKey::from_private_key(&X25519, &b).unwrap()
+    }
+
     fn session_with_peer(
-        secret_key: StaticSecret,
-        peer_public_key: PublicKey,
+        secret_key: PrivateKey,
+        peer_public_key: UnparsedPublicKey<[u8; 32]>,
         preshared_key: Key,
         endpoint: SocketAddr,
     ) -> (PeerId, Sessions) {
@@ -675,10 +691,10 @@ mod tests {
     fn handshake_happy() {
         let server_addr: SocketAddr = "10.0.1.1:1234".parse().unwrap();
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
-        let ssk_i = StaticSecret::random_from_rng(OsRng);
-        let ssk_r = StaticSecret::random_from_rng(OsRng);
-        let spk_i = PublicKey::from(&ssk_i);
-        let spk_r = PublicKey::from(&ssk_r);
+        let ssk_i = gen_sk(&mut OsRng);
+        let ssk_r = gen_sk(&mut OsRng);
+        let spk_i = pk(&ssk_i);
+        let spk_r = pk(&ssk_r);
         let mut psk = Key::default();
         OsRng.fill_bytes(&mut psk);
 
@@ -739,10 +755,10 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1);
         let server_addr: SocketAddr = "10.0.1.1:1234".parse().unwrap();
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
-        let ssk_i = StaticSecret::random_from_rng(&mut rng);
-        let ssk_r = StaticSecret::random_from_rng(&mut rng);
-        let spk_i = PublicKey::from(&ssk_i);
-        let spk_r = PublicKey::from(&ssk_r);
+        let ssk_i = gen_sk(&mut rng);
+        let ssk_r = gen_sk(&mut rng);
+        let spk_i = pk(&ssk_i);
+        let spk_r = pk(&ssk_r);
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 

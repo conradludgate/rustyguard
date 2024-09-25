@@ -3,16 +3,14 @@ use core::ops::ControlFlow;
 
 use crate::time::{TimerEntry, TimerEntryType};
 use alloc::boxed::Box;
-use rand::Rng;
+use rand::{Rng, RngCore};
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    HandshakeState, HasMac, ReusableSecret,
+    HandshakeState, HasMac, PrivateKey, X25519,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
 use zeroize::Zeroize;
-
-pub use rustyguard_crypto::StaticSecret;
 
 use crate::{
     write_msg, Error, Message, MessageEncrypter, PeerId, Session, SessionHandshake, SessionState,
@@ -96,7 +94,15 @@ impl Sessions {
         let session_id = *vacant.key();
 
         // complete handshake
-        let esk_r = StaticSecret::random_from_rng(&mut state.rng);
+        let esk_r = {
+            let mut esk_r = [0u8; 32];
+            state.rng.fill_bytes(&mut esk_r);
+
+            let sk = PrivateKey::from_private_key(&X25519, &esk_r).unwrap();
+            esk_r.zeroize();
+            sk
+        };
+
         let response = encrypt_handshake_resp(
             &mut hs,
             data,
@@ -273,8 +279,17 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeI
     let sender = *vacant.key();
     peer.current_handshake = Some(sender);
 
+    let esk_i = {
+        let mut esk_i = [0u8; 32];
+        state.rng.fill_bytes(&mut esk_i);
+
+        let sk = PrivateKey::from_private_key(&X25519, &esk_i).unwrap();
+        esk_i.zeroize();
+        sk
+    };
+
     let handshake = SessionHandshake {
-        esk_i: ReusableSecret::random_from_rng(&mut state.rng),
+        esk_i,
         state: HandshakeState::default(),
     };
 

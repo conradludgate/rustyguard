@@ -13,12 +13,14 @@ chacha20poly1305 = { version = "0.10", default-features = false }
 hmac = { version = "0.12" }
 x25519-dalek = { version = "2.0", features = ["static_secrets", "reusable_secrets"] }
 
+aws-lc-rs = "1.9.0"
+
 # crypto adjacent
 zeroize = "1.8"
 
 # other helpful things
 rand_core = { version = "0.6", default-features = false }
-tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
+tai64 = { version = "4.0", default-features = false, features = ["zeroize", "std"] }
 zerocopy = { version = "0.7.35", features = ["derive"] }
 
 [dev-dependencies]

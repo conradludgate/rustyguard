@@ -1,24 +1,37 @@
+use aws_lc_rs::agreement::{UnparsedPublicKey, X25519};
 use chacha20poly1305::Key;
 use divan::Bencher;
 use rand::{thread_rng, Rng, RngCore};
 use rustyguard_crypto::{
     decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, HandshakeState,
-    StaticInitiatorConfig, StaticPeerConfig,
+    PrivateKey, StaticInitiatorConfig, StaticPeerConfig,
 };
 use tai64::Tai64N;
-use x25519_dalek::{PublicKey, ReusableSecret, StaticSecret};
 
 fn main() {
     divan::main()
 }
 
+fn pk(s: &PrivateKey) -> UnparsedPublicKey<[u8; 32]> {
+    UnparsedPublicKey::new(
+        &X25519,
+        s.compute_public_key().unwrap().as_ref().try_into().unwrap(),
+    )
+}
+
+fn gen_sk() -> PrivateKey {
+    let mut b = [0u8; 32];
+    thread_rng().fill_bytes(&mut b);
+    PrivateKey::from_private_key(&X25519, &b).unwrap()
+}
+
 #[divan::bench(sample_count = 100, sample_size = 100)]
 fn handshake(b: Bencher) {
     b.with_inputs(|| {
-        let ssk_i = StaticSecret::random_from_rng(thread_rng());
-        let ssk_r = StaticSecret::random_from_rng(thread_rng());
-        let spk_i = PublicKey::from(&ssk_i);
-        let spk_r = PublicKey::from(&ssk_r);
+        let ssk_i = gen_sk();
+        let ssk_r = gen_sk();
+        let spk_i = pk(&ssk_i);
+        let spk_r = pk(&ssk_r);
         let mut psk = Key::default();
         thread_rng().fill_bytes(&mut psk);
 
@@ -27,7 +40,7 @@ fn handshake(b: Bencher) {
             &mut hs,
             &StaticInitiatorConfig::new(ssk_i),
             &StaticPeerConfig::new(spk_r, Some(psk), None),
-            &ReusableSecret::random_from_rng(thread_rng()),
+            &gen_sk(),
             Tai64N::now(),
             thread_rng().gen(),
             None,
@@ -42,11 +55,11 @@ fn handshake(b: Bencher) {
     .bench_local_values(|(mut msg, config, peer)| {
         let mut hs = HandshakeState::default();
         let decrypted = decrypt_handshake_init(&mut msg, &mut hs, &config).unwrap();
-        assert_eq!(decrypted.static_key(), peer.key);
+        assert_eq!(decrypted.static_key().bytes(), peer.key.bytes());
         encrypt_handshake_resp(
             &mut hs,
             decrypted,
-            &StaticSecret::random_from_rng(thread_rng()),
+            &gen_sk(),
             &peer,
             thread_rng().gen(),
             None,
