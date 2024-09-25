@@ -15,18 +15,11 @@ fn init_chacha_aead(key: &[u8], tag_len: usize) -> Result<AeadCtx, error::Unspec
 use super::{Nonce, MAX_TAG_LEN, NONCE_LEN};
 use super::{Tag, TAG_LEN};
 use crate::error::Unspecified;
-use crate::iv::FixedLength;
 use aws_lc::{
     EVP_AEAD_CTX_open, EVP_AEAD_CTX_open_gather, EVP_AEAD_CTX_seal, EVP_AEAD_CTX_seal_scatter,
 };
 use core::fmt::Debug;
 use core::{mem::MaybeUninit, ops::RangeFrom, ptr::null};
-
-/// The maximum length of a nonce returned by our AEAD API.
-const MAX_NONCE_LEN: usize = NONCE_LEN;
-
-/// The maximum required tag buffer needed if using AWS-LC generated nonce construction
-const MAX_TAG_NONCE_BUFFER_LEN: usize = MAX_TAG_LEN + MAX_NONCE_LEN;
 
 /// An AEAD key without a designated role or nonce sequence.
 pub struct ChaChaKey {
@@ -117,30 +110,24 @@ impl ChaChaKey {
     #[inline]
     pub(crate) fn seal_in_place_append_tag<'a, InOut>(
         &self,
-        nonce: Option<Nonce>,
+        nonce: Nonce,
         aad: &[u8],
         in_out: &'a mut InOut,
     ) -> Result<Nonce, Unspecified>
     where
         InOut: AsMut<[u8]> + for<'in_out> Extend<&'in_out u8>,
     {
-        match nonce {
-            Some(nonce) => self.seal_combined(nonce, aad, in_out),
-            None => self.seal_combined_randnonce(aad, in_out),
-        }
+        self.seal_combined(nonce, aad, in_out)
     }
 
     #[inline]
     pub(crate) fn seal_in_place_separate_tag(
         &self,
-        nonce: Option<Nonce>,
+        nonce: Nonce,
         aad: &[u8],
         in_out: &mut [u8],
     ) -> Result<(Nonce, Tag), Unspecified> {
-        match nonce {
-            Some(nonce) => self.seal_separate(nonce, aad, in_out),
-            None => self.seal_separate_randnonce(aad, in_out),
-        }
+        self.seal_separate(nonce, aad, in_out)
     }
 
     #[inline]
@@ -273,56 +260,6 @@ impl ChaChaKey {
     }
 
     #[inline]
-    fn seal_combined_randnonce<InOut>(
-        &self,
-        aad: &[u8],
-        in_out: &mut InOut,
-    ) -> Result<Nonce, Unspecified>
-    where
-        InOut: AsMut<[u8]> + for<'in_out> Extend<&'in_out u8>,
-    {
-        let mut tag_buffer = [0u8; MAX_TAG_NONCE_BUFFER_LEN];
-
-        let mut out_tag_len = MaybeUninit::<usize>::uninit();
-
-        {
-            let plaintext_len = in_out.as_mut().len();
-            let in_out = in_out.as_mut();
-
-            if 1 != (unsafe {
-                EVP_AEAD_CTX_seal_scatter(
-                    *self.ctx.as_ref().as_const(),
-                    in_out.as_mut_ptr(),
-                    tag_buffer.as_mut_ptr(),
-                    out_tag_len.as_mut_ptr(),
-                    tag_buffer.len(),
-                    null(),
-                    0,
-                    in_out.as_ptr(),
-                    plaintext_len,
-                    null(),
-                    0,
-                    aad.as_ptr(),
-                    aad.len(),
-                )
-            }) {
-                return Err(Unspecified);
-            }
-        }
-
-        let tag_len = TAG_LEN;
-        let nonce_len = NONCE_LEN;
-
-        let nonce = Nonce(FixedLength::<NONCE_LEN>::try_from(
-            &tag_buffer[tag_len..tag_len + nonce_len],
-        )?);
-
-        in_out.extend(&tag_buffer[..tag_len]);
-
-        Ok(nonce)
-    }
-
-    #[inline]
     fn seal_separate(
         &self,
         nonce: Nonce,
@@ -357,50 +294,5 @@ impl ChaChaKey {
             }
         }
         Ok((nonce, Tag(tag, unsafe { out_tag_len.assume_init() })))
-    }
-
-    #[inline]
-    fn seal_separate_randnonce(
-        &self,
-        aad: &[u8],
-        in_out: &mut [u8],
-    ) -> Result<(Nonce, Tag), Unspecified> {
-        let mut tag_buffer = [0u8; MAX_TAG_NONCE_BUFFER_LEN];
-
-        debug_assert!(TAG_LEN + NONCE_LEN <= tag_buffer.len());
-
-        let mut out_tag_len = MaybeUninit::<usize>::uninit();
-
-        if 1 != (unsafe {
-            EVP_AEAD_CTX_seal_scatter(
-                *self.ctx.as_ref().as_const(),
-                in_out.as_mut_ptr(),
-                tag_buffer.as_mut_ptr(),
-                out_tag_len.as_mut_ptr(),
-                tag_buffer.len(),
-                null(),
-                0,
-                in_out.as_ptr(),
-                in_out.len(),
-                null(),
-                0usize,
-                aad.as_ptr(),
-                aad.len(),
-            )
-        }) {
-            return Err(Unspecified);
-        }
-
-        let tag_len = TAG_LEN;
-        let nonce_len = NONCE_LEN;
-
-        let nonce = Nonce(FixedLength::<NONCE_LEN>::try_from(
-            &tag_buffer[tag_len..tag_len + nonce_len],
-        )?);
-
-        let mut tag = [0u8; MAX_TAG_LEN];
-        tag.copy_from_slice(&tag_buffer[..tag_len]);
-
-        Ok((nonce, Tag(tag, tag_len)))
     }
 }

@@ -145,13 +145,13 @@ pub mod aead;
 pub mod agreement;
 pub mod error;
 
-mod cbs;
-mod cipher;
+// mod cbs;
 mod debug;
 mod evp_pkey;
 mod hex;
-mod iv;
 mod ptr;
+
+#[cfg(test)]
 mod rand;
 
 pub mod test;

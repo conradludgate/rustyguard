@@ -7,7 +7,6 @@ use crate::error::Unspecified;
 use aws_lc::RAND_bytes;
 
 /// A secure random number generator.
-#[cfg(test)]
 pub trait SecureRandom {
     /// Fills `dest` with random bytes.
     ///
@@ -25,7 +24,6 @@ impl SystemRandom {
     /// Constructs a new `SystemRandom`.
     #[inline]
     #[must_use]
-    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -37,10 +35,9 @@ impl Default for SystemRandom {
     }
 }
 
-#[cfg(test)]
 impl SecureRandom for SystemRandom {
     #[inline]
-    #[cfg(test)]
+
     fn fill(&self, dest: &mut [u8]) -> Result<(), Unspecified> {
         fill(dest)
     }
@@ -53,7 +50,6 @@ pub fn fill(dest: &mut [u8]) -> Result<(), Unspecified> {
     Ok(())
 }
 
-#[cfg(test)]
 mod tests {
     use crate::rand;
     use core::array::IntoIter;

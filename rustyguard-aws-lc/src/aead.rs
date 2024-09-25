@@ -210,7 +210,7 @@ impl LessSafeKey {
         InOut: AsMut<[u8]> + for<'in_out> Extend<&'in_out u8>,
     {
         self.key
-            .seal_in_place_append_tag(Some(nonce), aad.as_ref(), in_out)
+            .seal_in_place_append_tag(nonce, aad.as_ref(), in_out)
             .map(|_| ())
     }
 
@@ -238,7 +238,7 @@ impl LessSafeKey {
         A: AsRef<[u8]>,
     {
         self.key
-            .seal_in_place_separate_tag(Some(nonce), aad.as_ref(), in_out)
+            .seal_in_place_separate_tag(nonce, aad.as_ref(), in_out)
             .map(|(_, tag)| tag)
     }
 

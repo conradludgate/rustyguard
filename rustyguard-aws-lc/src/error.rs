@@ -36,23 +36,6 @@ impl KeyRejected {
         self.0
     }
 
-    // pub(crate) fn inconsistent_components() -> Self {
-    //     KeyRejected("InconsistentComponents")
-    // }
-
-    #[inline]
-    pub(crate) fn invalid_encoding() -> Self {
-        KeyRejected("InvalidEncoding")
-    }
-
-    // pub(crate) fn too_small() -> Self {
-    //     KeyRejected("TooSmall")
-    // }
-
-    // pub(crate) fn too_large() -> Self {
-    //     KeyRejected("TooLarge")
-    // }
-
     pub(crate) fn wrong_algorithm() -> Self {
         KeyRejected("WrongAlgorithm")
     }
