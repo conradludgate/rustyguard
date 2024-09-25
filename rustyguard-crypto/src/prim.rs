@@ -1,12 +1,11 @@
+use hmac::digest::generic_array::{typenum::consts::U32, GenericArray};
 use rustyguard_aws_lc::aead::Aad;
+use rustyguard_aws_lc::aead::ChaChaKey;
 use rustyguard_aws_lc::aead::LessSafeKey;
 use rustyguard_aws_lc::aead::Nonce;
-use rustyguard_aws_lc::aead::UnboundKey;
-use rustyguard_aws_lc::aead::CHACHA20_POLY1305;
 use rustyguard_aws_lc::agreement::agree;
 use rustyguard_aws_lc::agreement::PrivateKey;
 use rustyguard_aws_lc::agreement::UnparsedPublicKey;
-use hmac::digest::generic_array::{typenum::consts::U32, GenericArray};
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
@@ -142,7 +141,7 @@ impl HandshakeState {
 
     pub fn split(&mut self, initiator: bool) -> (EncryptionKey, DecryptionKey) {
         let [k1, k2] =
-            hkdf(&self.chain, &[]).map(|k| UnboundKey::new(&CHACHA20_POLY1305, &k[..]).unwrap());
+            hkdf(&self.chain, &[]).map(|k| ChaChaKey::new(&k[..]).unwrap());
         self.zeroize();
 
         if initiator {
@@ -171,7 +170,7 @@ macro_rules! encrypted {
                 state: &mut HandshakeState,
                 key: &Key,
             ) -> Result<&mut [u8; $n], CryptoError> {
-                let key = UnboundKey::new(&CHACHA20_POLY1305, &key[..]).unwrap();
+                let key = ChaChaKey::new(&key[..]).unwrap();
                 let key = LessSafeKey::new(key);
 
                 let aad = state.hash;
@@ -184,7 +183,7 @@ macro_rules! encrypted {
             }
 
             fn encrypt_and_hash(mut msg: [u8; $n], state: &mut HandshakeState, key: &Key) -> Self {
-                let key = UnboundKey::new(&CHACHA20_POLY1305, &key[..]).unwrap();
+                let key = ChaChaKey::new(&key[..]).unwrap();
                 let key = LessSafeKey::new(key);
 
                 let aad = state.hash;
@@ -217,7 +216,7 @@ pub struct EncryptionKey {
 }
 
 impl EncryptionKey {
-    pub fn new(key: UnboundKey) -> Self {
+    pub fn new(key: ChaChaKey) -> Self {
         Self {
             key: LessSafeKey::new(key),
             counter: 0,
@@ -247,7 +246,7 @@ pub struct DecryptionKey {
 }
 
 impl DecryptionKey {
-    pub fn new(key: UnboundKey) -> Self {
+    pub fn new(key: ChaChaKey) -> Self {
         Self {
             key: LessSafeKey::new(key),
             replay: AntiReplay::default(),

@@ -140,61 +140,20 @@ extern crate std;
 
 extern crate alloc;
 extern crate aws_lc_sys as aws_lc;
+
 pub mod aead;
 pub mod agreement;
-pub mod constant_time;
 pub mod error;
-mod rand;
-pub mod test;
 
-// mod bn;
+mod rand;
 mod buffer;
-// mod cbb;
 mod cbs;
 mod cipher;
 mod debug;
-// mod ec;
-// mod ed25519;
 pub mod encoding;
-// mod endian;
 mod evp_pkey;
-// mod fips;
-
 mod hex;
-
 mod iv;
-// #[allow(clippy::module_name_repetitions)]
-// pub mod kem;
 mod ptr;
-// pub mod rsa;
-// pub mod tls_prf;
-// pub mod unstable;
 
-pub(crate) use debug::derive_debug_via_id;
-// use core::ffi::CStr;
-
-// use aws_lc::{ERR_error_string, ERR_get_error, ERR_GET_FUNC, ERR_GET_LIB, ERR_GET_REASON};
-
-// #[allow(dead_code)]
-// unsafe fn dump_error() {
-//     let err = ERR_get_error();
-//     let lib = ERR_GET_LIB(err);
-//     let reason = ERR_GET_REASON(err);
-//     let func = ERR_GET_FUNC(err);
-//     let mut buffer = [0u8; 256];
-//     ERR_error_string(err, buffer.as_mut_ptr().cast());
-//     let error_msg = CStr::from_bytes_with_nul_unchecked(&buffer);
-//     eprintln!("Raw Error -- {error_msg:?}\nErr: {err}, Lib: {lib}, Reason: {reason}, Func: {func}");
-// }
-
-// #[cfg(test)]
-// mod tests {
-//     use crate::dump_error;
-
-//     #[test]
-//     fn test_dump() {
-//         unsafe {
-//             dump_error();
-//         }
-//     }
-// }
+pub mod test;

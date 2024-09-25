@@ -8,17 +8,6 @@
 
 #![allow(missing_docs)]
 
-macro_rules! derive_debug_via_id {
-    ($typename:ident) => {
-        impl ::core::fmt::Debug for $typename {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter) -> Result<(), ::core::fmt::Error> {
-                ::core::fmt::Debug::fmt(&self.id, f)
-            }
-        }
-    };
-}
-pub(crate) use derive_debug_via_id;
-
 #[allow(unused_macros)]
 macro_rules! derive_debug_via_field {
     ($type:ty, $field:ident) => {
@@ -48,13 +37,3 @@ macro_rules! derive_debug_self_as_ref_hex_bytes {
         }
     };
 }
-
-// pub(crate) fn write_hex_bytes(
-//     fmt: &mut core::fmt::Formatter,
-//     bytes: &[u8],
-// ) -> Result<(), core::fmt::Error> {
-//     for byte in bytes {
-//         write!(fmt, "{byte:02x}")?;
-//     }
-//     Ok(())
-// }

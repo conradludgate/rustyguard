@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR ISC
 
 fn main() {
-    let prefix = "DEP_AWS_LC_";
-
     let mut selected = String::default();
     let mut candidates = vec![];
 
@@ -16,10 +14,10 @@ fn main() {
         }
 
         // we're still looking for a selected prefix
-        if let Some(version) = name.strip_prefix(prefix) {
+        if let Some(version) = name.strip_prefix("DEP_AWS_LC_") {
             if let Some(version) = version.strip_suffix("_INCLUDE") {
                 // we've found the selected version so update it and export it
-                selected = format!("{prefix}{version}_");
+                selected = format!("DEP_AWS_LC_{version}_");
                 try_export_var(&selected, &name, &value);
             } else {
                 // it started with the expected prefix, but we don't know what the version is yet
@@ -29,7 +27,7 @@ fn main() {
         }
     }
 
-    assert!(!selected.is_empty(), "missing {prefix} include");
+    assert!(!selected.is_empty(), "missing DEP_AWS_LC_ include");
 
     // process all of the remaining candidates
     for (name, value) in candidates {
