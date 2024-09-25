@@ -180,19 +180,18 @@ pub struct DataHeader {
 
 impl DataHeader {
     #[inline(always)]
-    pub fn message_mut_from(msg: &mut [u8]) -> Option<(Self, &mut [u8], Tag)> {
+    pub fn message_mut_from(msg: &mut [u8]) -> Option<(Self, &mut [u8])> {
         #[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
         #[repr(C, align(16))]
         struct DataSegment([u8; 16]);
 
         let segments = DataSegment::mut_slice_from(msg)?;
-        let [header, payload @ .., tag] = segments else {
+        let [header, payload_and_tag @ ..] = segments else {
             return None;
         };
         let header: Self = transmute!(*header);
-        let payload = payload.as_bytes_mut();
-        let tag: Tag = transmute!(*tag);
-        Some((header, payload, tag))
+        let payload_and_tag = payload_and_tag.as_bytes_mut();
+        Some((header, payload_and_tag))
     }
 }
 

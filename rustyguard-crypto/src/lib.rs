@@ -532,28 +532,32 @@ mod tests {
         let (mut ek1, mut dk1) = hs1.split(true);
         let (mut ek2, mut dk2) = hs2.split(false);
 
-        let mut msg = *b"hello world";
+        let mut msg = b"hello world".to_vec();
         let tag = ek1.encrypt(&mut msg);
-        insta::assert_debug_snapshot!((msg, tag.0));
-        dk2.decrypt(0, &mut msg, tag).unwrap();
+        insta::assert_debug_snapshot!((&msg, tag.0));
+        msg.extend_from_slice(tag.as_bytes());
+        let msg = dk2.decrypt(0, &mut msg).unwrap();
         assert_eq!(msg, *b"hello world");
 
-        let mut msg = *b"goodbye world";
+        let mut msg = b"goodbye world".to_vec();
         let tag = ek2.encrypt(&mut msg);
-        insta::assert_debug_snapshot!((msg, tag.0));
-        dk1.decrypt(0, &mut msg, tag).unwrap();
+        insta::assert_debug_snapshot!((&msg, tag.0));
+        msg.extend_from_slice(tag.as_bytes());
+        let msg = dk1.decrypt(0, &mut msg).unwrap();
         assert_eq!(msg, *b"goodbye world");
 
-        let mut msg = *b"hello world2";
+        let mut msg = b"hello world2".to_vec();
         let tag = ek1.encrypt(&mut msg);
-        insta::assert_debug_snapshot!((msg, tag.0));
-        dk2.decrypt(1, &mut msg, tag).unwrap();
+        insta::assert_debug_snapshot!((&msg, tag.0));
+        msg.extend_from_slice(tag.as_bytes());
+        let msg = dk2.decrypt(1, &mut msg).unwrap();
         assert_eq!(msg, *b"hello world2");
 
-        let mut msg = *b"goodbye world2";
+        let mut msg = b"goodbye world2".to_vec();
         let tag = ek2.encrypt(&mut msg);
-        insta::assert_debug_snapshot!((msg, tag.0));
-        dk1.decrypt(1, &mut msg, tag).unwrap();
+        insta::assert_debug_snapshot!((&msg, tag.0));
+        msg.extend_from_slice(tag.as_bytes());
+        let msg = dk1.decrypt(1, &mut msg).unwrap();
         assert_eq!(msg, *b"goodbye world2");
     }
 

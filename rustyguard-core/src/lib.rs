@@ -186,13 +186,13 @@ impl Session {
     }
 
     fn should_rekey(&self, now: Tai64N, ts: &SessionTransport) -> bool {
-        (self.started + REKEY_AFTER_TIME < now) || (ts.encrypt.counter >= REKEY_AFTER_MESSAGES)
+        (self.started + REKEY_AFTER_TIME < now) || (ts.encrypt.counter() >= REKEY_AFTER_MESSAGES)
     }
     fn should_keepalive(&self, now: Tai64N, _ts: &SessionTransport) -> bool {
         self.sent + KEEPALIVE_TIMEOUT < now
     }
     fn should_reject(&self, now: Tai64N, ts: &SessionTransport) -> bool {
-        self.should_expire(now) || (ts.encrypt.counter >= REJECT_AFTER_MESSAGES)
+        self.should_expire(now) || (ts.encrypt.counter() >= REJECT_AFTER_MESSAGES)
     }
     fn should_expire(&self, now: Tai64N) -> bool {
         self.started + REJECT_AFTER_TIME < now
@@ -206,6 +206,7 @@ impl Session {
 #[derive(ZeroizeOnDrop)]
 enum SessionState {
     Handshake(SessionHandshake),
+    #[zeroize(skip)]
     Transport(SessionTransport),
 }
 
@@ -216,7 +217,6 @@ struct SessionHandshake {
     state: HandshakeState,
 }
 
-#[derive(ZeroizeOnDrop)]
 struct SessionTransport {
     /// who will the outgoing messages be received by
     receiver: u32,
@@ -269,7 +269,7 @@ impl PeerState {
         let SessionState::Transport(ts) = &mut session.state else {
             unreachable!()
         };
-        let n = ts.encrypt.counter;
+        let n = ts.encrypt.counter();
         let tag = ts.encrypt.encrypt(payload);
 
         session.sent = now;
@@ -534,7 +534,7 @@ impl Sessions {
                     unreachable!()
                 };
 
-                if ts.encrypt.counter >= REKEY_AFTER_MESSAGES {
+                if ts.encrypt.counter() >= REKEY_AFTER_MESSAGES {
                     // the encryption key needs rotating. schedule a rekey attempt
                     state.timers.push(TimerEntry {
                         time: state.now,
@@ -609,7 +609,7 @@ impl Sessions {
 
         unsafe_log!("[{socket:?}] parsed as data packet");
 
-        let (header, payload, tag) =
+        let (header, payload_and_tag) =
             DataHeader::message_mut_from(msg).ok_or(Error::InvalidMessage)?;
 
         let session_id = header.receiver.get();
@@ -635,8 +635,8 @@ impl Sessions {
             });
         }
 
-        let payload = payload.as_bytes_mut();
-        ts.decrypt.decrypt(header.counter.get(), payload, tag)?;
+        let payload_and_tag = payload_and_tag.as_bytes_mut();
+        let payload = ts.decrypt.decrypt(header.counter.get(), payload_and_tag)?;
 
         Ok((session.peer, payload))
     }

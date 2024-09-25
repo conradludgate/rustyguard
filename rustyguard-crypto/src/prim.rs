@@ -1,7 +1,12 @@
+use aws_lc_rs::aead::Aad;
+use aws_lc_rs::aead::LessSafeKey;
+use aws_lc_rs::aead::Nonce;
+use aws_lc_rs::aead::UnboundKey;
+use aws_lc_rs::aead::CHACHA20_POLY1305;
 use aws_lc_rs::agreement::agree;
 use aws_lc_rs::agreement::PrivateKey;
 use aws_lc_rs::agreement::UnparsedPublicKey;
-pub use chacha20poly1305::Key;
+use hmac::digest::generic_array::{typenum::consts::U32, GenericArray};
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
@@ -12,6 +17,8 @@ use zeroize::ZeroizeOnDrop;
 
 use crate::CryptoError;
 use rustyguard_utils::anti_replay::AntiReplay;
+
+pub type Key = GenericArray<u8, U32>;
 
 /// Construction: The UTF-8 string literal “Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s”, 37 bytes of output.
 /// Identifier: The UTF-8 string literal “WireGuard v1 zx2c4 Jason@zx2c4.com”, 34 bytes of output.
@@ -28,10 +35,10 @@ pub(crate) const IDENTIFIER_HASH: [u8; 32] = [
 pub(crate) const LABEL_MAC1: [u8; 8] = *b"mac1----";
 pub(crate) const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
-fn nonce(counter: u64) -> chacha20poly1305::Nonce {
-    let mut n = chacha20poly1305::Nonce::default();
+fn nonce(counter: u64) -> Nonce {
+    let mut n = [0; 12];
     n[4..].copy_from_slice(&u64::to_le_bytes(counter));
-    n
+    Nonce::assume_unique_for_key(n)
 }
 
 pub(crate) fn hash(msg: [&[u8]; 2]) -> [u8; 32] {
@@ -134,7 +141,8 @@ impl HandshakeState {
     }
 
     pub fn split(&mut self, initiator: bool) -> (EncryptionKey, DecryptionKey) {
-        let [k1, k2] = hkdf(&self.chain, &[]);
+        let [k1, k2] =
+            hkdf(&self.chain, &[]).map(|k| UnboundKey::new(&CHACHA20_POLY1305, &k[..]).unwrap());
         self.zeroize();
 
         if initiator {
@@ -163,28 +171,31 @@ macro_rules! encrypted {
                 state: &mut HandshakeState,
                 key: &Key,
             ) -> Result<&mut [u8; $n], CryptoError> {
-                use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
+                let key = UnboundKey::new(&CHACHA20_POLY1305, &key[..]).unwrap();
+                let key = LessSafeKey::new(key);
 
                 let aad = state.hash;
                 state.mix_hash(self.as_bytes());
 
-                ChaCha20Poly1305::new(key)
-                    .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, (&self.tag.0).into())
+                key.open_in_place(nonce(0), Aad::from(&aad), self.as_bytes_mut())
                     .map_err(|_| CryptoError::DecryptionError)?;
+
                 Ok(&mut self.msg)
             }
 
             fn encrypt_and_hash(mut msg: [u8; $n], state: &mut HandshakeState, key: &Key) -> Self {
-                use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
+                let key = UnboundKey::new(&CHACHA20_POLY1305, &key[..]).unwrap();
+                let key = LessSafeKey::new(key);
 
                 let aad = state.hash;
-                let tag = ChaCha20Poly1305::new(key)
-                    .encrypt_in_place_detached(&nonce(0), &aad, &mut msg)
+
+                let tag = key
+                    .seal_in_place_separate_tag(nonce(0), Aad::from(&aad), &mut msg)
                     .expect("message should not be larger than max message size");
 
                 let out = Self {
                     msg,
-                    tag: Tag(tag.into()),
+                    tag: Tag(tag.as_ref().try_into().unwrap()),
                 };
                 state.mix_hash(out.as_bytes());
 
@@ -200,59 +211,54 @@ encrypted!(EncryptedPublicKey, 32);
 
 pub type Mac = [u8; 16];
 
-#[derive(ZeroizeOnDrop)]
 pub struct EncryptionKey {
-    key: chacha20poly1305::ChaCha20Poly1305,
-    pub counter: u64,
+    key: LessSafeKey,
+    counter: u64,
 }
 
 impl EncryptionKey {
-    pub fn new(key: chacha20poly1305::Key) -> Self {
-        use chacha20poly1305::KeyInit;
+    pub fn new(key: UnboundKey) -> Self {
         Self {
-            key: chacha20poly1305::ChaCha20Poly1305::new(&key),
+            key: LessSafeKey::new(key),
             counter: 0,
         }
     }
 
     pub fn encrypt(&mut self, payload: &mut [u8]) -> Tag {
-        use chacha20poly1305::AeadInPlace;
-        let nonce = nonce(self.counter);
+        let n = self.counter;
         self.counter += 1;
-
+        let nonce = nonce(n);
         let tag = self
             .key
-            .encrypt_in_place_detached(&nonce, &[], payload)
-            .expect("message to large to encrypt");
+            .seal_in_place_separate_tag(nonce, Aad::empty(), payload)
+            .unwrap();
 
-        Tag(tag.into())
+        Tag(tag.as_ref().try_into().unwrap())
+    }
+
+    pub fn counter(&self) -> u64 {
+        self.counter
     }
 }
 
-#[derive(ZeroizeOnDrop)]
 pub struct DecryptionKey {
-    key: chacha20poly1305::ChaCha20Poly1305,
-    #[zeroize(skip)]
+    key: LessSafeKey,
     replay: AntiReplay,
 }
 
 impl DecryptionKey {
-    pub fn new(key: Key) -> Self {
-        use chacha20poly1305::KeyInit;
+    pub fn new(key: UnboundKey) -> Self {
         Self {
-            key: chacha20poly1305::ChaCha20Poly1305::new(&key),
+            key: LessSafeKey::new(key),
             replay: AntiReplay::default(),
         }
     }
 
-    pub fn decrypt(
+    pub fn decrypt<'b>(
         &mut self,
         counter: u64,
-        payload: &mut [u8],
-        tag: Tag,
-    ) -> Result<(), CryptoError> {
-        use chacha20poly1305::AeadInPlace;
-
+        payload_and_tag: &'b mut [u8],
+    ) -> Result<&'b mut [u8], CryptoError> {
         if !self.replay.check(counter) {
             unsafe_log!("payload replayed or is too old");
             return Err(CryptoError::Rejected);
@@ -261,23 +267,17 @@ impl DecryptionKey {
         let nonce = nonce(counter);
 
         self.key
-            .decrypt_in_place_detached(
-                &nonce,
-                &[],
-                payload,
-                chacha20poly1305::Tag::from_slice(&tag.0),
-            )
-            .map_err(|_| CryptoError::DecryptionError)?;
-
-        Ok(())
+            .open_in_place(nonce, Aad::empty(), payload_and_tag)
+            .map_err(|_| CryptoError::DecryptionError)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use blake2::Digest;
-    use chacha20poly1305::Key;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+
+    use crate::prim::Key;
 
     #[test]
     fn construction_identifier() {
