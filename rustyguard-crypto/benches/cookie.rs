@@ -1,5 +1,4 @@
 use divan::black_box;
-use blake2::digest::generic_array::GenericArray;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use rustyguard_types::{Cookie, EncryptedCookie};
 
@@ -14,7 +13,7 @@ fn encrypt_cookie() -> EncryptedCookie {
     rng.fill_bytes(&mut nonce);
     rustyguard_crypto::encrypt_cookie(
         Cookie(black_box([0xa5; 16])),
-        &black_box(GenericArray::default()),
+        &black_box([0; 32]),
         &nonce,
         &black_box([0xa5; 16]),
     )

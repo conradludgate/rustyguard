@@ -72,10 +72,10 @@ pub fn encrypt_cookie(
 }
 
 pub fn mac1_key(spk: &[u8]) -> Key {
-    hash([&LABEL_MAC1, spk]).into()
+    hash([&LABEL_MAC1, spk])
 }
 pub fn cookie_key(spk: &[u8]) -> Key {
-    hash([&LABEL_COOKIE, spk]).into()
+    hash([&LABEL_COOKIE, spk])
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]

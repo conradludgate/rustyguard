@@ -6,23 +6,23 @@ edition = "2021"
 [dependencies]
 rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
-rustyguard-aws-lc = { version = "0.1", path = "../rustyguard-aws-lc" }
 
 # crypto
+rustyguard-aws-lc = { version = "0.1", path = "../rustyguard-aws-lc" }
 blake2s_simd = "1.0.2"
-blake2 = { version = "0.10", default-features = false }
 
 # crypto adjacent
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 # other helpful things
 rand_core = { version = "0.6", default-features = false }
-tai64 = { version = "4.0", default-features = false, features = ["zeroize", "std"] }
+tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
 zerocopy = { version = "0.7.35", features = ["derive"] }
 
 [dev-dependencies]
 divan = "0.1.14"
 rand = { version = "0.8", features = ["getrandom"] }
+tai64 = { version = "4.0", default-features = false, features = ["std"] }
 insta = "1.39.0"
 
 [[bench]]
