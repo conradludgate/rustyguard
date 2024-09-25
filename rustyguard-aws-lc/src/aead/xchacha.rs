@@ -34,6 +34,9 @@ impl Debug for XChaChaKey {
 impl XChaChaKey {
     /// Constructs an `ChaChaKey`.
     pub fn new(key_bytes: &[u8]) -> Result<Self, Unspecified> {
+        if 32 != key_bytes.len() {
+            return Err(Unspecified);
+        }
         let ctx = build_context(EVP_aead_xchacha20_poly1305, key_bytes, TAG_LEN)?;
 
         Ok(Self { ctx })
@@ -53,23 +56,23 @@ impl XChaChaKey {
             .checked_sub(TAG_LEN)
             .ok_or(Unspecified)?;
 
-        let in_out: &mut [u8] = &mut in_out[in_prefix_len..];
+        let in_out_open: &mut [u8] = &mut in_out[in_prefix_len..];
         let nonce = nonce.as_ref();
 
         debug_assert_eq!(nonce.len(), XNONCE_LEN);
 
-        let plaintext_len = in_out.len() - TAG_LEN;
+        let plaintext_len = in_out_open.len() - TAG_LEN;
 
-        let mut out_len = MaybeUninit::<usize>::uninit();
+        let mut out_len = 0;
         if 1 != (unsafe {
             EVP_AEAD_CTX_open(
                 *self.ctx.as_const(),
-                in_out.as_mut_ptr(),
-                out_len.as_mut_ptr(),
+                in_out_open.as_mut_ptr(),
+                &mut out_len,
                 plaintext_len,
                 nonce.as_ptr(),
                 nonce.len(),
-                in_out.as_ptr(),
+                in_out_open.as_ptr(),
                 plaintext_len + TAG_LEN,
                 aad.as_ptr(),
                 aad.len(),
