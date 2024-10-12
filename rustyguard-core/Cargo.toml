@@ -12,7 +12,7 @@ hashbrown = { version = "0.14", default-features = false }
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 foldhash = { version = "0.1", default-features = false }
 tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
-zerocopy = { version = "0.7.35", features = ["derive"] }
+zerocopy = { version = "0.8", features = ["derive"] }
 zeroize = "1.8"
 
 [dev-dependencies]

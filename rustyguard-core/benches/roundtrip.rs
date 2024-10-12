@@ -4,7 +4,7 @@ use divan::{black_box, Bencher};
 use rand::{thread_rng, RngCore};
 use rustyguard_core::{PrivateKey, UnparsedPublicKey};
 use rustyguard_crypto::{Key, StaticPeerConfig};
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 use rustyguard_core::{Config, PeerId, Sessions};
 

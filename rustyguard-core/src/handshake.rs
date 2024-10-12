@@ -41,7 +41,7 @@ impl Sessions {
         let state = &mut *state_ref;
 
         unsafe_log!("[{addr:?}] parsed as handshake init packet");
-        let init_msg = HandshakeInit::mut_from(msg).ok_or(Error::InvalidMessage)?;
+        let init_msg = HandshakeInit::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
 
         let overload = state.overloaded(addr.ip());
 
@@ -144,7 +144,7 @@ impl Sessions {
         let state = &mut *state_ref;
 
         unsafe_log!("[{addr:?}] parsed as handshake resp packet");
-        let resp_msg = HandshakeResp::mut_from(msg).ok_or(Error::InvalidMessage)?;
+        let resp_msg = HandshakeResp::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
 
         let overload = state.overloaded(addr.ip());
         let resp_msg = match HandshakeResp::verify(
@@ -235,7 +235,7 @@ impl Sessions {
         let state = &mut *state_ref;
 
         unsafe_log!("parsed as cookie packet");
-        let cookie_msg = CookieMessage::mut_from(msg).ok_or(Error::InvalidMessage)?;
+        let cookie_msg = CookieMessage::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
 
         let session = state
             .peers_by_session2

@@ -11,7 +11,7 @@ use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
 use rustyguard_types::Tag;
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
@@ -210,7 +210,7 @@ macro_rules! encrypted {
                 let aad = state.hash;
                 state.mix_hash(self.as_bytes());
 
-                key.open_in_place(nonce(0), Aad::from(&aad), self.as_bytes_mut())
+                key.open_in_place(nonce(0), Aad::from(&aad), self.as_mut_bytes())
                     .map_err(|_| CryptoError::DecryptionError)?;
 
                 Ok(&mut self.msg)

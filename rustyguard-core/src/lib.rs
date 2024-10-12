@@ -40,7 +40,7 @@ use rustyguard_types::{
 use rustyguard_utils::rate_limiter::CountMinSketch;
 use tai64::Tai64;
 use time::{TimerEntry, TimerEntryType};
-use zerocopy::{little_endian, AsBytes, FromBytes, FromZeroes};
+use zerocopy::{little_endian, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub use rustyguard_crypto::{PrivateKey, UnparsedPublicKey};
@@ -464,14 +464,14 @@ enum MaintenanceRepr {
     Data(Keepalive),
 }
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C)]
 struct Keepalive {
     header: DataHeader,
     tag: rustyguard_types::Tag,
 }
 
-fn write_msg<'b, T: AsBytes>(buf: &'b mut [u8], t: &T) -> &'b mut [u8] {
+fn write_msg<'b, T: IntoBytes + Immutable>(buf: &'b mut [u8], t: &T) -> &'b mut [u8] {
     let resp_msg = &mut buf[..core::mem::size_of::<T>()];
     resp_msg.copy_from_slice(t.as_bytes());
     resp_msg
@@ -586,7 +586,8 @@ impl Sessions {
 
         // Every message in wireguard starts with a 1 byte message tag and 3 bytes empty.
         // This happens to be easy to read as a little-endian u32.
-        let msg_type = little_endian::U32::ref_from_prefix(msg).ok_or(Error::InvalidMessage)?;
+        let (msg_type, _) =
+            little_endian::U32::ref_from_prefix(msg).map_err(|_| Error::InvalidMessage)?;
         match msg_type.get() {
             MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
             MSG_SECOND => self.handle_handshake_resp(socket, msg),
@@ -635,7 +636,6 @@ impl Sessions {
             });
         }
 
-        let payload_and_tag = payload_and_tag.as_bytes_mut();
         let payload = ts.decrypt.decrypt(header.counter.get(), payload_and_tag)?;
 
         Ok((session.peer, payload))
@@ -654,7 +654,7 @@ mod tests {
     };
     use rustyguard_crypto::{Key, StaticPeerConfig};
     use tai64::Tai64N;
-    use zerocopy::AsBytes;
+    use zerocopy::IntoBytes;
 
     use crate::{Config, PeerId, Sessions};
 

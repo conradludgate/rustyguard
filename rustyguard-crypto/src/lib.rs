@@ -17,7 +17,7 @@ use rustyguard_types::{
 };
 
 use tai64::Tai64N;
-use zerocopy::{little_endian, transmute_mut, AsBytes, FromBytes, FromZeroes};
+use zerocopy::{little_endian, transmute_mut, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(any(test, rustyguard_unsafe_logging))]
@@ -49,7 +49,7 @@ pub fn decrypt_cookie<'c>(
     aad: &[u8],
 ) -> Result<&'c mut Cookie, CryptoError> {
     XLessSafeKey::new(XChaChaKey::new(key).unwrap())
-        .open_in_place(XNonce::from(nonce), Aad::from(aad), cookie.as_bytes_mut())
+        .open_in_place(XNonce::from(nonce), Aad::from(aad), cookie.as_mut_bytes())
         .map_err(|_| CryptoError::DecryptionError)?;
 
     Ok(&mut cookie.msg)
@@ -113,7 +113,7 @@ impl CookieState {
 /// The second MAC is only checked if the server is overloaded. If the server is
 /// overloaded and second MAC is invalid, a CookieReply is sent to the client,
 /// which contains an encrypted key that can be used to re-sign the handshake later.
-pub trait HasMac: FromBytes + AsBytes + Sized {
+pub trait HasMac: FromBytes + IntoBytes + Sized {
     fn verify<'m>(
         &'m mut self,
         config: &StaticInitiatorConfig,
@@ -263,7 +263,7 @@ impl StaticInitiatorConfig {
     }
 }
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(transparent)]
 pub struct DecryptedHandshakeInit(HandshakeInit);
 
@@ -456,7 +456,7 @@ mod tests {
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use rustyguard_aws_lc::agreement::{EphemeralPrivateKey, PrivateKey, UnparsedPublicKey};
     use tai64::{Tai64, Tai64N};
-    use zerocopy::AsBytes;
+    use zerocopy::IntoBytes;
 
     use crate::{
         decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_init,

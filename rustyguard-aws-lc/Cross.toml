@@ -1,5 +1,5 @@
 [build]
-dockerfile = "../docker/linux-cross/Dockerfile"
+dockerfile = "../linux-cross/Dockerfile"
 
 [build.env]
 passthrough = [
