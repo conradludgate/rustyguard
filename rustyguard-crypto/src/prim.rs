@@ -1,10 +1,6 @@
 use graviola::aead::ChaCha20Poly1305;
 use graviola::x25519::PrivateKey;
 use graviola::x25519::PublicKey;
-use rustyguard_aws_lc::aead::Aad;
-use rustyguard_aws_lc::aead::ChaChaKey;
-use rustyguard_aws_lc::aead::LessSafeKey;
-use rustyguard_aws_lc::aead::Nonce;
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
@@ -203,40 +199,29 @@ macro_rules! encrypted {
                 state: &mut HandshakeState,
                 key: &Key,
             ) -> Result<&mut [u8; $n], CryptoError> {
-                let key = ChaChaKey::new(&key[..]).unwrap();
-                let key = LessSafeKey::new(key);
+                let key = ChaCha20Poly1305::new(*key);
 
                 let aad = state.hash;
                 state.mix_hash(self.as_bytes());
 
-                key.open_in_place(
-                    Nonce::assume_unique_for_key(nonce(0)),
-                    Aad::from(&aad),
-                    self.as_mut_bytes(),
-                )
-                .map_err(|_| CryptoError::DecryptionError)?;
+                key.decrypt(&nonce(0), &aad, &mut self.msg, &self.tag.0)
+                    .map_err(|_| CryptoError::DecryptionError)?;
 
                 Ok(&mut self.msg)
             }
 
-            fn encrypt_and_hash(mut msg: [u8; $n], state: &mut HandshakeState, key: &Key) -> Self {
-                let key = ChaChaKey::new(&key[..]).unwrap();
-                let key = LessSafeKey::new(key);
+            fn encrypt_and_hash(msg: [u8; $n], state: &mut HandshakeState, key: &Key) -> Self {
+                let key = ChaCha20Poly1305::new(*key);
 
                 let aad = state.hash;
 
-                let tag = key
-                    .seal_in_place_separate_tag(
-                        Nonce::assume_unique_for_key(nonce(0)),
-                        Aad::from(&aad),
-                        &mut msg,
-                    )
-                    .expect("message should not be larger than max message size");
-
-                let out = Self {
+                let mut out = Self {
                     msg,
-                    tag: Tag(*tag.as_ref()),
+                    tag: Tag([0; 16]),
                 };
+
+                key.encrypt(&nonce(0), &aad, &mut out.msg, &mut out.tag.0);
+
                 state.mix_hash(out.as_bytes());
 
                 out
