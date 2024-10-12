@@ -4,10 +4,8 @@ use base64ct::{Base64, Encoding};
 use ini::Ini;
 use ipnet::Ipv4Net;
 use iptrie::{LCTrieMap, RTrieMap};
-use rand::rngs::OsRng;
-use rustyguard_core::{
-    Config, DataHeader, Message, PeerId, PrivateKey, Sessions, UnparsedPublicKey,
-};
+use rand::{rngs::OsRng, Rng};
+use rustyguard_core::{Config, DataHeader, Message, PeerId, PrivateKey, PublicKey, Sessions};
 use rustyguard_crypto::StaticPeerConfig;
 
 pub mod tun;
@@ -101,26 +99,22 @@ impl TunConfig {
     }
 
     pub fn key(&self) -> PrivateKey {
+        let private_key;
         match &self.interface.key {
             Some(key) => {
-                let private_key = PrivateKey::from_private_key(key).unwrap();
-                println!(
-                    "public key: {}",
-                    Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
-                );
-                private_key
+                private_key = PrivateKey::from_array((&**key).try_into().unwrap());
             }
             None => {
-                let private_key = PrivateKey::generate(&mut OsRng).unwrap();
-                let c = private_key.as_bytes().unwrap();
+                private_key = PrivateKey::from_array(&OsRng.gen());
+                let c = private_key.as_bytes();
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
-                println!(
-                    "public key: {}",
-                    Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
-                );
-                private_key
             }
         }
+        println!(
+            "public key: {}",
+            Base64::encode_string(&private_key.public_key().as_bytes())
+        );
+        private_key
     }
 
     pub fn build(self) -> (Sessions, LCTrieMap<Ipv4Net, PeerId>) {
@@ -128,7 +122,7 @@ impl TunConfig {
 
         let mut peer_net = RTrieMap::with_root(PeerId::sentinal());
         for peer in self.peers {
-            let peer_pk = UnparsedPublicKey::new(<[u8; 32]>::try_from(&*peer.key).unwrap());
+            let peer_pk = PublicKey::from_array(<&[u8; 32]>::try_from(&*peer.key).unwrap());
             let id = rg_config.insert_peer(StaticPeerConfig::new(
                 peer_pk,
                 None,

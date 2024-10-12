@@ -1,13 +1,10 @@
 use graviola::aead::ChaCha20Poly1305;
+use graviola::x25519::PrivateKey;
+use graviola::x25519::PublicKey;
 use rustyguard_aws_lc::aead::Aad;
 use rustyguard_aws_lc::aead::ChaChaKey;
 use rustyguard_aws_lc::aead::LessSafeKey;
 use rustyguard_aws_lc::aead::Nonce;
-use rustyguard_aws_lc::agreement::agree;
-use rustyguard_aws_lc::agreement::agree_ephemeral;
-use rustyguard_aws_lc::agreement::EphemeralPrivateKey;
-use rustyguard_aws_lc::agreement::PrivateKey;
-use rustyguard_aws_lc::agreement::UnparsedPublicKey;
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
@@ -17,6 +14,7 @@ use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
 use crate::CryptoError;
+use crate::EphemeralPrivateKey;
 use rustyguard_utils::anti_replay::AntiReplay;
 
 pub type Key = [u8; 32];
@@ -141,22 +139,21 @@ impl HandshakeState {
         self.chain = c;
     }
 
-    pub fn mix_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey) {
-        let [c] = agree(sk, pk, |prk| hkdf(&self.chain, prk)).unwrap();
+    pub fn mix_dh(&mut self, sk: &PrivateKey, pk: &PublicKey) {
+        let [c] = hkdf(&self.chain, &sk.diffie_hellman(pk).0);
         self.chain = c;
     }
 
-    pub fn mix_key_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey) -> Key {
-        agree(sk, pk, |prk| self.mix_key(prk)).unwrap()
+    pub fn mix_key_dh(&mut self, sk: &PrivateKey, pk: &PublicKey) -> Key {
+        self.mix_key(&sk.diffie_hellman(pk).0)
     }
 
-    pub fn mix_edh(&mut self, sk: &EphemeralPrivateKey, pk: &UnparsedPublicKey) {
-        let [c] = agree_ephemeral(sk, pk, |prk| hkdf(&self.chain, prk)).unwrap();
-        self.chain = c;
+    pub fn mix_edh(&mut self, sk: &EphemeralPrivateKey, pk: &PublicKey) {
+        self.mix_dh(&sk.0, pk);
     }
 
-    pub fn mix_key_edh(&mut self, sk: &EphemeralPrivateKey, pk: &UnparsedPublicKey) -> Key {
-        agree_ephemeral(sk, pk, |prk| self.mix_key(prk)).unwrap()
+    pub fn mix_key_edh(&mut self, sk: &EphemeralPrivateKey, pk: &PublicKey) -> Key {
+        self.mix_key_dh(&sk.0, pk)
     }
 
     fn mix_key(&mut self, b: &[u8]) -> Key {

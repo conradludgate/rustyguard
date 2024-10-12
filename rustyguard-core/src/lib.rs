@@ -43,7 +43,7 @@ use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub use rustyguard_crypto::{PrivateKey, UnparsedPublicKey};
+pub use rustyguard_crypto::{PrivateKey, PublicKey};
 pub use rustyguard_types::DataHeader;
 pub use tai64::Tai64N;
 
@@ -125,9 +125,9 @@ impl Config {
     pub fn insert_peer(&mut self, peer: StaticPeerConfig) -> PeerId {
         use hashbrown::hash_table::Entry;
         match self.peers_by_pubkey.entry(
-            self.pubkey_hasher.hash_one(peer.key.bytes()),
-            |&i| self.peers[i].key.bytes() == peer.key.bytes(),
-            |&i| self.pubkey_hasher.hash_one(self.peers[i].key.bytes()),
+            self.pubkey_hasher.hash_one(peer.key.as_bytes()),
+            |&i| self.peers[i].key.as_bytes() == peer.key.as_bytes(),
+            |&i| self.pubkey_hasher.hash_one(self.peers[i].key.as_bytes()),
         ) {
             Entry::Occupied(o) => {
                 let id = *o.get();
@@ -148,11 +148,11 @@ impl Config {
         }
     }
 
-    fn get_peer_idx(&self, pk: &UnparsedPublicKey) -> Option<PeerId> {
+    fn get_peer_idx(&self, pk: &PublicKey) -> Option<PeerId> {
         let peers = &self.peers;
         self.peers_by_pubkey
-            .find(self.pubkey_hasher.hash_one(pk.bytes()), |&i| {
-                peers[i].key.bytes() == pk.bytes()
+            .find(self.pubkey_hasher.hash_one(pk.as_bytes()), |&i| {
+                peers[i].key.as_bytes() == pk.as_bytes()
             })
             .copied()
     }
@@ -646,7 +646,7 @@ impl Sessions {
 mod tests {
     use core::net::SocketAddr;
 
-    use crate::{PrivateKey, UnparsedPublicKey};
+    use crate::{PrivateKey, PublicKey};
     use alloc::boxed::Box;
     use rand::{
         rngs::{OsRng, StdRng},
@@ -658,19 +658,15 @@ mod tests {
 
     use crate::{Config, PeerId, Sessions};
 
-    fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-        UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
-    }
-
     fn gen_sk(r: &mut impl Rng) -> PrivateKey {
         let mut b = [0u8; 32];
         r.fill_bytes(&mut b);
-        PrivateKey::from_private_key(&b).unwrap()
+        PrivateKey::from_array(&b)
     }
 
     fn session_with_peer(
         secret_key: PrivateKey,
-        peer_public_key: UnparsedPublicKey,
+        peer_public_key: PublicKey,
         preshared_key: Key,
         endpoint: SocketAddr,
     ) -> (PeerId, Sessions) {
@@ -690,8 +686,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut OsRng);
         let ssk_r = gen_sk(&mut OsRng);
-        let spk_i = pk(&ssk_i);
-        let spk_r = pk(&ssk_r);
+        let spk_i = ssk_i.public_key();
+        let spk_r = ssk_r.public_key();
         let mut psk = Key::default();
         OsRng.fill_bytes(&mut psk);
 
@@ -754,8 +750,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut rng);
         let ssk_r = gen_sk(&mut rng);
-        let spk_i = pk(&ssk_i);
-        let spk_r = pk(&ssk_r);
+        let spk_i = ssk_i.public_key();
+        let spk_r = ssk_r.public_key();
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 
