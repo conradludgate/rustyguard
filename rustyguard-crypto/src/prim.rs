@@ -1,3 +1,4 @@
+use graviola::aead::ChaCha20Poly1305;
 use rustyguard_aws_lc::aead::Aad;
 use rustyguard_aws_lc::aead::ChaChaKey;
 use rustyguard_aws_lc::aead::LessSafeKey;
@@ -35,10 +36,10 @@ pub(crate) const IDENTIFIER_HASH: [u8; 32] = [
 pub(crate) const LABEL_MAC1: [u8; 8] = *b"mac1----";
 pub(crate) const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
-fn nonce(counter: u64) -> Nonce {
+fn nonce(counter: u64) -> [u8; 12] {
     let mut n = [0; 12];
     n[4..].copy_from_slice(&u64::to_le_bytes(counter));
-    Nonce::assume_unique_for_key(n)
+    n
 }
 
 pub(crate) fn hash(msg: [&[u8]; 2]) -> Key {
@@ -176,7 +177,7 @@ impl HandshakeState {
     }
 
     pub fn split(&mut self, initiator: bool) -> (EncryptionKey, DecryptionKey) {
-        let [k1, k2] = hkdf(&self.chain, &[]).map(|k| ChaChaKey::new(&k[..]).unwrap());
+        let [k1, k2] = hkdf(&self.chain, &[]);
         self.zeroize();
 
         if initiator {
@@ -211,8 +212,12 @@ macro_rules! encrypted {
                 let aad = state.hash;
                 state.mix_hash(self.as_bytes());
 
-                key.open_in_place(nonce(0), Aad::from(&aad), self.as_mut_bytes())
-                    .map_err(|_| CryptoError::DecryptionError)?;
+                key.open_in_place(
+                    Nonce::assume_unique_for_key(nonce(0)),
+                    Aad::from(&aad),
+                    self.as_mut_bytes(),
+                )
+                .map_err(|_| CryptoError::DecryptionError)?;
 
                 Ok(&mut self.msg)
             }
@@ -224,7 +229,11 @@ macro_rules! encrypted {
                 let aad = state.hash;
 
                 let tag = key
-                    .seal_in_place_separate_tag(nonce(0), Aad::from(&aad), &mut msg)
+                    .seal_in_place_separate_tag(
+                        Nonce::assume_unique_for_key(nonce(0)),
+                        Aad::from(&aad),
+                        &mut msg,
+                    )
                     .expect("message should not be larger than max message size");
 
                 let out = Self {
@@ -246,14 +255,14 @@ encrypted!(EncryptedPublicKey, 32);
 pub type Mac = [u8; 16];
 
 pub struct EncryptionKey {
-    key: LessSafeKey,
+    key: ChaCha20Poly1305,
     counter: u64,
 }
 
 impl EncryptionKey {
-    pub fn new(key: ChaChaKey) -> Self {
+    pub fn new(key: Key) -> Self {
         Self {
-            key: LessSafeKey::new(key),
+            key: ChaCha20Poly1305::new(key),
             counter: 0,
         }
     }
@@ -262,12 +271,10 @@ impl EncryptionKey {
         let n = self.counter;
         self.counter += 1;
         let nonce = nonce(n);
-        let tag = self
-            .key
-            .seal_in_place_separate_tag(nonce, Aad::empty(), payload)
-            .unwrap();
+        let mut tag = [0; 16];
+        self.key.encrypt(&nonce, &[], payload, &mut tag);
 
-        Tag(*tag.as_ref())
+        Tag(tag)
     }
 
     pub fn counter(&self) -> u64 {
@@ -276,14 +283,14 @@ impl EncryptionKey {
 }
 
 pub struct DecryptionKey {
-    key: LessSafeKey,
+    key: ChaCha20Poly1305,
     replay: AntiReplay,
 }
 
 impl DecryptionKey {
-    pub fn new(key: ChaChaKey) -> Self {
+    pub fn new(key: Key) -> Self {
         Self {
-            key: LessSafeKey::new(key),
+            key: ChaCha20Poly1305::new(key),
             replay: AntiReplay::default(),
         }
     }
@@ -300,9 +307,14 @@ impl DecryptionKey {
 
         let nonce = nonce(counter);
 
+        let pos = payload_and_tag.len() - 16;
+        let (payload, tag) = payload_and_tag.split_at_mut(pos);
+
         self.key
-            .open_in_place(nonce, Aad::empty(), payload_and_tag)
-            .map_err(|_| CryptoError::DecryptionError)
+            .decrypt(&nonce, &[], payload, tag)
+            .map_err(|_| CryptoError::DecryptionError)?;
+
+        Ok(payload)
     }
 }
 
