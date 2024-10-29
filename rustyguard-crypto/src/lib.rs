@@ -2,11 +2,10 @@
 
 use core::{net::SocketAddr, ops::ControlFlow};
 
-pub use graviola::x25519::PrivateKey;
-pub use graviola::x25519::PublicKey;
+pub use graviola::key_agreement::x25519::PrivateKey;
+pub use graviola::key_agreement::x25519::PublicKey;
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
-use rustyguard_aws_lc::aead::{Aad, XChaChaKey, XLessSafeKey, XNonce};
 
 use rand_core::{CryptoRng, CryptoRngCore, RngCore};
 use rustyguard_types::{
@@ -15,6 +14,7 @@ use rustyguard_types::{
 };
 
 use tai64::Tai64N;
+use xchacha20::new_xchacha20;
 use zerocopy::{little_endian, transmute_mut, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -33,6 +33,7 @@ macro_rules! unsafe_log {
 }
 
 mod prim;
+mod xchacha20;
 
 pub struct EphemeralPrivateKey(PrivateKey);
 
@@ -48,27 +49,23 @@ pub fn decrypt_cookie<'c>(
     nonce: &[u8; 24],
     aad: &[u8],
 ) -> Result<&'c mut Cookie, CryptoError> {
-    XLessSafeKey::new(XChaChaKey::new(key).unwrap())
-        .open_in_place(XNonce::from(nonce), Aad::from(aad), cookie.as_mut_bytes())
+    let (key, nonce) = new_xchacha20(key, nonce);
+    key.decrypt(&nonce, aad, &mut cookie.msg.0, &cookie.tag.0)
         .map_err(|_| CryptoError::DecryptionError)?;
 
     Ok(&mut cookie.msg)
 }
 
-pub fn encrypt_cookie(
-    mut cookie: Cookie,
-    key: &Key,
-    nonce: &[u8; 24],
-    aad: &[u8],
-) -> EncryptedCookie {
-    let tag = XLessSafeKey::new(XChaChaKey::new(key).unwrap())
-        .seal_in_place_separate_tag(XNonce::from(nonce), Aad::from(aad), &mut cookie.0)
-        .unwrap();
-
-    EncryptedCookie {
+pub fn encrypt_cookie(cookie: Cookie, key: &Key, nonce: &[u8; 24], aad: &[u8]) -> EncryptedCookie {
+    let mut out = EncryptedCookie {
         msg: cookie,
-        tag: Tag(*tag.as_ref()),
-    }
+        tag: Tag([0; 16]),
+    };
+
+    let (key, nonce) = new_xchacha20(key, nonce);
+    key.encrypt(&nonce, aad, &mut out.msg.0, &mut out.tag.0);
+
+    out
 }
 
 pub fn mac1_key(spk: &[u8]) -> Key {
@@ -463,7 +460,7 @@ impl EphemeralPrivateKey {
 
 #[cfg(test)]
 mod tests {
-    use graviola::x25519::PrivateKey;
+    use graviola::key_agreement::x25519::PrivateKey;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use tai64::{Tai64, Tai64N};
     use zerocopy::IntoBytes;
