@@ -8,7 +8,7 @@ rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 
 # crypto
-rustyguard-aws-lc = { version = "0.1", path = "../rustyguard-aws-lc" }
+# rustyguard-aws-lc = { version = "0.1", path = "../rustyguard-aws-lc" }
 blake2s_simd = { version = "1.0", default-features = false }
 
 # crypto adjacent
@@ -18,7 +18,7 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 rand_core = { version = "0.6", default-features = false }
 tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
 zerocopy = { version = "0.8", features = ["derive"] }
-graviola = { version = "=0.1.1", features = ["__internal_08eaf2eb"] }
+graviola = { version = "=0.2.0-alpha.0", features = [] }
 
 [dev-dependencies]
 divan = "0.1.14"
