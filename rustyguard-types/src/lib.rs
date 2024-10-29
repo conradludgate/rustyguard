@@ -1,39 +1,39 @@
 #![no_std]
 
-use zerocopy::{byteorder::little_endian, transmute, AsBytes, FromBytes, FromZeroes};
+use zerocopy::{byteorder::little_endian, transmute, FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub type Mac = [u8; 16];
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(transparent)]
 pub struct Cookie(pub Mac);
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(transparent)]
 pub struct Tag(pub [u8; 16]);
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C)]
 pub struct EncryptedEmpty {
     pub msg: [u8; 0],
     pub tag: Tag,
 }
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C)]
 pub struct EncryptedTimestamp {
     pub msg: [u8; 12],
     pub tag: Tag,
 }
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C)]
 pub struct EncryptedPublicKey {
     pub msg: [u8; 32],
     pub tag: Tag,
 }
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C)]
 pub struct EncryptedCookie {
     pub msg: Cookie,
@@ -61,19 +61,19 @@ impl<'a> WgMessage<'a> {
     pub fn mut_from(b: &'a mut [u8]) -> Option<Self> {
         // Every message in wireguard starts with a 1 byte message tag and 3 bytes empty.
         // This happens to be easy to read as a little-endian u32.
-        let msg_type = little_endian::U32::ref_from_prefix(b)?;
+        let (msg_type, _) = little_endian::U32::ref_from_prefix(b).ok()?;
         match msg_type.get() {
-            MSG_FIRST => Some(WgMessage::Init(FromBytes::mut_from(b)?)),
-            MSG_SECOND => Some(WgMessage::Resp(FromBytes::mut_from(b)?)),
-            MSG_COOKIE => Some(WgMessage::Cookie(FromBytes::mut_from(b)?)),
-            MSG_DATA => Some(WgMessage::Data(FromBytes::mut_from(b)?)),
+            MSG_FIRST => Some(WgMessage::Init(FromBytes::mut_from_bytes(b).ok()?)),
+            MSG_SECOND => Some(WgMessage::Resp(FromBytes::mut_from_bytes(b).ok()?)),
+            MSG_COOKIE => Some(WgMessage::Cookie(FromBytes::mut_from_bytes(b).ok()?)),
+            MSG_DATA => Some(WgMessage::Data(FromBytes::mut_from_bytes(b).ok()?)),
             _ => None,
         }
     }
 }
 
 /// The initiation for a wireguard session handshake.
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C, align(4))]
 pub struct HandshakeInit {
     /// Must always be [`MSG_FIRST`]
@@ -104,7 +104,7 @@ pub struct HandshakeInit {
 }
 
 /// The response for a wireguard session handshake.
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C, align(4))]
 pub struct HandshakeResp {
     /// Must always be [`MSG_SECOND`]
@@ -135,7 +135,7 @@ pub struct HandshakeResp {
 ///
 /// WireGuard will send cookies overloaded, as a way to mitigate
 /// certain DDoS attacks.
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C, align(4))]
 pub struct CookieMessage {
     /// Must always be [`MSG_COOKIE`]
@@ -164,7 +164,7 @@ pub struct CookieMessage {
 ///
 /// Unfortunately, this is impossible to express in the Rust type system
 /// with [`zerocopy`], thus we split off the header from the other payload+tag.
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C, align(8))]
 pub struct DataHeader {
     /// Must always be [`MSG_DATA`]
@@ -181,16 +181,16 @@ pub struct DataHeader {
 impl DataHeader {
     #[inline(always)]
     pub fn message_mut_from(msg: &mut [u8]) -> Option<(Self, &mut [u8])> {
-        #[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+        #[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
         #[repr(C, align(16))]
         struct DataSegment([u8; 16]);
 
-        let segments = DataSegment::mut_slice_from(msg)?;
+        let segments = <[DataSegment]>::mut_from_bytes(msg).ok()?;
         let [header, payload_and_tag @ ..] = segments else {
             return None;
         };
         let header: Self = transmute!(*header);
-        let payload_and_tag = payload_and_tag.as_bytes_mut();
+        let payload_and_tag = payload_and_tag.as_mut_bytes();
         Some((header, payload_and_tag))
     }
 }

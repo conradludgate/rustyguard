@@ -2,22 +2,20 @@
 
 use core::{net::SocketAddr, ops::ControlFlow};
 
+pub use graviola::key_agreement::x25519::PrivateKey;
+pub use graviola::key_agreement::x25519::PublicKey;
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
-pub use rustyguard_aws_lc::agreement::{EphemeralPrivateKey, PrivateKey, UnparsedPublicKey};
-use rustyguard_aws_lc::{
-    aead::{Aad, XChaChaKey, XLessSafeKey, XNonce},
-    agreement::PublicKey,
-};
 
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, CryptoRngCore, RngCore};
 use rustyguard_types::{
     Cookie, EncryptedCookie, EncryptedEmpty, EncryptedPublicKey, EncryptedTimestamp, HandshakeInit,
     HandshakeResp, Tag, MSG_FIRST, MSG_SECOND,
 };
 
 use tai64::Tai64N;
-use zerocopy::{little_endian, transmute_mut, AsBytes, FromBytes, FromZeroes};
+use xchacha20::new_xchacha20;
+use zerocopy::{little_endian, transmute_mut, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(any(test, rustyguard_unsafe_logging))]
@@ -35,6 +33,9 @@ macro_rules! unsafe_log {
 }
 
 mod prim;
+mod xchacha20;
+
+pub struct EphemeralPrivateKey(PrivateKey);
 
 #[derive(Debug)]
 pub enum CryptoError {
@@ -48,27 +49,23 @@ pub fn decrypt_cookie<'c>(
     nonce: &[u8; 24],
     aad: &[u8],
 ) -> Result<&'c mut Cookie, CryptoError> {
-    XLessSafeKey::new(XChaChaKey::new(key).unwrap())
-        .open_in_place(XNonce::from(nonce), Aad::from(aad), cookie.as_bytes_mut())
+    let (key, nonce) = new_xchacha20(key, nonce);
+    key.decrypt(&nonce, aad, &mut cookie.msg.0, &cookie.tag.0)
         .map_err(|_| CryptoError::DecryptionError)?;
 
     Ok(&mut cookie.msg)
 }
 
-pub fn encrypt_cookie(
-    mut cookie: Cookie,
-    key: &Key,
-    nonce: &[u8; 24],
-    aad: &[u8],
-) -> EncryptedCookie {
-    let tag = XLessSafeKey::new(XChaChaKey::new(key).unwrap())
-        .seal_in_place_separate_tag(XNonce::from(nonce), Aad::from(aad), &mut cookie.0)
-        .unwrap();
-
-    EncryptedCookie {
+pub fn encrypt_cookie(cookie: Cookie, key: &Key, nonce: &[u8; 24], aad: &[u8]) -> EncryptedCookie {
+    let mut out = EncryptedCookie {
         msg: cookie,
-        tag: Tag(*tag.as_ref()),
-    }
+        tag: Tag([0; 16]),
+    };
+
+    let (key, nonce) = new_xchacha20(key, nonce);
+    key.encrypt(&nonce, aad, &mut out.msg.0, &mut out.tag.0);
+
+    out
 }
 
 pub fn mac1_key(spk: &[u8]) -> Key {
@@ -113,7 +110,7 @@ impl CookieState {
 /// The second MAC is only checked if the server is overloaded. If the server is
 /// overloaded and second MAC is invalid, a CookieReply is sent to the client,
 /// which contains an encrypted key that can be used to re-sign the handshake later.
-pub trait HasMac: FromBytes + AsBytes + Sized {
+pub trait HasMac: FromBytes + IntoBytes + Sized {
     fn verify<'m>(
         &'m mut self,
         config: &StaticInitiatorConfig,
@@ -213,7 +210,7 @@ mac_protected!(HandshakeResp, MSG_SECOND);
 
 pub struct StaticPeerConfig {
     /// Peer's public key.
-    pub key: UnparsedPublicKey,
+    pub key: PublicKey,
     /// Peer's preshared key.
     pub preshared_key: Key,
     /// Cached mac1_key: calculated using `mac1_key(&self.key)`
@@ -236,14 +233,10 @@ pub struct StaticInitiatorConfig {
 }
 
 impl StaticPeerConfig {
-    pub fn new(
-        key: UnparsedPublicKey,
-        preshared_key: Option<Key>,
-        endpoint: Option<SocketAddr>,
-    ) -> Self {
+    pub fn new(key: PublicKey, preshared_key: Option<Key>, endpoint: Option<SocketAddr>) -> Self {
         Self {
-            mac1_key: mac1_key(key.bytes()),
-            cookie_key: cookie_key(key.bytes()),
+            mac1_key: mac1_key(&key.as_bytes()),
+            cookie_key: cookie_key(&key.as_bytes()),
             key,
             preshared_key: preshared_key.unwrap_or_default(),
             endpoint,
@@ -253,24 +246,24 @@ impl StaticPeerConfig {
 
 impl StaticInitiatorConfig {
     pub fn new(key: PrivateKey) -> Self {
-        let public_key = key.compute_public_key().unwrap();
+        let public_key = key.public_key();
         Self {
-            mac1_key: mac1_key(public_key.as_ref()),
-            cookie_key: cookie_key(public_key.as_ref()),
+            mac1_key: mac1_key(&public_key.as_bytes()),
+            cookie_key: cookie_key(&public_key.as_bytes()),
             public_key,
             private_key: key,
         }
     }
 }
 
-#[derive(Clone, Copy, FromBytes, FromZeroes, AsBytes)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(transparent)]
 pub struct DecryptedHandshakeInit(HandshakeInit);
 
 impl DecryptedHandshakeInit {
     #[inline(always)]
-    pub fn static_key(&self) -> UnparsedPublicKey {
-        UnparsedPublicKey::new(self.0.static_key.msg)
+    pub fn static_key(&self) -> PublicKey {
+        PublicKey::from_array(&self.0.static_key.msg)
     }
     #[inline(always)]
     pub fn timestamp(&self) -> &[u8; 12] {
@@ -295,19 +288,19 @@ pub fn encrypt_handshake_init(
     // -> e, es, s, ss
 
     // <- s:
-    let epk_i = esk_i.compute_public_key().unwrap();
-    hs.mix_hash(peer.key.bytes());
+    let epk_i = esk_i.0.public_key();
+    hs.mix_hash(&peer.key.as_bytes());
 
     // -> e: ephemeral keypair generated by caller
     // wireguard goes off-spec here with mix-chain.
-    hs.mix_chain(epk_i.as_ref());
-    hs.mix_hash(epk_i.as_ref());
+    hs.mix_chain(&epk_i.as_bytes());
+    hs.mix_hash(&epk_i.as_bytes());
 
     // -> es:
     let k = hs.mix_key_edh(esk_i, &peer.key);
 
     // -> s:
-    let static_key = EncryptedPublicKey::encrypt_and_hash(*initiator.public_key.as_ref(), hs, &k);
+    let static_key = EncryptedPublicKey::encrypt_and_hash(initiator.public_key.as_bytes(), hs, &k);
 
     // -> ss:
     let k = hs.mix_key_dh(&initiator.private_key, &peer.key);
@@ -319,7 +312,7 @@ pub fn encrypt_handshake_init(
     let mut msg = HandshakeInit {
         _type: little_endian::U32::new(MSG_FIRST),
         sender: little_endian::U32::new(sender),
-        ephemeral_key: *epk_i.as_ref(),
+        ephemeral_key: epk_i.as_bytes(),
         static_key,
         timestamp,
         mac1: [0; 16],
@@ -343,7 +336,7 @@ pub fn decrypt_handshake_init<'m>(
     // -> e, es, s, ss
 
     // <- s:
-    hs.mix_hash(receiver.public_key.as_ref());
+    hs.mix_hash(&receiver.public_key.as_bytes());
 
     // -> e:
     // wireguard goes off-spec here with mix-chain.
@@ -351,14 +344,14 @@ pub fn decrypt_handshake_init<'m>(
     hs.mix_hash(&init.ephemeral_key);
 
     // -> es:
-    let epk_i = UnparsedPublicKey::new(init.ephemeral_key);
+    let epk_i = PublicKey::from_array(&init.ephemeral_key);
     let k = hs.mix_key_dh(&receiver.private_key, &epk_i);
 
     unsafe_log!("decrypting static key");
     // -> s:
     let spk_i = init.static_key.decrypt_and_hash(hs, &k)?;
-    let spk_i = UnparsedPublicKey::new(*spk_i);
-    unsafe_log!("decrypted public key {spk_i:?}");
+    let spk_i = PublicKey::from_array(spk_i);
+    unsafe_log!("decrypted public key {:?}", spk_i.as_bytes());
 
     // -> ss:
     let k = hs.mix_key_dh(&receiver.private_key, &spk_i);
@@ -383,16 +376,16 @@ pub fn encrypt_handshake_resp(
 
     // <- e: ephemeral keypair generated by caller
     // wireguard goes off-spec here with mix-chain.
-    let epk_r = esk_r.compute_public_key().unwrap();
-    hs.mix_chain(epk_r.as_ref());
-    hs.mix_hash(epk_r.as_ref());
+    let epk_r = esk_r.0.public_key();
+    hs.mix_chain(&epk_r.as_bytes());
+    hs.mix_hash(&epk_r.as_bytes());
 
     // <- ee
-    let epk_i = UnparsedPublicKey::new(data.0.ephemeral_key);
+    let epk_i = PublicKey::from_array(&data.0.ephemeral_key);
     hs.mix_edh(esk_r, &epk_i);
 
     // <- se
-    let spk_i = UnparsedPublicKey::new(data.0.static_key.msg);
+    let spk_i = PublicKey::from_array(&data.0.static_key.msg);
     hs.mix_edh(esk_r, &spk_i);
 
     // <- psk
@@ -406,7 +399,7 @@ pub fn encrypt_handshake_resp(
         _type: little_endian::U32::new(MSG_SECOND),
         sender: little_endian::U32::new(sender),
         receiver: data.0.sender,
-        ephemeral_key: *epk_r.as_ref(),
+        ephemeral_key: epk_r.as_bytes(),
         empty,
         mac1: [0; 16],
         mac2: [0; 16],
@@ -431,9 +424,9 @@ pub fn decrypt_handshake_resp(
 
     // <- e:
     // wireguard goes off-spec here with mix-chain.
-    let epk_r = UnparsedPublicKey::new(resp.ephemeral_key);
-    hs.mix_chain(epk_r.bytes());
-    hs.mix_hash(epk_r.bytes());
+    let epk_r = PublicKey::from_array(&resp.ephemeral_key);
+    hs.mix_chain(&epk_r.as_bytes());
+    hs.mix_hash(&epk_r.as_bytes());
 
     // <- ee:
     hs.mix_edh(esk_i, &epk_r);
@@ -451,25 +444,31 @@ pub fn decrypt_handshake_resp(
     Ok(())
 }
 
+impl EphemeralPrivateKey {
+    pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
+        let mut b = [0u8; 32];
+        rng.fill_bytes(&mut b);
+        EphemeralPrivateKey(PrivateKey::from_array(&b))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use graviola::key_agreement::x25519::PrivateKey;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use rustyguard_aws_lc::agreement::{EphemeralPrivateKey, PrivateKey, UnparsedPublicKey};
     use tai64::{Tai64, Tai64N};
-    use zerocopy::AsBytes;
+    use zerocopy::IntoBytes;
 
     use crate::{
         decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_init,
-        encrypt_handshake_resp, CookieState, HandshakeState, HasMac, Key, StaticInitiatorConfig,
-        StaticPeerConfig,
+        encrypt_handshake_resp, CookieState, EphemeralPrivateKey, HandshakeState, HasMac, Key,
+        StaticInitiatorConfig, StaticPeerConfig,
     };
 
-    fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-        UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
-    }
-
     fn gen_sk(r: &mut StdRng) -> PrivateKey {
-        PrivateKey::generate(r).unwrap()
+        let mut b = [0u8; 32];
+        r.fill_bytes(&mut b);
+        PrivateKey::from_array(&b)
     }
 
     #[test]
@@ -481,8 +480,8 @@ mod tests {
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 
-        let peer_i = StaticPeerConfig::new(pk(&sk_i), Some(psk), None);
-        let peer_r = StaticPeerConfig::new(pk(&sk_r), Some(psk), None);
+        let peer_i = StaticPeerConfig::new(sk_i.public_key(), Some(psk), None);
+        let peer_r = StaticPeerConfig::new(sk_r.public_key(), Some(psk), None);
 
         let init_i = StaticInitiatorConfig::new(sk_i);
         let init_r = StaticInitiatorConfig::new(sk_r);
@@ -497,7 +496,7 @@ mod tests {
 
         let mut hs1 = HandshakeState::default();
 
-        let esk_i = EphemeralPrivateKey::generate(&mut rng).unwrap();
+        let esk_i = EphemeralPrivateKey::generate(&mut rng);
         let mut init =
             encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
 
@@ -507,10 +506,10 @@ mod tests {
         let mut hs2 = HandshakeState::default();
         let init = decrypt_handshake_init(&mut init, &mut hs2, &init_r).unwrap();
 
-        assert_eq!(init.static_key().bytes(), peer_i.key.bytes());
+        assert_eq!(init.static_key().as_bytes(), peer_i.key.as_bytes());
         assert_eq!(init.timestamp(), &now.to_bytes());
 
-        let esk_r = EphemeralPrivateKey::generate(&mut rng).unwrap();
+        let esk_r = EphemeralPrivateKey::generate(&mut rng);
         let mut resp = encrypt_handshake_resp(&mut hs2, init, &esk_r, &peer_i, 2, None);
 
         resp.verify_mac1(&init_i.mac1_key).unwrap();
@@ -559,7 +558,7 @@ mod tests {
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 
-        let peer_r = StaticPeerConfig::new(pk(&sk_r), Some(psk), None);
+        let peer_r = StaticPeerConfig::new(sk_r.public_key(), Some(psk), None);
 
         let init_i = StaticInitiatorConfig::new(sk_i);
         let init_r = StaticInitiatorConfig::new(sk_r);
@@ -571,7 +570,7 @@ mod tests {
 
         let mut hs1 = HandshakeState::default();
 
-        let esk_i = EphemeralPrivateKey::generate(&mut rng).unwrap();
+        let esk_i = EphemeralPrivateKey::generate(&mut rng);
         let mut init =
             encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
 

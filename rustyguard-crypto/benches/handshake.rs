@@ -1,8 +1,8 @@
 use divan::Bencher;
-use rand::{thread_rng, Rng, RngCore};
+use rand::{rngs::ThreadRng, thread_rng, Rng, RngCore};
 use rustyguard_crypto::{
     decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, EphemeralPrivateKey,
-    HandshakeState, Key, PrivateKey, StaticInitiatorConfig, StaticPeerConfig, UnparsedPublicKey,
+    HandshakeState, Key, PrivateKey, StaticInitiatorConfig, StaticPeerConfig,
 };
 use tai64::Tai64N;
 
@@ -10,17 +10,19 @@ fn main() {
     divan::main()
 }
 
-fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-    UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
+fn gen_sk(r: &mut ThreadRng) -> PrivateKey {
+    let mut b = [0u8; 32];
+    r.fill_bytes(&mut b);
+    PrivateKey::from_array(&b)
 }
 
 #[divan::bench(sample_count = 100, sample_size = 100)]
 fn handshake(b: Bencher) {
     b.with_inputs(|| {
-        let ssk_i = PrivateKey::generate(&mut thread_rng()).unwrap();
-        let ssk_r = PrivateKey::generate(&mut thread_rng()).unwrap();
-        let spk_i = pk(&ssk_i);
-        let spk_r = pk(&ssk_r);
+        let ssk_i = gen_sk(&mut thread_rng());
+        let ssk_r = gen_sk(&mut thread_rng());
+        let spk_i = ssk_i.public_key();
+        let spk_r = ssk_r.public_key();
         let mut psk = Key::default();
         thread_rng().fill_bytes(&mut psk);
 
@@ -29,7 +31,7 @@ fn handshake(b: Bencher) {
             &mut hs,
             &StaticInitiatorConfig::new(ssk_i),
             &StaticPeerConfig::new(spk_r, Some(psk), None),
-            &EphemeralPrivateKey::generate(&mut thread_rng()).unwrap(),
+            &EphemeralPrivateKey::generate(&mut thread_rng()),
             Tai64N::now(),
             thread_rng().gen(),
             None,
@@ -44,11 +46,11 @@ fn handshake(b: Bencher) {
     .bench_local_values(|(mut msg, config, peer)| {
         let mut hs = HandshakeState::default();
         let decrypted = decrypt_handshake_init(&mut msg, &mut hs, &config).unwrap();
-        assert_eq!(decrypted.static_key().bytes(), peer.key.bytes());
+        assert_eq!(decrypted.static_key().as_bytes(), peer.key.as_bytes());
         encrypt_handshake_resp(
             &mut hs,
             decrypted,
-            &EphemeralPrivateKey::generate(&mut thread_rng()).unwrap(),
+            &EphemeralPrivateKey::generate(&mut thread_rng()),
             &peer,
             thread_rng().gen(),
             None,
