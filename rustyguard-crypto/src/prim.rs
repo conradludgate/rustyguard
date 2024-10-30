@@ -134,6 +134,7 @@ impl Default for HandshakeState {
 }
 
 impl HandshakeState {
+    /// Like mix-key, but discards the unused key
     pub fn mix_chain(&mut self, b: &[u8]) {
         let [c] = hkdf(&self.chain, b);
         self.chain = c;
