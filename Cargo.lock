@@ -357,8 +357,7 @@ checksum = "40ecd4077b5ae9fd2e9e169b102c6c330d0605168eb0e8bf79952b256dbefffd"
 [[package]]
 name = "graviola"
 version = "0.2.0-alpha.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8caf2c6e9afe16a9f06a42dcf0a863a52ebf9f9c31fde0eaaa80e7190ab0bdbb"
+source = "git+https://github.com/conradludgate/graviola?branch=xchacha#103dc73c27e25d5b9506256adcb751a360be5080"
 dependencies = [
  "cfg-if",
  "getrandom",

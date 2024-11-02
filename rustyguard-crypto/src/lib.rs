@@ -2,6 +2,7 @@
 
 use core::{net::SocketAddr, ops::ControlFlow};
 
+use graviola::aead::XChaCha20Poly1305;
 pub use graviola::key_agreement::x25519::PrivateKey;
 pub use graviola::key_agreement::x25519::PublicKey;
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
@@ -14,7 +15,6 @@ use rustyguard_types::{
 };
 
 use tai64::Tai64N;
-use xchacha20::new_xchacha20;
 use zerocopy::{little_endian, transmute_mut, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -33,7 +33,6 @@ macro_rules! unsafe_log {
 }
 
 mod prim;
-mod xchacha20;
 
 pub struct EphemeralPrivateKey(PrivateKey);
 
@@ -49,8 +48,8 @@ pub fn decrypt_cookie<'c>(
     nonce: &[u8; 24],
     aad: &[u8],
 ) -> Result<&'c mut Cookie, CryptoError> {
-    let (key, nonce) = new_xchacha20(key, nonce);
-    key.decrypt(&nonce, aad, &mut cookie.msg.0, &cookie.tag.0)
+    XChaCha20Poly1305::new(*key)
+        .decrypt(nonce, aad, &mut cookie.msg.0, &cookie.tag.0)
         .map_err(|_| CryptoError::DecryptionError)?;
 
     Ok(&mut cookie.msg)
@@ -62,8 +61,7 @@ pub fn encrypt_cookie(cookie: Cookie, key: &Key, nonce: &[u8; 24], aad: &[u8]) -
         tag: Tag([0; 16]),
     };
 
-    let (key, nonce) = new_xchacha20(key, nonce);
-    key.encrypt(&nonce, aad, &mut out.msg.0, &mut out.tag.0);
+    XChaCha20Poly1305::new(*key).encrypt(nonce, aad, &mut out.msg.0, &mut out.tag.0);
 
     out
 }
