@@ -43,7 +43,7 @@ use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub use rustyguard_crypto::{PrivateKey, PublicKey};
+pub use rustyguard_crypto::{PublicKey, StaticPrivateKey};
 pub use rustyguard_types::DataHeader;
 pub use tai64::Tai64N;
 
@@ -111,7 +111,7 @@ impl<P> PeerList<P> {
 }
 
 impl Config {
-    pub fn new(private_key: PrivateKey) -> Self {
+    pub fn new(private_key: StaticPrivateKey) -> Self {
         Config {
             static_: StaticInitiatorConfig::new(private_key),
             // TODO(conrad): seed this
@@ -646,7 +646,7 @@ impl Sessions {
 mod tests {
     use core::net::SocketAddr;
 
-    use crate::{PrivateKey, PublicKey};
+    use crate::{PublicKey, StaticPrivateKey};
     use alloc::boxed::Box;
     use rand::{
         rngs::{OsRng, StdRng},
@@ -658,14 +658,14 @@ mod tests {
 
     use crate::{Config, PeerId, Sessions};
 
-    fn gen_sk(r: &mut impl Rng) -> PrivateKey {
+    fn gen_sk(r: &mut impl Rng) -> StaticPrivateKey {
         let mut b = [0u8; 32];
         r.fill_bytes(&mut b);
-        PrivateKey::from_array(&b)
+        StaticPrivateKey::from_array(&b)
     }
 
     fn session_with_peer(
-        secret_key: PrivateKey,
+        secret_key: StaticPrivateKey,
         peer_public_key: PublicKey,
         preshared_key: Key,
         endpoint: SocketAddr,

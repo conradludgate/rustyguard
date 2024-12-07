@@ -2,7 +2,7 @@ use core::net::SocketAddr;
 
 use divan::{black_box, Bencher};
 use rand::{rngs::ThreadRng, thread_rng, RngCore};
-use rustyguard_core::{PrivateKey, PublicKey};
+use rustyguard_core::{PublicKey, StaticPrivateKey};
 use rustyguard_crypto::{Key, StaticPeerConfig};
 use zerocopy::IntoBytes;
 
@@ -13,7 +13,7 @@ fn main() {
 }
 
 fn session_with_peer(
-    secret_key: PrivateKey,
+    secret_key: StaticPrivateKey,
     peer_public_key: PublicKey,
     preshared_key: Key,
     endpoint: SocketAddr,
@@ -28,10 +28,10 @@ fn session_with_peer(
 #[repr(align(16))]
 struct AlignedPacket([u8; 256]);
 
-fn gen_sk(r: &mut ThreadRng) -> PrivateKey {
+fn gen_sk(r: &mut ThreadRng) -> StaticPrivateKey {
     let mut b = [0u8; 32];
     r.fill_bytes(&mut b);
-    PrivateKey::from_array(&b)
+    StaticPrivateKey::from_array(&b)
 }
 
 #[divan::bench(sample_count = 100, sample_size = 100)]

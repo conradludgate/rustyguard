@@ -5,7 +5,7 @@ use ini::Ini;
 use ipnet::Ipv4Net;
 use iptrie::{LCTrieMap, RTrieMap};
 use rand::{rngs::OsRng, Rng};
-use rustyguard_core::{Config, DataHeader, Message, PeerId, PrivateKey, PublicKey, Sessions};
+use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
 use rustyguard_crypto::StaticPeerConfig;
 
 pub mod tun;
@@ -98,14 +98,14 @@ impl TunConfig {
         }
     }
 
-    pub fn key(&self) -> PrivateKey {
+    pub fn key(&self) -> StaticPrivateKey {
         let private_key;
         match &self.interface.key {
             Some(key) => {
-                private_key = PrivateKey::from_array((&**key).try_into().unwrap());
+                private_key = StaticPrivateKey::from_array((&**key).try_into().unwrap());
             }
             None => {
-                private_key = PrivateKey::from_array(&OsRng.gen());
+                private_key = StaticPrivateKey::from_array(&OsRng.gen());
                 let c = private_key.as_bytes();
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
             }

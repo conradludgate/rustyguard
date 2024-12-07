@@ -18,7 +18,7 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 rand_core = { version = "0.6", default-features = false }
 tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
 zerocopy = { version = "0.8", features = ["derive"] }
-graviola = { version = "=0.2.0-alpha.0", features = [], git="https://github.com/conradludgate/graviola", branch = "xchacha" }
+graviola = { version = "=0.2.0-alpha.2", features = [], git="https://github.com/ctz/graviola", branch = "main" }
 
 [dev-dependencies]
 divan = "0.1.14"

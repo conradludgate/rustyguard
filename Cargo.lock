@@ -356,8 +356,8 @@ checksum = "40ecd4077b5ae9fd2e9e169b102c6c330d0605168eb0e8bf79952b256dbefffd"
 
 [[package]]
 name = "graviola"
-version = "0.2.0-alpha.0"
-source = "git+https://github.com/conradludgate/graviola?branch=xchacha#103dc73c27e25d5b9506256adcb751a360be5080"
+version = "0.2.0-alpha.2"
+source = "git+https://github.com/ctz/graviola?branch=main#36a540420be89e9eba861dd00270ae232b4039ae"
 dependencies = [
  "cfg-if",
  "getrandom",

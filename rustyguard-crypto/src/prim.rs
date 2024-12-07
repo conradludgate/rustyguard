@@ -1,6 +1,6 @@
 use graviola::aead::ChaCha20Poly1305;
-use graviola::key_agreement::x25519::PrivateKey;
 use graviola::key_agreement::x25519::PublicKey;
+use graviola::key_agreement::x25519::StaticPrivateKey;
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
@@ -135,17 +135,13 @@ impl HandshakeState {
         self.chain = c;
     }
 
-    pub fn mix_dh(&mut self, sk: &PrivateKey, pk: &PublicKey) {
-        // jank:
-        let key = PrivateKey::from_array(&sk.as_bytes());
-        let [c] = hkdf(&self.chain, &key.diffie_hellman(pk).0);
+    pub fn mix_dh(&mut self, sk: &StaticPrivateKey, pk: &PublicKey) {
+        let [c] = hkdf(&self.chain, &sk.diffie_hellman(pk).0);
         self.chain = c;
     }
 
-    pub fn mix_key_dh(&mut self, sk: &PrivateKey, pk: &PublicKey) -> Key {
-        // jank:
-        let key = PrivateKey::from_array(&sk.as_bytes());
-        self.mix_key(&key.diffie_hellman(pk).0)
+    pub fn mix_key_dh(&mut self, sk: &StaticPrivateKey, pk: &PublicKey) -> Key {
+        self.mix_key(&sk.diffie_hellman(pk).0)
     }
 
     pub fn mix_edh(&mut self, sk: &EphemeralPrivateKey, pk: &PublicKey) {

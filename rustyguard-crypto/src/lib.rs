@@ -3,8 +3,8 @@
 use core::{net::SocketAddr, ops::ControlFlow};
 
 use graviola::aead::XChaCha20Poly1305;
-pub use graviola::key_agreement::x25519::PrivateKey;
 pub use graviola::key_agreement::x25519::PublicKey;
+pub use graviola::key_agreement::x25519::StaticPrivateKey;
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
 
@@ -34,7 +34,7 @@ macro_rules! unsafe_log {
 
 mod prim;
 
-pub struct EphemeralPrivateKey(PrivateKey);
+pub struct EphemeralPrivateKey(StaticPrivateKey);
 
 #[derive(Debug)]
 pub enum CryptoError {
@@ -221,7 +221,7 @@ pub struct StaticPeerConfig {
 
 pub struct StaticInitiatorConfig {
     /// Our private key
-    pub private_key: PrivateKey,
+    pub private_key: StaticPrivateKey,
     /// Cached public key, derived from the above private key
     pub public_key: PublicKey,
     /// Cached mac1_key: calculated using `mac1_key(&self.public_key)`
@@ -243,7 +243,7 @@ impl StaticPeerConfig {
 }
 
 impl StaticInitiatorConfig {
-    pub fn new(key: PrivateKey) -> Self {
+    pub fn new(key: StaticPrivateKey) -> Self {
         let public_key = key.public_key();
         Self {
             mac1_key: mac1_key(&public_key.as_bytes()),
@@ -452,13 +452,13 @@ impl EphemeralPrivateKey {
     pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
         let mut b = [0u8; 32];
         rng.fill_bytes(&mut b);
-        EphemeralPrivateKey(PrivateKey::from_array(&b))
+        EphemeralPrivateKey(StaticPrivateKey::from_array(&b))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use graviola::key_agreement::x25519::PrivateKey;
+    use graviola::key_agreement::x25519::StaticPrivateKey;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use tai64::{Tai64, Tai64N};
     use zerocopy::IntoBytes;
@@ -469,10 +469,10 @@ mod tests {
         StaticInitiatorConfig, StaticPeerConfig,
     };
 
-    fn gen_sk(r: &mut StdRng) -> PrivateKey {
+    fn gen_sk(r: &mut StdRng) -> StaticPrivateKey {
         let mut b = [0u8; 32];
         r.fill_bytes(&mut b);
-        PrivateKey::from_array(&b)
+        StaticPrivateKey::from_array(&b)
     }
 
     #[test]

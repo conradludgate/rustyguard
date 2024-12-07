@@ -7,7 +7,7 @@ use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
 use rand::{rngs::OsRng, Rng};
-use rustyguard_core::{Config, Message, PrivateKey, PublicKey, Sessions};
+use rustyguard_core::{Config, Message, PublicKey, Sessions, StaticPrivateKey};
 use rustyguard_crypto::StaticPeerConfig;
 use tai64::Tai64N;
 
@@ -34,7 +34,7 @@ fn main() {
     let private_key = match args.key {
         Some(key) => {
             let pk = Base64::decode_vec(&key).unwrap();
-            let private_key = PrivateKey::from_array(&pk.try_into().unwrap());
+            let private_key = StaticPrivateKey::from_array(&pk.try_into().unwrap());
             println!(
                 "public key: {}",
                 Base64::encode_string(&private_key.public_key().as_bytes())
@@ -42,7 +42,7 @@ fn main() {
             private_key
         }
         None => {
-            let private_key = PrivateKey::from_array(&OsRng.gen());
+            let private_key = StaticPrivateKey::from_array(&OsRng.gen());
             let c = private_key.as_bytes();
             println!("private key: {}", Base64::encode_string(c.as_ref()));
             println!(
@@ -162,7 +162,7 @@ pub struct SliceBuf<'a> {
     used: usize,
 }
 
-impl<'a> SliceBuf<'a> {
+impl SliceBuf<'_> {
     /// Create a new static buffer wrapping the given slice.
     pub fn new(slice: &mut [u8]) -> SliceBuf<'_> {
         SliceBuf {
@@ -242,21 +242,21 @@ impl<'a> packet::Buffer for SliceBuf<'a> {
     }
 }
 
-impl<'a> AsRef<[u8]> for SliceBuf<'a> {
+impl AsRef<[u8]> for SliceBuf<'_> {
     fn as_ref(&self) -> &[u8] {
         use packet::Buffer;
         self.data()
     }
 }
 
-impl<'a> AsMut<[u8]> for SliceBuf<'a> {
+impl AsMut<[u8]> for SliceBuf<'_> {
     fn as_mut(&mut self) -> &mut [u8] {
         use packet::Buffer;
         self.data_mut()
     }
 }
 
-impl<'a> Deref for SliceBuf<'a> {
+impl Deref for SliceBuf<'_> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -265,7 +265,7 @@ impl<'a> Deref for SliceBuf<'a> {
     }
 }
 
-impl<'a> DerefMut for SliceBuf<'a> {
+impl DerefMut for SliceBuf<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         use packet::Buffer;
         self.data_mut()
