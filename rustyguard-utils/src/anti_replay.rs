@@ -9,10 +9,18 @@ const BITMAP_INDEX_MASK: usize = BITMAP_LEN - 1;
 const BITMAP_LOC_MASK: u64 = (SIZE_OF_WORD as u64) - 1;
 const WINDOW_SIZE: u64 = (BITMAP_BITLEN - SIZE_OF_WORD) as u64;
 
-#[derive(Default)]
 pub struct AntiReplay {
     bitmap: [usize; BITMAP_LEN],
     last: u64,
+}
+
+impl Default for AntiReplay {
+    fn default() -> Self {
+        Self {
+            bitmap: [0; BITMAP_LEN],
+            last: 0,
+        }
+    }
 }
 
 impl AntiReplay {

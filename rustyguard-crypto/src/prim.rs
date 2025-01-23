@@ -1,24 +1,17 @@
-use rustyguard_aws_lc::aead::Aad;
-use rustyguard_aws_lc::aead::ChaChaKey;
-use rustyguard_aws_lc::aead::LessSafeKey;
-use rustyguard_aws_lc::aead::Nonce;
-use rustyguard_aws_lc::agreement::agree;
-use rustyguard_aws_lc::agreement::agree_ephemeral;
-use rustyguard_aws_lc::agreement::EphemeralPrivateKey;
-use rustyguard_aws_lc::agreement::PrivateKey;
-use rustyguard_aws_lc::agreement::UnparsedPublicKey;
+pub use chacha20poly1305::Key;
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
 use rustyguard_types::Tag;
+use x25519_dalek::PublicKey;
+use x25519_dalek::ReusableSecret;
+use x25519_dalek::StaticSecret;
 use zerocopy::IntoBytes;
 use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
 use crate::CryptoError;
 use rustyguard_utils::anti_replay::AntiReplay;
-
-pub type Key = [u8; 32];
 
 /// Construction: The UTF-8 string literal “Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s”, 37 bytes of output.
 /// Identifier: The UTF-8 string literal “WireGuard v1 zx2c4 Jason@zx2c4.com”, 34 bytes of output.
@@ -35,13 +28,13 @@ pub(crate) const IDENTIFIER_HASH: [u8; 32] = [
 pub(crate) const LABEL_MAC1: [u8; 8] = *b"mac1----";
 pub(crate) const LABEL_COOKIE: [u8; 8] = *b"cookie--";
 
-fn nonce(counter: u64) -> Nonce {
-    let mut n = [0; 12];
+fn nonce(counter: u64) -> chacha20poly1305::Nonce {
+    let mut n = chacha20poly1305::Nonce::default();
     n[4..].copy_from_slice(&u64::to_le_bytes(counter));
-    Nonce::assume_unique_for_key(n)
+    n
 }
 
-pub(crate) fn hash(msg: [&[u8]; 2]) -> Key {
+pub(crate) fn hash(msg: [&[u8]; 2]) -> [u8; 32] {
     let mut mac = blake2s_simd::State::new();
     for msg in msg {
         mac.update(msg);
@@ -92,7 +85,7 @@ fn hmac_inner<const M: usize>(ipad_key: &[u8; 64], opad_key: &[u8; 64], msg: [&[
     let mut h = blake2s_simd::State::new();
     h.update(opad_key);
     h.update(digest.finalize().as_bytes());
-    *h.finalize().as_array()
+    (*h.finalize().as_array()).into()
 }
 
 fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
@@ -133,6 +126,16 @@ impl Default for HandshakeState {
     }
 }
 
+fn agree<K>(sk: &StaticSecret, pk: &PublicKey, kdf: impl FnOnce(&[u8]) -> K) -> K {
+    let prk = sk.diffie_hellman(pk);
+    kdf(prk.as_bytes())
+}
+
+fn agree_ephemeral<K>(sk: &ReusableSecret, pk: &PublicKey, kdf: impl FnOnce(&[u8]) -> K) -> K {
+    let prk = sk.diffie_hellman(pk);
+    kdf(prk.as_bytes())
+}
+
 impl HandshakeState {
     /// Like mix-key, but discards the unused key
     pub fn mix_chain(&mut self, b: &[u8]) {
@@ -140,22 +143,22 @@ impl HandshakeState {
         self.chain = c;
     }
 
-    pub fn mix_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey) {
-        let [c] = agree(sk, pk, |prk| hkdf(&self.chain, prk)).unwrap();
+    pub fn mix_dh(&mut self, sk: &StaticSecret, pk: &PublicKey) {
+        let [c] = agree(sk, pk, |prk| hkdf(&self.chain, prk));
         self.chain = c;
     }
 
-    pub fn mix_key_dh(&mut self, sk: &PrivateKey, pk: &UnparsedPublicKey) -> Key {
-        agree(sk, pk, |prk| self.mix_key(prk)).unwrap()
+    pub fn mix_key_dh(&mut self, sk: &StaticSecret, pk: &PublicKey) -> Key {
+        agree(sk, pk, |prk| self.mix_key(prk))
     }
 
-    pub fn mix_edh(&mut self, sk: &EphemeralPrivateKey, pk: &UnparsedPublicKey) {
-        let [c] = agree_ephemeral(sk, pk, |prk| hkdf(&self.chain, prk)).unwrap();
+    pub fn mix_edh(&mut self, sk: &ReusableSecret, pk: &PublicKey) {
+        let [c] = agree_ephemeral(sk, pk, |prk| hkdf(&self.chain, prk));
         self.chain = c;
     }
 
-    pub fn mix_key_edh(&mut self, sk: &EphemeralPrivateKey, pk: &UnparsedPublicKey) -> Key {
-        agree_ephemeral(sk, pk, |prk| self.mix_key(prk)).unwrap()
+    pub fn mix_key_edh(&mut self, sk: &ReusableSecret, pk: &PublicKey) -> Key {
+        agree_ephemeral(sk, pk, |prk| self.mix_key(prk))
     }
 
     fn mix_key(&mut self, b: &[u8]) -> Key {
@@ -176,7 +179,7 @@ impl HandshakeState {
     }
 
     pub fn split(&mut self, initiator: bool) -> (EncryptionKey, DecryptionKey) {
-        let [k1, k2] = hkdf(&self.chain, &[]).map(|k| ChaChaKey::new(&k[..]).unwrap());
+        let [k1, k2] = hkdf(&self.chain, &[]);
         self.zeroize();
 
         if initiator {
@@ -205,31 +208,28 @@ macro_rules! encrypted {
                 state: &mut HandshakeState,
                 key: &Key,
             ) -> Result<&mut [u8; $n], CryptoError> {
-                let key = ChaChaKey::new(&key[..]).unwrap();
-                let key = LessSafeKey::new(key);
+                use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 
                 let aad = state.hash;
                 state.mix_hash(self.as_bytes());
 
-                key.open_in_place(nonce(0), Aad::from(&aad), self.as_mut_bytes())
+                ChaCha20Poly1305::new(key)
+                    .decrypt_in_place_detached(&nonce(0), &aad, &mut self.msg, (&self.tag.0).into())
                     .map_err(|_| CryptoError::DecryptionError)?;
-
                 Ok(&mut self.msg)
             }
 
             fn encrypt_and_hash(mut msg: [u8; $n], state: &mut HandshakeState, key: &Key) -> Self {
-                let key = ChaChaKey::new(&key[..]).unwrap();
-                let key = LessSafeKey::new(key);
+                use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 
                 let aad = state.hash;
-
-                let tag = key
-                    .seal_in_place_separate_tag(nonce(0), Aad::from(&aad), &mut msg)
+                let tag = ChaCha20Poly1305::new(key)
+                    .encrypt_in_place_detached(&nonce(0), &aad, &mut msg)
                     .expect("message should not be larger than max message size");
 
                 let out = Self {
                     msg,
-                    tag: Tag(*tag.as_ref()),
+                    tag: Tag(tag.into()),
                 };
                 state.mix_hash(out.as_bytes());
 
@@ -246,28 +246,30 @@ encrypted!(EncryptedPublicKey, 32);
 pub type Mac = [u8; 16];
 
 pub struct EncryptionKey {
-    key: LessSafeKey,
+    key: chacha20poly1305::ChaCha20Poly1305,
     counter: u64,
 }
 
 impl EncryptionKey {
-    pub fn new(key: ChaChaKey) -> Self {
+    pub fn new(key: Key) -> Self {
+        use chacha20poly1305::KeyInit;
         Self {
-            key: LessSafeKey::new(key),
+            key: chacha20poly1305::ChaCha20Poly1305::new(&key),
             counter: 0,
         }
     }
 
     pub fn encrypt(&mut self, payload: &mut [u8]) -> Tag {
-        let n = self.counter;
+        use chacha20poly1305::AeadInPlace;
+        let nonce = nonce(self.counter);
         self.counter += 1;
-        let nonce = nonce(n);
+
         let tag = self
             .key
-            .seal_in_place_separate_tag(nonce, Aad::empty(), payload)
-            .unwrap();
+            .encrypt_in_place_detached(&nonce, &[], payload)
+            .expect("message to large to encrypt");
 
-        Tag(*tag.as_ref())
+        Tag(tag.into())
     }
 
     pub fn counter(&self) -> u64 {
@@ -276,14 +278,15 @@ impl EncryptionKey {
 }
 
 pub struct DecryptionKey {
-    key: LessSafeKey,
+    key: chacha20poly1305::ChaCha20Poly1305,
     replay: AntiReplay,
 }
 
 impl DecryptionKey {
-    pub fn new(key: ChaChaKey) -> Self {
+    pub fn new(key: Key) -> Self {
+        use chacha20poly1305::KeyInit;
         Self {
-            key: LessSafeKey::new(key),
+            key: chacha20poly1305::ChaCha20Poly1305::new(&key),
             replay: AntiReplay::default(),
         }
     }
@@ -293,16 +296,28 @@ impl DecryptionKey {
         counter: u64,
         payload_and_tag: &'b mut [u8],
     ) -> Result<&'b mut [u8], CryptoError> {
+        use chacha20poly1305::AeadInPlace;
+
         if !self.replay.check(counter) {
             unsafe_log!("payload replayed or is too old");
             return Err(CryptoError::Rejected);
         }
 
+        let mid = payload_and_tag.len() - 16;
+        let (payload, tag) = payload_and_tag.split_at_mut(mid);
+
         let nonce = nonce(counter);
 
         self.key
-            .open_in_place(nonce, Aad::empty(), payload_and_tag)
-            .map_err(|_| CryptoError::DecryptionError)
+            .decrypt_in_place_detached(
+                &nonce,
+                &[],
+                payload,
+                chacha20poly1305::Tag::from_slice(tag),
+            )
+            .map_err(|_| CryptoError::DecryptionError)?;
+
+        Ok(payload)
     }
 }
 

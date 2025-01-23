@@ -13,7 +13,7 @@ fn encrypt_cookie() -> EncryptedCookie {
     rng.fill_bytes(&mut nonce);
     rustyguard_crypto::encrypt_cookie(
         Cookie(black_box([0xa5; 16])),
-        &black_box([0; 32]),
+        &black_box([0; 32].into()),
         &nonce,
         &black_box([0xa5; 16]),
     )

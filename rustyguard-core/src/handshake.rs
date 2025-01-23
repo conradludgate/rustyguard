@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use rand::Rng;
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    EphemeralPrivateKey, HandshakeState, HasMac,
+    ReusableSecret, HandshakeState, HasMac,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
@@ -94,7 +94,7 @@ impl Sessions {
         let session_id = *vacant.key();
 
         // complete handshake
-        let esk_r = EphemeralPrivateKey::generate(&mut state.rng).unwrap();
+        let esk_r = ReusableSecret::random_from_rng(&mut state.rng);
 
         let response = encrypt_handshake_resp(
             &mut hs,
@@ -272,7 +272,7 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeI
     let sender = *vacant.key();
     peer.current_handshake = Some(sender);
 
-    let esk_i = EphemeralPrivateKey::generate(&mut state.rng).unwrap();
+    let esk_i = ReusableSecret::random_from_rng(&mut state.rng);
     let handshake = SessionHandshake {
         esk_i,
         state: HandshakeState::default(),

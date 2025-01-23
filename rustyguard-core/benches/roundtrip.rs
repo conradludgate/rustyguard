@@ -2,7 +2,7 @@ use core::net::SocketAddr;
 
 use divan::{black_box, Bencher};
 use rand::{thread_rng, RngCore};
-use rustyguard_core::{PrivateKey, UnparsedPublicKey};
+use rustyguard_core::{StaticSecret, PublicKey};
 use rustyguard_crypto::{Key, StaticPeerConfig};
 use zerocopy::IntoBytes;
 
@@ -13,8 +13,8 @@ fn main() {
 }
 
 fn session_with_peer(
-    secret_key: PrivateKey,
-    peer_public_key: UnparsedPublicKey,
+    secret_key: StaticSecret,
+    peer_public_key: PublicKey,
     preshared_key: Key,
     endpoint: SocketAddr,
 ) -> (Sessions, PeerId) {
@@ -28,8 +28,8 @@ fn session_with_peer(
 #[repr(align(16))]
 struct AlignedPacket([u8; 256]);
 
-fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-    UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
+fn pk(s: &StaticSecret) -> PublicKey {
+    PublicKey::new(*s.compute_public_key().unwrap().as_ref())
 }
 
 #[divan::bench(sample_count = 100, sample_size = 100)]
@@ -38,8 +38,8 @@ fn roundtrip(b: Bencher) {
     let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
 
     b.with_inputs(|| {
-        let ssk_i = PrivateKey::generate(&mut thread_rng()).unwrap();
-        let ssk_r = PrivateKey::generate(&mut thread_rng()).unwrap();
+        let ssk_i = StaticSecret::generate(&mut thread_rng()).unwrap();
+        let ssk_r = StaticSecret::generate(&mut thread_rng()).unwrap();
         let spk_i = pk(&ssk_i);
         let spk_r = pk(&ssk_r);
         let mut psk = Key::default();

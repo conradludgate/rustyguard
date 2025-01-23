@@ -7,7 +7,7 @@ use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
 use rand::rngs::OsRng;
-use rustyguard_core::{Config, Message, PrivateKey, Sessions, UnparsedPublicKey};
+use rustyguard_core::{Config, Message, StaticSecret, Sessions, PublicKey};
 use rustyguard_crypto::StaticPeerConfig;
 use tai64::Tai64N;
 
@@ -34,7 +34,7 @@ fn main() {
     let private_key = match args.key {
         Some(key) => {
             let pk = Base64::decode_vec(&key).unwrap();
-            let private_key = PrivateKey::from_private_key(&pk).unwrap();
+            let private_key = StaticSecret::from_private_key(&pk).unwrap();
             println!(
                 "public key: {}",
                 Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
@@ -42,7 +42,7 @@ fn main() {
             private_key
         }
         None => {
-            let private_key = PrivateKey::generate(&mut OsRng).unwrap();
+            let private_key = StaticSecret::generate(&mut OsRng).unwrap();
             let c = private_key.as_bytes().unwrap();
             println!("private key: {}", Base64::encode_string(c.as_ref()));
             println!(
@@ -56,7 +56,7 @@ fn main() {
     let mut config = Config::new(private_key);
     for peer in args.peer {
         let pk = Base64::decode_vec(&peer).unwrap();
-        let peer_pk = UnparsedPublicKey::new(<[u8; 32]>::try_from(pk).unwrap());
+        let peer_pk = PublicKey::new(<[u8; 32]>::try_from(pk).unwrap());
         config.insert_peer(StaticPeerConfig::new(peer_pk, None, None));
     }
 

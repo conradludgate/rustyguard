@@ -8,7 +8,8 @@ rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 
 # crypto
-rustyguard-aws-lc = { version = "0.1", path = "../rustyguard-aws-lc" }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "reusable_secrets"]}
+chacha20poly1305 = { version = "0.10", default-features = false }
 blake2s_simd = { version = "1.0", default-features = false }
 
 # crypto adjacent

@@ -31,7 +31,7 @@ use handshake::new_handshake;
 use hashbrown::{HashMap, HashTable};
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, EphemeralPrivateKey,
+    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, ReusableSecret,
     HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
@@ -43,7 +43,7 @@ use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub use rustyguard_crypto::{PrivateKey, UnparsedPublicKey};
+pub use rustyguard_crypto::{StaticSecret, PublicKey};
 pub use rustyguard_types::DataHeader;
 pub use tai64::Tai64N;
 
@@ -111,7 +111,7 @@ impl<P> PeerList<P> {
 }
 
 impl Config {
-    pub fn new(private_key: PrivateKey) -> Self {
+    pub fn new(private_key: StaticSecret) -> Self {
         Config {
             static_: StaticInitiatorConfig::new(private_key),
             // TODO(conrad): seed this
@@ -125,9 +125,9 @@ impl Config {
     pub fn insert_peer(&mut self, peer: StaticPeerConfig) -> PeerId {
         use hashbrown::hash_table::Entry;
         match self.peers_by_pubkey.entry(
-            self.pubkey_hasher.hash_one(peer.key.bytes()),
-            |&i| self.peers[i].key.bytes() == peer.key.bytes(),
-            |&i| self.pubkey_hasher.hash_one(self.peers[i].key.bytes()),
+            self.pubkey_hasher.hash_one(peer.key.as_bytes()),
+            |&i| self.peers[i].key.as_bytes() == peer.key.as_bytes(),
+            |&i| self.pubkey_hasher.hash_one(self.peers[i].key.as_bytes()),
         ) {
             Entry::Occupied(o) => {
                 let id = *o.get();
@@ -148,11 +148,11 @@ impl Config {
         }
     }
 
-    fn get_peer_idx(&self, pk: &UnparsedPublicKey) -> Option<PeerId> {
+    fn get_peer_idx(&self, pk: &PublicKey) -> Option<PeerId> {
         let peers = &self.peers;
         self.peers_by_pubkey
-            .find(self.pubkey_hasher.hash_one(pk.bytes()), |&i| {
-                peers[i].key.bytes() == pk.bytes()
+            .find(self.pubkey_hasher.hash_one(pk.as_bytes()), |&i| {
+                peers[i].key.as_bytes() == pk.as_bytes()
             })
             .copied()
     }
@@ -213,7 +213,7 @@ enum SessionState {
 #[derive(Zeroize)]
 struct SessionHandshake {
     #[zeroize(skip)]
-    esk_i: EphemeralPrivateKey,
+    esk_i: ReusableSecret,
     state: HandshakeState,
 }
 
@@ -646,7 +646,7 @@ impl Sessions {
 mod tests {
     use core::net::SocketAddr;
 
-    use crate::{PrivateKey, UnparsedPublicKey};
+    use crate::{StaticSecret, PublicKey};
     use alloc::boxed::Box;
     use rand::{
         rngs::{OsRng, StdRng},
@@ -658,19 +658,19 @@ mod tests {
 
     use crate::{Config, PeerId, Sessions};
 
-    fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-        UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
+    fn pk(s: &StaticSecret) -> PublicKey {
+        PublicKey::from(s)
     }
 
-    fn gen_sk(r: &mut impl Rng) -> PrivateKey {
+    fn gen_sk(r: &mut impl Rng) -> StaticSecret {
         let mut b = [0u8; 32];
         r.fill_bytes(&mut b);
-        PrivateKey::from_private_key(&b).unwrap()
+        StaticSecret::from(b)
     }
 
     fn session_with_peer(
-        secret_key: PrivateKey,
-        peer_public_key: UnparsedPublicKey,
+        secret_key: StaticSecret,
+        peer_public_key: PublicKey,
         preshared_key: Key,
         endpoint: SocketAddr,
     ) -> (PeerId, Sessions) {
