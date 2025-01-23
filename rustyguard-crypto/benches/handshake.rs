@@ -1,8 +1,8 @@
 use divan::Bencher;
 use rand::{thread_rng, Rng, RngCore};
 use rustyguard_crypto::{
-    decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, ReusableSecret,
-    HandshakeState, Key, StaticSecret, StaticInitiatorConfig, StaticPeerConfig, PublicKey,
+    decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, HandshakeState, Key,
+    PublicKey, ReusableSecret, StaticInitiatorConfig, StaticPeerConfig, StaticSecret,
 };
 use tai64::Tai64N;
 

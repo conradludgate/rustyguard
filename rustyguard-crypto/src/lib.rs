@@ -455,8 +455,8 @@ pub fn decrypt_handshake_resp(
 
 #[cfg(test)]
 mod tests {
-    use rand::{rngs::StdRng, RngCore, SeedableRng};
     use super::{PublicKey, ReusableSecret, StaticSecret};
+    use rand::{rngs::StdRng, RngCore, SeedableRng};
     use tai64::{Tai64, Tai64N};
     use zerocopy::IntoBytes;
 

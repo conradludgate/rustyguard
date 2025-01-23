@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use rand::Rng;
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    ReusableSecret, HandshakeState, HasMac,
+    HandshakeState, HasMac, ReusableSecret,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;

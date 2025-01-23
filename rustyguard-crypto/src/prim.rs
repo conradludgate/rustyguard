@@ -309,12 +309,7 @@ impl DecryptionKey {
         let nonce = nonce(counter);
 
         self.key
-            .decrypt_in_place_detached(
-                &nonce,
-                &[],
-                payload,
-                chacha20poly1305::Tag::from_slice(tag),
-            )
+            .decrypt_in_place_detached(&nonce, &[], payload, chacha20poly1305::Tag::from_slice(tag))
             .map_err(|_| CryptoError::DecryptionError)?;
 
         Ok(payload)

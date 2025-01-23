@@ -5,9 +5,7 @@ use ini::Ini;
 use ipnet::Ipv4Net;
 use iptrie::{LCTrieMap, RTrieMap};
 use rand::rngs::OsRng;
-use rustyguard_core::{
-    Config, DataHeader, Message, PeerId, StaticSecret, Sessions, PublicKey,
-};
+use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticSecret};
 use rustyguard_crypto::StaticPeerConfig;
 
 pub mod tun;
@@ -103,20 +101,20 @@ impl TunConfig {
     pub fn key(&self) -> StaticSecret {
         match &self.interface.key {
             Some(key) => {
-                let private_key = StaticSecret::from_private_key(key).unwrap();
+                let private_key = StaticSecret::from(*<&[u8; 32]>::try_from(&key[..]).unwrap());
                 println!(
                     "public key: {}",
-                    Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
+                    Base64::encode_string(PublicKey::from(&private_key).as_bytes())
                 );
                 private_key
             }
             None => {
-                let private_key = StaticSecret::generate(&mut OsRng).unwrap();
-                let c = private_key.as_bytes().unwrap();
+                let private_key = StaticSecret::random_from_rng(OsRng);
+                let c = private_key.as_bytes();
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
                 println!(
                     "public key: {}",
-                    Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
+                    Base64::encode_string(PublicKey::from(&private_key).as_bytes())
                 );
                 private_key
             }
@@ -128,7 +126,7 @@ impl TunConfig {
 
         let mut peer_net = RTrieMap::with_root(PeerId::sentinal());
         for peer in self.peers {
-            let peer_pk = PublicKey::new(<[u8; 32]>::try_from(&*peer.key).unwrap());
+            let peer_pk = PublicKey::from(<[u8; 32]>::try_from(&*peer.key).unwrap());
             let id = rg_config.insert_peer(StaticPeerConfig::new(
                 peer_pk,
                 None,

@@ -31,8 +31,8 @@ use handshake::new_handshake;
 use hashbrown::{HashMap, HashTable};
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, ReusableSecret,
-    HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
+    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, HandshakeState, Mac,
+    ReusableSecret, StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -43,7 +43,7 @@ use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, FromBytes, Immutable, IntoBytes, KnownLayout};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub use rustyguard_crypto::{StaticSecret, PublicKey};
+pub use rustyguard_crypto::{PublicKey, StaticSecret};
 pub use rustyguard_types::DataHeader;
 pub use tai64::Tai64N;
 
@@ -646,7 +646,7 @@ impl Sessions {
 mod tests {
     use core::net::SocketAddr;
 
-    use crate::{StaticSecret, PublicKey};
+    use crate::{PublicKey, StaticSecret};
     use alloc::boxed::Box;
     use rand::{
         rngs::{OsRng, StdRng},
