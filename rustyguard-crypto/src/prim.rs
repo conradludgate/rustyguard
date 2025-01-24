@@ -1,3 +1,4 @@
+use blake2::digest::generic_array::GenericArray;
 pub use chacha20poly1305::Key;
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
@@ -35,21 +36,23 @@ fn nonce(counter: u64) -> chacha20poly1305::Nonce {
 }
 
 pub(crate) fn hash(msg: [&[u8]; 2]) -> [u8; 32] {
-    let mut mac = blake2s_simd::State::new();
+    use blake2::Digest;
+
+    let mut mac = blake2::Blake2s256::new();
     for msg in msg {
         mac.update(msg);
     }
-    *mac.finalize().as_array()
+    mac.finalize().into()
 }
 
 pub fn mac(key: &[u8], msg: &[u8]) -> Mac {
-    blake2s_simd::Params::new()
-        .hash_length(16)
-        .key(key)
-        .hash(msg)
-        .as_bytes()
-        .try_into()
-        .unwrap()
+    use blake2::digest::Mac;
+
+    blake2::Blake2sMac::new(GenericArray::from_slice(key))
+        .chain_update(msg)
+        .finalize()
+        .into_bytes()
+        .into()
 }
 
 const IPAD: u8 = 0x36;
@@ -76,16 +79,18 @@ fn get_pad(key: &Key) -> ([u8; 64], [u8; 64]) {
 }
 
 fn hmac_inner<const M: usize>(ipad_key: &[u8; 64], opad_key: &[u8; 64], msg: [&[u8]; M]) -> Key {
-    let mut digest = blake2s_simd::State::new();
+    use blake2::Digest;
+
+    let mut digest = blake2::Blake2s256::new();
     digest.update(ipad_key);
     for msg in msg {
         digest.update(msg);
     }
 
-    let mut h = blake2s_simd::State::new();
+    let mut h = blake2::Blake2s256::new();
     h.update(opad_key);
     h.update(digest.finalize().as_bytes());
-    (*h.finalize().as_array()).into()
+    h.finalize()
 }
 
 fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
@@ -324,16 +329,17 @@ mod tests {
 
     #[test]
     fn construction_identifier() {
-        let c = blake2s_simd::State::new()
-            .update(b"Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s")
+        use blake2::Digest;
+        let c = blake2::Blake2s256::new()
+            .chain_update(b"Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s")
             .finalize();
-        let h = blake2s_simd::State::new()
-            .update(c.as_bytes())
-            .update(b"WireGuard v1 zx2c4 Jason@zx2c4.com")
+        let h = blake2::Blake2s256::new()
+            .chain_update(c)
+            .chain_update(b"WireGuard v1 zx2c4 Jason@zx2c4.com")
             .finalize();
 
-        assert_eq!(c.as_array(), &super::CONSTRUCTION_HASH);
-        assert_eq!(h.as_array(), &super::IDENTIFIER_HASH);
+        assert_eq!(<[u8; 32]>::from(c), super::CONSTRUCTION_HASH);
+        assert_eq!(<[u8; 32]>::from(h), super::IDENTIFIER_HASH);
     }
 
     #[test]
