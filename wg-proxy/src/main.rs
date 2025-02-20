@@ -7,7 +7,7 @@ use std::{
 };
 
 use dashmap::{DashMap, Entry};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::OsRng, TryRngCore};
 use rustyguard_crypto::{decrypt_cookie, encrypt_cookie, CookieState, HasMac, Key, Mac};
 use rustyguard_types::{Cookie, WgMessage};
 use slotmap::{DefaultKey, Key as _, KeyData, SlotMap};
@@ -18,8 +18,9 @@ type PeerId = DefaultKey;
 
 #[tokio::main]
 async fn main() {
-    let cookie_state = RwLock::new(CookieState::new(&mut OsRng));
-    cookie_state.write().unwrap().generate(&mut OsRng);
+    let mut rng = OsRng.unwrap_err();
+    let cookie_state = RwLock::new(CookieState::new(&mut rng));
+    cookie_state.write().unwrap().generate(&mut rng);
 
     // used to talk to external peers only
     let pub_ep = UdpSocket::bind("0.0.0.0:1234").await.unwrap();
@@ -70,7 +71,7 @@ async fn main() {
         let mut tick = tokio::time::interval(Duration::from_secs(120));
         loop {
             tick.tick().await;
-            state2.cookie_state.write().unwrap().generate(&mut OsRng);
+            state2.cookie_state.write().unwrap().generate(&mut rng);
         }
     });
 
@@ -180,7 +181,7 @@ impl State {
                 }
 
                 // generate a new nonce and encrypt our new cookie.
-                OsRng.fill_bytes(&mut cookie_msg.nonce);
+                OsRng.try_fill_bytes(&mut cookie_msg.nonce).unwrap();
                 cookie_msg.cookie = encrypt_cookie(
                     cookie_state.read().unwrap().new_cookie(out_socket),
                     &cookie_key,

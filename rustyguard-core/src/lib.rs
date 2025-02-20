@@ -339,14 +339,14 @@ pub struct DynamicState {
 }
 
 impl DynamicState {
-    fn new(peers: &PeerList<StaticPeerConfig>, rng: &mut (impl CryptoRng + RngCore)) -> Self {
+    fn new(peers: &PeerList<StaticPeerConfig>, rng: &mut impl CryptoRng) -> Self {
         Self {
             cookie: CookieState::new(rng),
             last_reseed: Tai64N(Tai64(0), 0),
             now: Tai64N(Tai64(0), 0),
             last_rate_reset: Tai64N(Tai64(0), 0),
             ip_rate_limit: CountMinSketch::with_params(10.0 / 20_000.0, 0.01, rng),
-            rng: StdRng::from_rng(rng).unwrap(),
+            rng: StdRng::from_rng(rng),
             peers: PeerList(peers.0.iter().map(|p| PeerState::new(p.endpoint)).collect()),
             peers_by_session2: HashMap::default(),
             timers: BinaryHeap::new(),
@@ -355,7 +355,7 @@ impl DynamicState {
 }
 
 impl Sessions {
-    pub fn new(config: Config, rng: &mut (impl CryptoRng + RngCore)) -> Self {
+    pub fn new(config: Config, rng: &mut impl CryptoRng) -> Self {
         Self {
             dynamic: RefCell::new(DynamicState::new(&config.peers, rng)),
             config,
@@ -364,18 +364,14 @@ impl Sessions {
 
     /// Should be called at least once per second.
     /// Should be called until it returns None.
-    pub fn turn(
-        &self,
-        now: Tai64N,
-        rng: &mut (impl CryptoRng + RngCore),
-    ) -> Option<MaintenanceMsg> {
+    pub fn turn(&self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<MaintenanceMsg> {
         let mut state = self.dynamic.borrow_mut();
         if now > state.now {
             state.now = now;
             if now.duration_since(&state.last_reseed).unwrap() > Duration::from_secs(120) {
                 state.cookie.generate(rng);
 
-                state.rng = StdRng::from_rng(&mut *rng).unwrap();
+                state.rng = StdRng::from_rng(&mut *rng);
                 state.last_reseed = state.now;
             }
             if now.duration_since(&state.last_rate_reset).unwrap() > Duration::from_secs(1) {
@@ -652,7 +648,7 @@ mod tests {
     use alloc::boxed::Box;
     use rand::{
         rngs::{OsRng, StdRng},
-        Rng, RngCore, SeedableRng,
+        Rng, RngCore, SeedableRng, TryRngCore,
     };
     use rustyguard_crypto::{Key, StaticPeerConfig};
     use tai64::Tai64N;
@@ -675,7 +671,7 @@ mod tests {
         let peer = StaticPeerConfig::new(peer_public_key, Some(preshared_key), Some(endpoint));
         let mut config = Config::new(secret_key);
         let id = config.insert_peer(peer);
-        let session = Sessions::new(config, &mut OsRng);
+        let session = Sessions::new(config, &mut OsRng.unwrap_err());
         (id, session)
     }
 
@@ -686,12 +682,12 @@ mod tests {
     fn handshake_happy() {
         let server_addr: SocketAddr = "10.0.1.1:1234".parse().unwrap();
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
-        let ssk_i = gen_sk(&mut OsRng);
-        let ssk_r = gen_sk(&mut OsRng);
+        let ssk_i = gen_sk(&mut OsRng.unwrap_err());
+        let ssk_r = gen_sk(&mut OsRng.unwrap_err());
         let spk_i = ssk_i.public_key();
         let spk_r = ssk_r.public_key();
         let mut psk = Key::default();
-        OsRng.fill_bytes(&mut psk);
+        OsRng.unwrap_err().fill_bytes(&mut psk);
 
         let (peer_r, mut sessions_i) = session_with_peer(ssk_i, spk_r, psk, server_addr);
         let (peer_i, mut sessions_r) = session_with_peer(ssk_r, spk_i, psk, client_addr);

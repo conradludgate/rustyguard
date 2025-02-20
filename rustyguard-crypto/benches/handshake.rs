@@ -1,5 +1,5 @@
 use divan::Bencher;
-use rand::{rngs::ThreadRng, thread_rng, Rng, RngCore};
+use rand::{rng, rngs::ThreadRng, Rng, RngCore};
 use rustyguard_crypto::{
     decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, EphemeralPrivateKey,
     HandshakeState, Key, StaticInitiatorConfig, StaticPeerConfig, StaticPrivateKey,
@@ -19,21 +19,21 @@ fn gen_sk(r: &mut ThreadRng) -> StaticPrivateKey {
 #[divan::bench(sample_count = 100, sample_size = 100)]
 fn handshake(b: Bencher) {
     b.with_inputs(|| {
-        let ssk_i = gen_sk(&mut thread_rng());
-        let ssk_r = gen_sk(&mut thread_rng());
+        let ssk_i = gen_sk(&mut rng());
+        let ssk_r = gen_sk(&mut rng());
         let spk_i = ssk_i.public_key();
         let spk_r = ssk_r.public_key();
         let mut psk = Key::default();
-        thread_rng().fill_bytes(&mut psk);
+        rng().fill_bytes(&mut psk);
 
         let mut hs = HandshakeState::default();
         let init = encrypt_handshake_init(
             &mut hs,
             &StaticInitiatorConfig::new(ssk_i),
             &StaticPeerConfig::new(spk_r, Some(psk), None),
-            &EphemeralPrivateKey::generate(&mut thread_rng()),
+            &EphemeralPrivateKey::generate(&mut rng()),
             Tai64N::now(),
-            thread_rng().gen(),
+            rng().random(),
             None,
         )
         .unwrap();
@@ -51,9 +51,9 @@ fn handshake(b: Bencher) {
         encrypt_handshake_resp(
             &mut hs,
             decrypted,
-            &EphemeralPrivateKey::generate(&mut thread_rng()),
+            &EphemeralPrivateKey::generate(&mut rng()),
             &peer,
-            thread_rng().gen(),
+            rng().random(),
             None,
         )
     })

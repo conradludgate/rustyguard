@@ -4,7 +4,7 @@ use base64ct::{Base64, Encoding};
 use ini::Ini;
 use ipnet::Ipv4Net;
 use iptrie::{LCTrieMap, RTrieMap};
-use rand::{rngs::OsRng, Rng};
+use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
 use rustyguard_crypto::StaticPeerConfig;
 
@@ -105,7 +105,7 @@ impl TunConfig {
                 private_key = StaticPrivateKey::from_array((&**key).try_into().unwrap());
             }
             None => {
-                private_key = StaticPrivateKey::from_array(&OsRng.gen());
+                private_key = StaticPrivateKey::from_array(&OsRng.unwrap_err().random());
                 let c = private_key.as_bytes();
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
             }
@@ -137,7 +137,7 @@ impl TunConfig {
         }
         let peer_net = peer_net.compress();
 
-        let sessions = Sessions::new(rg_config, &mut OsRng);
+        let sessions = Sessions::new(rg_config, &mut OsRng.unwrap_err());
         (sessions, peer_net)
     }
 }

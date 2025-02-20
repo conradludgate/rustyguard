@@ -1,7 +1,7 @@
 use core::net::SocketAddr;
 
 use divan::{black_box, Bencher};
-use rand::{rngs::ThreadRng, thread_rng, RngCore};
+use rand::{rng, rngs::ThreadRng, RngCore};
 use rustyguard_core::{PublicKey, StaticPrivateKey};
 use rustyguard_crypto::{Key, StaticPeerConfig};
 use zerocopy::IntoBytes;
@@ -21,7 +21,7 @@ fn session_with_peer(
     let peer = StaticPeerConfig::new(peer_public_key, Some(preshared_key), Some(endpoint));
     let mut config = Config::new(secret_key);
     let id = config.insert_peer(peer);
-    let sessions = Sessions::new(config, &mut thread_rng());
+    let sessions = Sessions::new(config, &mut rng());
     (sessions, id)
 }
 
@@ -40,12 +40,12 @@ fn roundtrip(b: Bencher) {
     let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
 
     b.with_inputs(|| {
-        let ssk_i = gen_sk(&mut thread_rng());
-        let ssk_r = gen_sk(&mut thread_rng());
+        let ssk_i = gen_sk(&mut rng());
+        let ssk_r = gen_sk(&mut rng());
         let spk_i = ssk_i.public_key();
         let spk_r = ssk_r.public_key();
         let mut psk = Key::default();
-        thread_rng().fill_bytes(&mut psk);
+        rng().fill_bytes(&mut psk);
         (
             Box::new(AlignedPacket([0; 256])),
             session_with_peer(ssk_i, spk_r, psk, server_addr),

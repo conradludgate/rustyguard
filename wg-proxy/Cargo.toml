@@ -10,5 +10,5 @@ rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 dashmap = "6"
 subtle = { version = "2.6", default-features = false }
 slotmap = "1"
-rand = { version = "0.8", features = ["getrandom"] }
+rand = { version = "0.9", features = [] }
 tokio = { version = "1", features = ["full"] }

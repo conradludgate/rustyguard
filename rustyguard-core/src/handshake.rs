@@ -19,11 +19,11 @@ use crate::{
 
 macro_rules! allocate_session {
     ($state:expr) => {{
-        let mut session_id = $state.rng.gen();
+        let mut session_id = $state.rng.random();
         loop {
             use hashbrown::hash_map::Entry;
             match $state.peers_by_session2.entry(session_id) {
-                Entry::Occupied(_) => session_id = $state.rng.gen(),
+                Entry::Occupied(_) => session_id = $state.rng.random(),
                 Entry::Vacant(v) => break v,
             }
         }

@@ -6,7 +6,7 @@ use std::{
 use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
-use rand::{rngs::OsRng, Rng};
+use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, Message, PublicKey, Sessions, StaticPrivateKey};
 use rustyguard_crypto::StaticPeerConfig;
 use tai64::Tai64N;
@@ -42,7 +42,7 @@ fn main() {
             private_key
         }
         None => {
-            let private_key = StaticPrivateKey::from_array(&OsRng.gen());
+            let private_key = StaticPrivateKey::from_array(&OsRng.unwrap_err().random());
             let c = private_key.as_bytes();
             println!("private key: {}", Base64::encode_string(c.as_ref()));
             println!(
@@ -60,7 +60,7 @@ fn main() {
         config.insert_peer(StaticPeerConfig::new(peer_pk, None, None));
     }
 
-    let mut sessions = Sessions::new(config, &mut OsRng);
+    let mut sessions = Sessions::new(config, &mut OsRng.unwrap_err());
 
     let endpoint = UdpSocket::bind(("0.0.0.0", args.port)).unwrap();
     println!("addr: {:?}", endpoint.local_addr());
@@ -70,7 +70,7 @@ fn main() {
 
     loop {
         let (n, addr) = endpoint.recv_from(&mut buf.0).unwrap();
-        while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng) {
+        while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng.unwrap_err()) {
             endpoint.send_to(msg.data(), msg.to()).unwrap();
         }
 

@@ -2,7 +2,7 @@ use core::hash::{BuildHasher, Hash};
 
 use foldhash::quality::FixedState;
 use libm::{ceil, log};
-use rand_core::RngCore;
+use rand_core::CryptoRng;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -19,9 +19,6 @@ pub struct CountMinSketch {
     // buckets, width*depth
     buckets: Vec<u32>,
 }
-
-pub trait CryptoRng: RngCore + rand_core::CryptoRng {}
-impl<R: RngCore + rand_core::CryptoRng> CryptoRng for R {}
 
 impl CountMinSketch {
     /// Given parameters (ε, δ),
@@ -98,7 +95,7 @@ impl CountMinSketch {
 mod tests {
     use core::net::Ipv4Addr;
 
-    use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, Rng, SeedableRng};
+    use rand::{rng, rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 
     extern crate alloc;
     extern crate std;
@@ -116,9 +113,9 @@ mod tests {
 
         for _ in 0..n {
             // number of insert operations
-            let n = rng.gen_range(1..10);
+            let n = rng.random_range(1..10);
 
-            let ip = Ipv4Addr::from_bits(rng.gen());
+            let ip = Ipv4Addr::from_bits(rng.random());
             ips.push((ip, n));
 
             // N = sum(actual)
@@ -184,7 +181,7 @@ mod tests {
         // N = sum(actual)
         // Let's assume 1021 samples, all of 4096
         let N = 1021 * 4096;
-        let sketch = CountMinSketch::with_params(p / N as f64, 1.0 - q, &mut thread_rng());
+        let sketch = CountMinSketch::with_params(p / N as f64, 1.0 - q, &mut rng());
 
         let memory = core::mem::size_of::<u32>() * sketch.buckets.len();
         let time = sketch.depth;
@@ -198,7 +195,7 @@ mod tests {
         assert_eq!(eval_cost(4096.0, 0.90), (33312, 3));
         assert_eq!(eval_cost(4096.0, 0.1), (11104, 1));
 
-        let sketch = CountMinSketch::with_params(10.0 / 20_000.0, 0.01, &mut thread_rng());
+        let sketch = CountMinSketch::with_params(10.0 / 20_000.0, 0.01, &mut rng());
 
         let memory = core::mem::size_of::<u32>() * sketch.buckets.len();
         let memory2 = core::mem::size_of::<foldhash::quality::FixedState>() * sketch.hashers.len();

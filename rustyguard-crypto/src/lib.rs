@@ -8,7 +8,7 @@ pub use graviola::key_agreement::x25519::StaticPrivateKey;
 use prim::{hash, Encrypted, LABEL_COOKIE, LABEL_MAC1};
 pub use prim::{mac, DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
 
-use rand_core::{CryptoRng, CryptoRngCore, RngCore};
+use rand_core::CryptoRng;
 use rustyguard_types::{
     Cookie, EncryptedCookie, EncryptedEmpty, EncryptedPublicKey, EncryptedTimestamp, HandshakeInit,
     HandshakeResp, Tag, MSG_FIRST, MSG_SECOND,
@@ -80,13 +80,13 @@ pub struct CookieState {
 }
 
 impl CookieState {
-    pub fn new(rng: &mut (impl CryptoRng + RngCore)) -> Self {
+    pub fn new(rng: &mut impl CryptoRng) -> Self {
         let mut key = Key::default();
         rng.fill_bytes(&mut key);
         Self { key }
     }
 
-    pub fn generate(&mut self, rng: &mut (impl CryptoRng + RngCore)) {
+    pub fn generate(&mut self, rng: &mut impl CryptoRng) {
         rng.fill_bytes(&mut self.key);
     }
 
@@ -450,7 +450,7 @@ pub fn decrypt_handshake_resp(
 }
 
 impl EphemeralPrivateKey {
-    pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
+    pub fn generate(rng: &mut impl CryptoRng) -> Self {
         let mut b = [0u8; 32];
         rng.fill_bytes(&mut b);
         EphemeralPrivateKey(StaticPrivateKey::from_array(&b))
