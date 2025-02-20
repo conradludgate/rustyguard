@@ -3,7 +3,7 @@ use core::ops::ControlFlow;
 
 use crate::time::{TimerEntry, TimerEntryType};
 use alloc::boxed::Box;
-use rand::Rng;
+use rand_core::RngCore;
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
     EphemeralPrivateKey, HandshakeState, HasMac,
@@ -19,11 +19,11 @@ use crate::{
 
 macro_rules! allocate_session {
     ($state:expr) => {{
-        let mut session_id = $state.rng.random();
+        let mut session_id = $state.rng.next_u32();
         loop {
             use hashbrown::hash_map::Entry;
-            match $state.peers_by_session2.entry(session_id) {
-                Entry::Occupied(_) => session_id = $state.rng.random(),
+            match $state.peers_by_session.entry(session_id) {
+                Entry::Occupied(_) => session_id = $state.rng.next_u32(),
                 Entry::Vacant(v) => break v,
             }
         }
@@ -169,7 +169,7 @@ impl Sessions {
         // check for a session expecting this handshake response
         use hashbrown::hash_map::Entry;
         let session_id = resp_msg.receiver.get();
-        let session = match state.peers_by_session2.entry(session_id) {
+        let session = match state.peers_by_session.entry(session_id) {
             // session not found
             Entry::Vacant(_) => {
                 unsafe_log!("[{addr:?}] [{session_id:?}] session not found");
@@ -238,7 +238,7 @@ impl Sessions {
         let cookie_msg = CookieMessage::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
 
         let session = state
-            .peers_by_session2
+            .peers_by_session
             .get(&cookie_msg.receiver.get())
             .ok_or(Error::Rejected)?;
         let peer_config = &self.config.peers[session.peer];
@@ -265,7 +265,7 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<Han
 
     let old_handshake = peer
         .current_handshake
-        .and_then(|session| state.peers_by_session2.remove(&session));
+        .and_then(|session| state.peers_by_session.remove(&session));
 
     // start a new session
     let vacant = allocate_session!(state);

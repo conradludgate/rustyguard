@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use dashmap::{DashMap, Entry};
+use clashmap::{ClashMap, Entry};
 use rand::{rngs::OsRng, TryRngCore};
 use rustyguard_crypto::{decrypt_cookie, encrypt_cookie, CookieState, HasMac, Key, Mac};
 use rustyguard_types::{Cookie, WgMessage};
@@ -31,9 +31,9 @@ async fn main() {
     let peers: Mutex<SlotMap<PeerId, InternalPeer>> = Mutex::new(SlotMap::new());
 
     // receiver_id => (created, peer_idx)
-    let in_sessions = DashMap::<u32, (Instant, PeerId)>::new();
+    let in_sessions = ClashMap::<u32, (Instant, PeerId)>::new();
     // (in addr, receiver_id) => (created, peer_idx, out addr)
-    let out_sessions = DashMap::<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>::new();
+    let out_sessions = ClashMap::<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>::new();
 
     let state = Arc::new(State {
         pub_ep,
@@ -114,9 +114,9 @@ struct State {
     peers: Mutex<SlotMap<PeerId, InternalPeer>>,
 
     // receiver_id => (created, peer_idx)
-    in_sessions: DashMap<u32, (Instant, PeerId)>,
+    in_sessions: ClashMap<u32, (Instant, PeerId)>,
     // (in addr, receiver_id) => (created, peer_idx, out addr)
-    out_sessions: DashMap<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>,
+    out_sessions: ClashMap<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>,
 }
 
 impl State {

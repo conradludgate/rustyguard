@@ -29,7 +29,8 @@ use alloc::vec::Vec;
 use foldhash::fast::FixedState;
 use handshake::new_handshake;
 use hashbrown::{HashMap, HashTable};
-use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use rand_chacha::ChaCha12Rng as StdRng;
+use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
     encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, EphemeralPrivateKey,
     HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
@@ -294,7 +295,7 @@ impl MessageEncrypter {
         let mut state_ref = sessions.dynamic.borrow_mut();
         let state = &mut *state_ref;
 
-        let session = &mut state.peers_by_session2.get_mut(&self.0).unwrap();
+        let session = &mut state.peers_by_session.get_mut(&self.0).unwrap();
         let peer = &mut state.peers[session.peer];
 
         peer.force_encrypt(session, payload, self.1)
@@ -333,7 +334,7 @@ pub struct DynamicState {
     ip_rate_limit: CountMinSketch,
 
     peers: PeerList<PeerState>,
-    peers_by_session2: SessionMap,
+    peers_by_session: SessionMap,
 
     timers: BinaryHeap<TimerEntry>,
 }
@@ -348,7 +349,7 @@ impl DynamicState {
             ip_rate_limit: CountMinSketch::with_params(10.0 / 20_000.0, 0.01, rng),
             rng: StdRng::from_rng(rng),
             peers: PeerList(peers.0.iter().map(|p| PeerState::new(p.endpoint)).collect()),
-            peers_by_session2: HashMap::default(),
+            peers_by_session: HashMap::default(),
             timers: BinaryHeap::new(),
         }
     }
@@ -523,11 +524,11 @@ impl Sessions {
             return Err(Error::Rejected);
         };
 
-        match peer.encrypt_message(&mut state.peers_by_session2, payload, state.now) {
+        match peer.encrypt_message(&mut state.peers_by_session, payload, state.now) {
             // we encrypted the message in-place in payload.
             Some(metadata) => {
                 let session_id = peer.current_transport.unwrap();
-                let session = state.peers_by_session2.get_mut(&session_id).unwrap();
+                let session = state.peers_by_session.get_mut(&session_id).unwrap();
                 let SessionState::Transport(ts) = &session.state else {
                     unreachable!()
                 };
@@ -612,7 +613,7 @@ impl Sessions {
             DataHeader::message_mut_from(msg).ok_or(Error::InvalidMessage)?;
 
         let session_id = header.receiver.get();
-        let Some(session) = state.peers_by_session2.get_mut(&session_id) else {
+        let Some(session) = state.peers_by_session.get_mut(&session_id) else {
             unsafe_log!("[{socket:?}] [{session_id:?}] session not ready");
             return Err(Error::Rejected);
         };

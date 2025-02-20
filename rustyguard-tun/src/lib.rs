@@ -2,8 +2,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
 use base64ct::{Base64, Encoding};
 use ini::Ini;
-use ipnet::Ipv4Net;
-use iptrie::{LCTrieMap, RTrieMap};
+use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
 use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
 use rustyguard_crypto::StaticPeerConfig;
@@ -34,7 +33,7 @@ pub struct TunInterface {
 pub struct PeerConfig {
     pub key: Vec<u8>,
 
-    pub addrs: Vec<ipnet::Ipv4Net>,
+    pub addrs: Vec<Ipv4Prefix>,
 
     pub endpoint: Option<String>,
 }
@@ -117,10 +116,10 @@ impl TunConfig {
         private_key
     }
 
-    pub fn build(self) -> (Sessions, LCTrieMap<Ipv4Net, PeerId>) {
+    pub fn build(self) -> (Sessions, Ipv4LCTrieMap<PeerId>) {
         let mut rg_config = Config::new(self.key());
 
-        let mut peer_net = RTrieMap::with_root(PeerId::sentinal());
+        let mut peer_net = Ipv4RTrieMap::with_root(PeerId::sentinal());
         for peer in self.peers {
             let peer_pk = PublicKey::from_array(<&[u8; 32]>::try_from(&*peer.key).unwrap());
             let id = rg_config.insert_peer(StaticPeerConfig::new(
@@ -150,7 +149,7 @@ pub enum Write<'a> {
 
 pub fn handle_extern<'a>(
     sessions: &mut Sessions,
-    peer_net: &LCTrieMap<Ipv4Net, PeerId>,
+    peer_net: &Ipv4LCTrieMap<PeerId>,
     addr: SocketAddr,
     ep_buf: &'a mut [u8],
 ) -> Write<'a> {
@@ -192,7 +191,7 @@ pub fn handle_extern<'a>(
 
 pub fn handle_intern<'a>(
     sessions: &mut Sessions,
-    peer_net: &LCTrieMap<Ipv4Net, PeerId>,
+    peer_net: &Ipv4LCTrieMap<PeerId>,
     reply_buf: &'a mut [u8],
     filled: usize,
 ) -> Write<'a> {
