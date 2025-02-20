@@ -35,7 +35,8 @@ fn handshake(b: Bencher) {
             Tai64N::now(),
             thread_rng().gen(),
             None,
-        );
+        )
+        .unwrap();
 
         (
             init,

@@ -103,7 +103,7 @@ impl Sessions {
             peer_config,
             session_id,
             peer.cookie.as_ref(),
-        );
+        )?;
         peer.last_sent_mac1 = response.mac1;
 
         peer.current_transport = Some(session_id);
@@ -257,7 +257,7 @@ impl Sessions {
     }
 }
 
-pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeInit {
+pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<HandshakeInit, Error> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let state = &mut *state_ref;
     let peer_config = &sessions.config.peers[peer_idx];
@@ -306,12 +306,12 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeI
         state.now,
         sender,
         peer.cookie.as_ref(),
-    );
+    )?;
 
     state.timers.push(TimerEntry {
         time: state.now + REKEY_TIMEOUT,
         kind: TimerEntryType::InitAttempt { session_id },
     });
 
-    msg
+    Ok(msg)
 }

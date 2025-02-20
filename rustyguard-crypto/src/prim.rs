@@ -135,20 +135,35 @@ impl HandshakeState {
         self.chain = c;
     }
 
-    pub fn mix_dh(&mut self, sk: &StaticPrivateKey, pk: &PublicKey) {
-        let [c] = hkdf(&self.chain, &sk.diffie_hellman(pk).0);
+    pub fn mix_dh(&mut self, sk: &StaticPrivateKey, pk: &PublicKey) -> Result<(), CryptoError> {
+        let shared_secret = sk
+            .diffie_hellman(pk)
+            .map_err(|_| CryptoError::KeyExchangeError)?;
+        let [c] = hkdf(&self.chain, &shared_secret.0);
         self.chain = c;
+        Ok(())
     }
 
-    pub fn mix_key_dh(&mut self, sk: &StaticPrivateKey, pk: &PublicKey) -> Key {
-        self.mix_key(&sk.diffie_hellman(pk).0)
+    pub fn mix_key_dh(
+        &mut self,
+        sk: &StaticPrivateKey,
+        pk: &PublicKey,
+    ) -> Result<Key, CryptoError> {
+        let shared_secret = sk
+            .diffie_hellman(pk)
+            .map_err(|_| CryptoError::KeyExchangeError)?;
+        Ok(self.mix_key(&shared_secret.0))
     }
 
-    pub fn mix_edh(&mut self, sk: &EphemeralPrivateKey, pk: &PublicKey) {
-        self.mix_dh(&sk.0, pk);
+    pub fn mix_edh(&mut self, sk: &EphemeralPrivateKey, pk: &PublicKey) -> Result<(), CryptoError> {
+        self.mix_dh(&sk.0, pk)
     }
 
-    pub fn mix_key_edh(&mut self, sk: &EphemeralPrivateKey, pk: &PublicKey) -> Key {
+    pub fn mix_key_edh(
+        &mut self,
+        sk: &EphemeralPrivateKey,
+        pk: &PublicKey,
+    ) -> Result<Key, CryptoError> {
         self.mix_key_dh(&sk.0, pk)
     }
 

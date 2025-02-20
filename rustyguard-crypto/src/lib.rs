@@ -38,6 +38,7 @@ pub struct EphemeralPrivateKey(StaticPrivateKey);
 
 #[derive(Debug)]
 pub enum CryptoError {
+    KeyExchangeError,
     DecryptionError,
     Rejected,
 }
@@ -277,7 +278,7 @@ pub fn encrypt_handshake_init(
     now: Tai64N,
     sender: u32,
     cookie: Option<&Cookie>,
-) -> HandshakeInit {
+) -> Result<HandshakeInit, CryptoError> {
     // let ph = &mut peer.handshake;
     // let hs = &mut ph.state;
 
@@ -298,13 +299,13 @@ pub fn encrypt_handshake_init(
     hs.mix_chain(&epk_i.as_bytes());
 
     // -> es:
-    let k = hs.mix_key_edh(esk_i, &peer.key);
+    let k = hs.mix_key_edh(esk_i, &peer.key)?;
 
     // -> s:
     let static_key = EncryptedPublicKey::encrypt_and_hash(initiator.public_key.as_bytes(), hs, &k);
 
     // -> ss:
-    let k = hs.mix_key_dh(&initiator.private_key, &peer.key);
+    let k = hs.mix_key_dh(&initiator.private_key, &peer.key)?;
 
     // payload:
     let timestamp = EncryptedTimestamp::encrypt_and_hash(now.to_bytes(), hs, &k);
@@ -324,7 +325,7 @@ pub fn encrypt_handshake_init(
         msg.mac2 = msg.compute_mac2(cookie);
     }
 
-    msg
+    Ok(msg)
 }
 
 pub fn decrypt_handshake_init<'m>(
@@ -349,7 +350,7 @@ pub fn decrypt_handshake_init<'m>(
 
     // -> es:
     let epk_i = PublicKey::from_array(&init.ephemeral_key);
-    let k = hs.mix_key_dh(&receiver.private_key, &epk_i);
+    let k = hs.mix_key_dh(&receiver.private_key, &epk_i)?;
 
     unsafe_log!("decrypting static key");
     // -> s:
@@ -358,7 +359,7 @@ pub fn decrypt_handshake_init<'m>(
     unsafe_log!("decrypted public key {:?}", spk_i.as_bytes());
 
     // -> ss:
-    let k = hs.mix_key_dh(&receiver.private_key, &spk_i);
+    let k = hs.mix_key_dh(&receiver.private_key, &spk_i)?;
 
     unsafe_log!("decrypting payload");
     // payload:
@@ -374,7 +375,7 @@ pub fn encrypt_handshake_resp(
     peer: &StaticPeerConfig,
     sender: u32,
     cookie: Option<&Cookie>,
-) -> HandshakeResp {
+) -> Result<HandshakeResp, CryptoError> {
     // IKpsk2:
     // <- e, ee, se, psk
 
@@ -386,11 +387,11 @@ pub fn encrypt_handshake_resp(
 
     // <- ee
     let epk_i = PublicKey::from_array(&data.0.ephemeral_key);
-    hs.mix_edh(esk_r, &epk_i);
+    hs.mix_edh(esk_r, &epk_i)?;
 
     // <- se
     let spk_i = PublicKey::from_array(&data.0.static_key.msg);
-    hs.mix_edh(esk_r, &spk_i);
+    hs.mix_edh(esk_r, &spk_i)?;
 
     // <- psk
     let k = hs.mix_key_and_hash(&peer.preshared_key);
@@ -413,7 +414,7 @@ pub fn encrypt_handshake_resp(
         msg.mac2 = msg.compute_mac2(cookie);
     }
 
-    msg
+    Ok(msg)
 }
 
 pub fn decrypt_handshake_resp(
@@ -433,10 +434,10 @@ pub fn decrypt_handshake_resp(
     hs.mix_hash(&epk_r.as_bytes());
 
     // <- ee:
-    hs.mix_edh(esk_i, &epk_r);
+    hs.mix_edh(esk_i, &epk_r)?;
 
     // <- se:
-    hs.mix_dh(&initiator.private_key, &epk_r);
+    hs.mix_dh(&initiator.private_key, &epk_r)?;
 
     // <- psk:
     let k = hs.mix_key_and_hash(&peer.preshared_key);
@@ -502,7 +503,8 @@ mod tests {
 
         let esk_i = EphemeralPrivateKey::generate(&mut rng);
         let mut init =
-            encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
+            encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie))
+                .unwrap();
 
         init.verify_mac1(&init_r.mac1_key).unwrap();
         init.verify_mac2(&cookie).unwrap();
@@ -514,7 +516,7 @@ mod tests {
         assert_eq!(init.timestamp(), &now.to_bytes());
 
         let esk_r = EphemeralPrivateKey::generate(&mut rng);
-        let mut resp = encrypt_handshake_resp(&mut hs2, init, &esk_r, &peer_i, 2, None);
+        let mut resp = encrypt_handshake_resp(&mut hs2, init, &esk_r, &peer_i, 2, None).unwrap();
 
         resp.verify_mac1(&init_i.mac1_key).unwrap();
         insta::assert_debug_snapshot!(resp.empty.as_bytes());
@@ -576,7 +578,8 @@ mod tests {
 
         let esk_i = EphemeralPrivateKey::generate(&mut rng);
         let mut init =
-            encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie));
+            encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie))
+                .unwrap();
 
         init.mac2[0] = 0;
         init.verify_mac2(&cookie).unwrap_err();

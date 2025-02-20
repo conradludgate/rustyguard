@@ -61,10 +61,15 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                 };
 
                 if should_reinit {
-                    return Some(MaintenanceMsg {
-                            socket: peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before"),
-                            data: MaintenanceRepr::Init(new_handshake(sessions, peer_idx)),
+                    let socket = peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before");
+                    // if this errors, it's due to a key-exchange error (diffie-hellman produced all zeros).
+                    // nothign we can really do about that.
+                    if let Ok(hs) = new_handshake(sessions, peer_idx) {
+                        return Some(MaintenanceMsg {
+                            socket,
+                            data: MaintenanceRepr::Init(hs),
                         });
+                    }
                 }
             }
             TimerEntryType::ExpireTransport { session_id } => {
@@ -97,10 +102,13 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                     } = peer
                         .encrypt_message(&mut state.peers_by_session2, &mut [], state.now)
                         .expect("a keepalive should only be scheduled if the data keys are set");
+
+                    let socket = peer.endpoint.expect("a keepalive event should not be scheduled if we've never seen this endpoint before");
+
                     return Some(MaintenanceMsg {
-                            socket: peer.endpoint.expect("a keepalive event should not be scheduled if we've never seen this endpoint before"),
-                            data: MaintenanceRepr::Data(Keepalive { header, tag }),
-                        });
+                        socket,
+                        data: MaintenanceRepr::Data(Keepalive { header, tag }),
+                    });
                 }
             }
         }

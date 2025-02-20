@@ -392,6 +392,7 @@ impl Sessions {
 pub enum Error {
     InvalidMessage,
     DecryptionError,
+    KeyExchangeError,
     Unaligned,
     Rejected,
 }
@@ -399,6 +400,7 @@ pub enum Error {
 impl From<CryptoError> for Error {
     fn from(value: CryptoError) -> Self {
         match value {
+            CryptoError::KeyExchangeError => Error::KeyExchangeError,
             CryptoError::DecryptionError => Error::DecryptionError,
             CryptoError::Rejected => Error::Rejected,
         }
@@ -549,7 +551,7 @@ impl Sessions {
                 drop(state_ref);
                 Ok(SendMessage::Maintenance(MaintenanceMsg {
                     socket: ep,
-                    data: MaintenanceRepr::Init(new_handshake(self, peer_idx)),
+                    data: MaintenanceRepr::Init(new_handshake(self, peer_idx)?),
                 }))
             }
         }
