@@ -47,7 +47,7 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
         match entry {
             TimerEntryType::InitAttempt { session_id }
             | TimerEntryType::RekeyAttempt { session_id } => {
-                let session = state.peers_by_session2.get_mut(&session_id).unwrap();
+                let session = state.peers_by_session.get_mut(&session_id).unwrap();
                 let peer_idx = session.peer;
                 let peer = &sessions.config.peers[peer_idx];
 
@@ -61,14 +61,19 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                 };
 
                 if should_reinit {
-                    return Some(MaintenanceMsg {
-                            socket: peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before"),
-                            data: MaintenanceRepr::Init(new_handshake(sessions, peer_idx)),
+                    let socket = peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before");
+                    // if this errors, it's due to a key-exchange error (diffie-hellman produced all zeros).
+                    // nothign we can really do about that.
+                    if let Ok(hs) = new_handshake(sessions, peer_idx) {
+                        return Some(MaintenanceMsg {
+                            socket,
+                            data: MaintenanceRepr::Init(hs),
                         });
+                    }
                 }
             }
             TimerEntryType::ExpireTransport { session_id } => {
-                let session = state.peers_by_session2.get_mut(&session_id).unwrap();
+                let session = state.peers_by_session.get_mut(&session_id).unwrap();
 
                 let peer_idx = session.peer;
                 let peer = &mut state.peers[peer_idx];
@@ -77,11 +82,11 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                     if peer.current_transport == Some(session_id) {
                         peer.current_transport = None;
                     }
-                    state.peers_by_session2.remove(&session_id);
+                    state.peers_by_session.remove(&session_id);
                 }
             }
             TimerEntryType::Keepalive { session_id } => {
-                let session = state.peers_by_session2.get_mut(&session_id).unwrap();
+                let session = state.peers_by_session.get_mut(&session_id).unwrap();
                 let peer = &mut state.peers[session.peer];
 
                 let should_keepalive = match &session.state {
@@ -95,12 +100,15 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                         tag,
                         payload_len: _,
                     } = peer
-                        .encrypt_message(&mut state.peers_by_session2, &mut [], state.now)
+                        .encrypt_message(&mut state.peers_by_session, &mut [], state.now)
                         .expect("a keepalive should only be scheduled if the data keys are set");
+
+                    let socket = peer.endpoint.expect("a keepalive event should not be scheduled if we've never seen this endpoint before");
+
                     return Some(MaintenanceMsg {
-                            socket: peer.endpoint.expect("a keepalive event should not be scheduled if we've never seen this endpoint before"),
-                            data: MaintenanceRepr::Data(Keepalive { header, tag }),
-                        });
+                        socket,
+                        data: MaintenanceRepr::Data(Keepalive { header, tag }),
+                    });
                 }
             }
         }

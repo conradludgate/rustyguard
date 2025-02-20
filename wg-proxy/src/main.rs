@@ -6,8 +6,8 @@ use std::{
     time::Duration,
 };
 
-use dashmap::{DashMap, Entry};
-use rand::{rngs::OsRng, RngCore};
+use clashmap::{ClashMap, Entry};
+use rand::{rngs::OsRng, TryRngCore};
 use rustyguard_crypto::{decrypt_cookie, encrypt_cookie, CookieState, HasMac, Key, Mac};
 use rustyguard_types::{Cookie, WgMessage};
 use slotmap::{DefaultKey, Key as _, KeyData, SlotMap};
@@ -18,8 +18,9 @@ type PeerId = DefaultKey;
 
 #[tokio::main]
 async fn main() {
-    let cookie_state = RwLock::new(CookieState::new(&mut OsRng));
-    cookie_state.write().unwrap().generate(&mut OsRng);
+    let mut rng = OsRng.unwrap_err();
+    let cookie_state = RwLock::new(CookieState::new(&mut rng));
+    cookie_state.write().unwrap().generate(&mut rng);
 
     // used to talk to external peers only
     let pub_ep = UdpSocket::bind("0.0.0.0:1234").await.unwrap();
@@ -30,9 +31,9 @@ async fn main() {
     let peers: Mutex<SlotMap<PeerId, InternalPeer>> = Mutex::new(SlotMap::new());
 
     // receiver_id => (created, peer_idx)
-    let in_sessions = DashMap::<u32, (Instant, PeerId)>::new();
+    let in_sessions = ClashMap::<u32, (Instant, PeerId)>::new();
     // (in addr, receiver_id) => (created, peer_idx, out addr)
-    let out_sessions = DashMap::<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>::new();
+    let out_sessions = ClashMap::<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>::new();
 
     let state = Arc::new(State {
         pub_ep,
@@ -70,7 +71,7 @@ async fn main() {
         let mut tick = tokio::time::interval(Duration::from_secs(120));
         loop {
             tick.tick().await;
-            state2.cookie_state.write().unwrap().generate(&mut OsRng);
+            state2.cookie_state.write().unwrap().generate(&mut rng);
         }
     });
 
@@ -113,9 +114,9 @@ struct State {
     peers: Mutex<SlotMap<PeerId, InternalPeer>>,
 
     // receiver_id => (created, peer_idx)
-    in_sessions: DashMap<u32, (Instant, PeerId)>,
+    in_sessions: ClashMap<u32, (Instant, PeerId)>,
     // (in addr, receiver_id) => (created, peer_idx, out addr)
-    out_sessions: DashMap<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>,
+    out_sessions: ClashMap<(SocketAddr, u32), (Instant, PeerId, SocketAddr)>,
 }
 
 impl State {
@@ -180,7 +181,7 @@ impl State {
                 }
 
                 // generate a new nonce and encrypt our new cookie.
-                OsRng.fill_bytes(&mut cookie_msg.nonce);
+                OsRng.try_fill_bytes(&mut cookie_msg.nonce).unwrap();
                 cookie_msg.cookie = encrypt_cookie(
                     cookie_state.read().unwrap().new_cookie(out_socket),
                     &cookie_key,

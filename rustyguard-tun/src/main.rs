@@ -1,4 +1,4 @@
-use rand::rngs::OsRng;
+use rand::{rngs::OsRng, TryRngCore};
 use rustyguard_tun::{handle_extern, handle_intern, tun, AlignedPacket, TunConfig, Write, H};
 use tai64::Tai64N;
 use tokio::{
@@ -30,7 +30,7 @@ async fn main() {
         let mut tun_buf = ReadBuf::new(&mut reply_buf[H..]);
         let write = tokio::select! {
             _ = tick.tick() => {
-                while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng) {
+                while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng.unwrap_err()) {
                     endpoint.send_to(msg.data(), msg.to()).await.unwrap();
                 }
 

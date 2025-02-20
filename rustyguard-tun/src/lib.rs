@@ -2,12 +2,9 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
 use base64ct::{Base64, Encoding};
 use ini::Ini;
-use ipnet::Ipv4Net;
-use iptrie::{LCTrieMap, RTrieMap};
-use rand::rngs::OsRng;
-use rustyguard_core::{
-    Config, DataHeader, Message, PeerId, PrivateKey, Sessions, UnparsedPublicKey,
-};
+use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
+use rand::{rngs::OsRng, Rng, TryRngCore};
+use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
 use rustyguard_crypto::StaticPeerConfig;
 
 pub mod tun;
@@ -36,7 +33,7 @@ pub struct TunInterface {
 pub struct PeerConfig {
     pub key: Vec<u8>,
 
-    pub addrs: Vec<ipnet::Ipv4Net>,
+    pub addrs: Vec<Ipv4Prefix>,
 
     pub endpoint: Option<String>,
 }
@@ -100,35 +97,31 @@ impl TunConfig {
         }
     }
 
-    pub fn key(&self) -> PrivateKey {
+    pub fn key(&self) -> StaticPrivateKey {
+        let private_key;
         match &self.interface.key {
             Some(key) => {
-                let private_key = PrivateKey::from_private_key(key).unwrap();
-                println!(
-                    "public key: {}",
-                    Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
-                );
-                private_key
+                private_key = StaticPrivateKey::from_array((&**key).try_into().unwrap());
             }
             None => {
-                let private_key = PrivateKey::generate(&mut OsRng).unwrap();
-                let c = private_key.as_bytes().unwrap();
+                private_key = StaticPrivateKey::from_array(&OsRng.unwrap_err().random());
+                let c = private_key.as_bytes();
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
-                println!(
-                    "public key: {}",
-                    Base64::encode_string(private_key.compute_public_key().unwrap().as_ref())
-                );
-                private_key
             }
         }
+        println!(
+            "public key: {}",
+            Base64::encode_string(&private_key.public_key().as_bytes())
+        );
+        private_key
     }
 
-    pub fn build(self) -> (Sessions, LCTrieMap<Ipv4Net, PeerId>) {
+    pub fn build(self) -> (Sessions, Ipv4LCTrieMap<PeerId>) {
         let mut rg_config = Config::new(self.key());
 
-        let mut peer_net = RTrieMap::with_root(PeerId::sentinal());
+        let mut peer_net = Ipv4RTrieMap::with_root(PeerId::sentinal());
         for peer in self.peers {
-            let peer_pk = UnparsedPublicKey::new(<[u8; 32]>::try_from(&*peer.key).unwrap());
+            let peer_pk = PublicKey::from_array(<&[u8; 32]>::try_from(&*peer.key).unwrap());
             let id = rg_config.insert_peer(StaticPeerConfig::new(
                 peer_pk,
                 None,
@@ -143,7 +136,7 @@ impl TunConfig {
         }
         let peer_net = peer_net.compress();
 
-        let sessions = Sessions::new(rg_config, &mut OsRng);
+        let sessions = Sessions::new(rg_config, &mut OsRng.unwrap_err());
         (sessions, peer_net)
     }
 }
@@ -156,7 +149,7 @@ pub enum Write<'a> {
 
 pub fn handle_extern<'a>(
     sessions: &mut Sessions,
-    peer_net: &LCTrieMap<Ipv4Net, PeerId>,
+    peer_net: &Ipv4LCTrieMap<PeerId>,
     addr: SocketAddr,
     ep_buf: &'a mut [u8],
 ) -> Write<'a> {
@@ -198,7 +191,7 @@ pub fn handle_extern<'a>(
 
 pub fn handle_intern<'a>(
     sessions: &mut Sessions,
-    peer_net: &LCTrieMap<Ipv4Net, PeerId>,
+    peer_net: &Ipv4LCTrieMap<PeerId>,
     reply_buf: &'a mut [u8],
     filled: usize,
 ) -> Write<'a> {

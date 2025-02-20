@@ -8,8 +8,9 @@ rustyguard-crypto = { version = "0.1", path = "../rustyguard-crypto" }
 rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 
-hashbrown = { version = "0.14", default-features = false }
-rand = { version = "0.8", default-features = false, features = ["std_rng"] }
+hashbrown = { version = "0.15", default-features = false }
+rand_core = { version = "0.9", default-features = false }
+rand_chacha = { version = "0.9", default-features = false }
 foldhash = { version = "0.1", default-features = false }
 tai64 = { version = "4.0", default-features = false, features = ["zeroize"] }
 zerocopy = { version = "0.8", features = ["derive"] }
@@ -19,7 +20,7 @@ zeroize = "1.8"
 divan = "0.1.14"
 base64ct = { version = "1", features = ["std"] }
 tai64 = { version = "4.0", features = ["std"] }
-rand = { version = "0.8", features = ["getrandom"] }
+rand = { version = "0.9", features = [] }
 insta = "1.39.0"
 
 # server example

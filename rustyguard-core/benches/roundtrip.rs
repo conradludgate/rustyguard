@@ -1,8 +1,8 @@
 use core::net::SocketAddr;
 
 use divan::{black_box, Bencher};
-use rand::{thread_rng, RngCore};
-use rustyguard_core::{PrivateKey, UnparsedPublicKey};
+use rand::{rng, rngs::ThreadRng, RngCore};
+use rustyguard_core::{PublicKey, StaticPrivateKey};
 use rustyguard_crypto::{Key, StaticPeerConfig};
 use zerocopy::IntoBytes;
 
@@ -13,23 +13,25 @@ fn main() {
 }
 
 fn session_with_peer(
-    secret_key: PrivateKey,
-    peer_public_key: UnparsedPublicKey,
+    secret_key: StaticPrivateKey,
+    peer_public_key: PublicKey,
     preshared_key: Key,
     endpoint: SocketAddr,
 ) -> (Sessions, PeerId) {
     let peer = StaticPeerConfig::new(peer_public_key, Some(preshared_key), Some(endpoint));
     let mut config = Config::new(secret_key);
     let id = config.insert_peer(peer);
-    let sessions = Sessions::new(config, &mut thread_rng());
+    let sessions = Sessions::new(config, &mut rng());
     (sessions, id)
 }
 
 #[repr(align(16))]
 struct AlignedPacket([u8; 256]);
 
-fn pk(s: &PrivateKey) -> UnparsedPublicKey {
-    UnparsedPublicKey::new(*s.compute_public_key().unwrap().as_ref())
+fn gen_sk(r: &mut ThreadRng) -> StaticPrivateKey {
+    let mut b = [0u8; 32];
+    r.fill_bytes(&mut b);
+    StaticPrivateKey::from_array(&b)
 }
 
 #[divan::bench(sample_count = 100, sample_size = 100)]
@@ -38,12 +40,12 @@ fn roundtrip(b: Bencher) {
     let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
 
     b.with_inputs(|| {
-        let ssk_i = PrivateKey::generate(&mut thread_rng()).unwrap();
-        let ssk_r = PrivateKey::generate(&mut thread_rng()).unwrap();
-        let spk_i = pk(&ssk_i);
-        let spk_r = pk(&ssk_r);
+        let ssk_i = gen_sk(&mut rng());
+        let ssk_r = gen_sk(&mut rng());
+        let spk_i = ssk_i.public_key();
+        let spk_r = ssk_r.public_key();
         let mut psk = Key::default();
-        thread_rng().fill_bytes(&mut psk);
+        rng().fill_bytes(&mut psk);
         (
             Box::new(AlignedPacket([0; 256])),
             session_with_peer(ssk_i, spk_r, psk, server_addr),

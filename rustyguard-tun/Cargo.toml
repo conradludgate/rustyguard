@@ -9,18 +9,18 @@ rustyguard-core = { version = "0.1", path = "../rustyguard-core" }
 rustyguard-crypto = { version = "0.1", path = "../rustyguard-crypto" }
 rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 
-rand = "0.8"
+rand = "0.9"
 tai64 = "4.0"
 base64ct = { version = "1.6", features = ["alloc"] }
 ipnet = { version = "2.9" }
-iptrie = "0.8"
+iptrie = "0.10"
 packet = "0.1"
-rust-ini = "0.21"
+rust-ini = "0.21.1"
 
 futures-core = { version = "0.3" }
 libc = "0.2"
 nix = { version = "0.29", features = ["ioctl", "socket", "fs"] }
-thiserror = "1"
+thiserror = "2"
 
 # [target.'cfg(target_os = "macos")'.dependencies]
 tokio = { version = "1", features = ["rt", "net", "io-util", "macros", "time"] }

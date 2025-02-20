@@ -3,7 +3,7 @@ use core::ops::ControlFlow;
 
 use crate::time::{TimerEntry, TimerEntryType};
 use alloc::boxed::Box;
-use rand::Rng;
+use rand_core::RngCore;
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
     EphemeralPrivateKey, HandshakeState, HasMac,
@@ -19,11 +19,11 @@ use crate::{
 
 macro_rules! allocate_session {
     ($state:expr) => {{
-        let mut session_id = $state.rng.gen();
+        let mut session_id = $state.rng.next_u32();
         loop {
             use hashbrown::hash_map::Entry;
-            match $state.peers_by_session2.entry(session_id) {
-                Entry::Occupied(_) => session_id = $state.rng.gen(),
+            match $state.peers_by_session.entry(session_id) {
+                Entry::Occupied(_) => session_id = $state.rng.next_u32(),
                 Entry::Vacant(v) => break v,
             }
         }
@@ -94,7 +94,7 @@ impl Sessions {
         let session_id = *vacant.key();
 
         // complete handshake
-        let esk_r = EphemeralPrivateKey::generate(&mut state.rng).unwrap();
+        let esk_r = EphemeralPrivateKey::generate(&mut state.rng);
 
         let response = encrypt_handshake_resp(
             &mut hs,
@@ -103,7 +103,7 @@ impl Sessions {
             peer_config,
             session_id,
             peer.cookie.as_ref(),
-        );
+        )?;
         peer.last_sent_mac1 = response.mac1;
 
         peer.current_transport = Some(session_id);
@@ -169,7 +169,7 @@ impl Sessions {
         // check for a session expecting this handshake response
         use hashbrown::hash_map::Entry;
         let session_id = resp_msg.receiver.get();
-        let session = match state.peers_by_session2.entry(session_id) {
+        let session = match state.peers_by_session.entry(session_id) {
             // session not found
             Entry::Vacant(_) => {
                 unsafe_log!("[{addr:?}] [{session_id:?}] session not found");
@@ -238,7 +238,7 @@ impl Sessions {
         let cookie_msg = CookieMessage::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
 
         let session = state
-            .peers_by_session2
+            .peers_by_session
             .get(&cookie_msg.receiver.get())
             .ok_or(Error::Rejected)?;
         let peer_config = &self.config.peers[session.peer];
@@ -257,7 +257,7 @@ impl Sessions {
     }
 }
 
-pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeInit {
+pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<HandshakeInit, Error> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let state = &mut *state_ref;
     let peer_config = &sessions.config.peers[peer_idx];
@@ -265,14 +265,14 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeI
 
     let old_handshake = peer
         .current_handshake
-        .and_then(|session| state.peers_by_session2.remove(&session));
+        .and_then(|session| state.peers_by_session.remove(&session));
 
     // start a new session
     let vacant = allocate_session!(state);
     let sender = *vacant.key();
     peer.current_handshake = Some(sender);
 
-    let esk_i = EphemeralPrivateKey::generate(&mut state.rng).unwrap();
+    let esk_i = EphemeralPrivateKey::generate(&mut state.rng);
     let handshake = SessionHandshake {
         esk_i,
         state: HandshakeState::default(),
@@ -306,12 +306,12 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> HandshakeI
         state.now,
         sender,
         peer.cookie.as_ref(),
-    );
+    )?;
 
     state.timers.push(TimerEntry {
         time: state.now + REKEY_TIMEOUT,
         kind: TimerEntryType::InitAttempt { session_id },
     });
 
-    msg
+    Ok(msg)
 }

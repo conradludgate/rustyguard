@@ -7,8 +7,8 @@ edition = "2021"
 rustyguard-crypto = { version = "0.1", path = "../rustyguard-crypto" }
 rustyguard-types = { version = "0.1", path = "../rustyguard-types" }
 
-dashmap = "6"
+clashmap = "1"
 subtle = { version = "2.6", default-features = false }
 slotmap = "1"
-rand = { version = "0.8", features = ["getrandom"] }
+rand = { version = "0.9", features = [] }
 tokio = { version = "1", features = ["full"] }

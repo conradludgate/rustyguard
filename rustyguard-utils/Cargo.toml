@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 foldhash = { version = "0.1", default-features = false }
 libm = "0.2.8"
-rand_core = { version = "0.6", default-features = false }
+rand_core = { version = "0.9", default-features = false }
 
 [dev-dependencies]
-rand = { version = "0.8", features = ["getrandom"] }
+rand = { version = "0.9", features = [] }
