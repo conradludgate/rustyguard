@@ -37,7 +37,7 @@ use rustyguard_crypto::{
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
 };
-use rustyguard_utils::rate_limiter::CountMinSketch;
+use rustyguard_utils::rate_limiter::{CountMinSketch, RateLimitParams};
 use tai64::Tai64;
 use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -89,6 +89,9 @@ pub struct Config {
 
     /// List of peers that this wireguard server can talk to.
     peers: PeerList<StaticPeerConfig>,
+
+    /// Rate-limit protection configuration
+    ip_rate_limit_params: RateLimitParams,
 }
 
 struct PeerList<P>(Vec<P>);
@@ -118,6 +121,7 @@ impl Config {
             pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
             peers: PeerList(Vec::new()),
+            ip_rate_limit_params: RateLimitParams::default(),
         }
     }
 
@@ -145,6 +149,14 @@ impl Config {
 
                 id
             }
+        }
+    }
+
+    /// Adjust the rate limit protection configuration.
+    pub fn with_rate_limit_params(self, ip_rate_limit_params: RateLimitParams) -> Self {
+        Self {
+            ip_rate_limit_params,
+            ..self
         }
     }
 
@@ -339,15 +351,26 @@ pub struct DynamicState {
 }
 
 impl DynamicState {
-    fn new(peers: &PeerList<StaticPeerConfig>, rng: &mut (impl CryptoRng + RngCore)) -> Self {
+    fn new(config: &Config, rng: &mut (impl CryptoRng + RngCore)) -> Self {
         Self {
             cookie: CookieState::new(rng),
             last_reseed: Tai64N(Tai64(0), 0),
             now: Tai64N(Tai64(0), 0),
             last_rate_reset: Tai64N(Tai64(0), 0),
-            ip_rate_limit: CountMinSketch::with_params(10.0 / 20_000.0, 0.01, rng),
+            ip_rate_limit: CountMinSketch::with_params(
+                config.ip_rate_limit_params.epsilon,
+                config.ip_rate_limit_params.delta,
+                rng,
+            ),
             rng: StdRng::from_rng(rng).unwrap(),
-            peers: PeerList(peers.0.iter().map(|p| PeerState::new(p.endpoint)).collect()),
+            peers: PeerList(
+                config
+                    .peers
+                    .0
+                    .iter()
+                    .map(|p| PeerState::new(p.endpoint))
+                    .collect(),
+            ),
             peers_by_session2: HashMap::default(),
             timers: BinaryHeap::new(),
         }
@@ -357,7 +380,7 @@ impl DynamicState {
 impl Sessions {
     pub fn new(config: Config, rng: &mut (impl CryptoRng + RngCore)) -> Self {
         Self {
-            dynamic: RefCell::new(DynamicState::new(&config.peers, rng)),
+            dynamic: RefCell::new(DynamicState::new(&config, rng)),
             config,
         }
     }
