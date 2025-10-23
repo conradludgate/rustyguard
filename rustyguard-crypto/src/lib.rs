@@ -195,7 +195,7 @@ mac_protected!(HandshakeInit, MSG_FIRST);
 mac_protected!(HandshakeResp, MSG_SECOND);
 
 // ---- Noise IKpsk2 ---- //
-// Wireguard makes use of a slightly modified Noise IKpsk2 handshake.
+// Wireguard makes use of the Noise IKpsk2 handshake.
 // Read the noise specification: https://noiseprotocol.org/noise.html
 //
 // The IKpsk2 pattern is as follows:
