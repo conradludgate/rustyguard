@@ -1,3 +1,5 @@
+use core::array;
+
 use graviola::aead::ChaCha20Poly1305;
 use graviola::key_agreement::x25519::PublicKey;
 use graviola::key_agreement::x25519::StaticPrivateKey;
@@ -36,24 +38,6 @@ fn nonce(counter: u64) -> [u8; 12] {
     n
 }
 
-pub(crate) fn hash(msg: [&[u8]; 2]) -> Key {
-    let mut mac = blake2s_simd::State::new();
-    for msg in msg {
-        mac.update(msg);
-    }
-    *mac.finalize().as_array()
-}
-
-pub fn mac(key: &[u8], msg: &[u8]) -> Mac {
-    blake2s_simd::Params::new()
-        .hash_length(16)
-        .key(key)
-        .hash(msg)
-        .as_bytes()
-        .try_into()
-        .unwrap()
-}
-
 const IPAD: u8 = 0x36;
 const OPAD: u8 = 0x5C;
 
@@ -90,28 +74,58 @@ fn hmac_inner<const M: usize>(ipad_key: &[u8; 64], opad_key: &[u8; 64], msg: [&[
     *h.finalize().as_array()
 }
 
-fn hmac<const M: usize>(key: &Key, msg: [&[u8]; M]) -> Key {
-    let (ipad_key, opad_key) = get_pad(key);
-    hmac_inner(&ipad_key, &opad_key, msg)
+pub trait CryptoPrimatives {
+    fn blake2s_hash(left: &[u8], right: &[u8]) -> Key;
+    fn blake2s_mac(key: &[u8], msg: &[u8]) -> Mac;
+    fn hmac_blake2s(key: &Key, msg: &[u8]) -> Key;
+    fn hkdf_blake2s<const N: usize>(key: &mut Key, msg: &[u8], output: &mut [Key; N]);
 }
 
-fn hkdf<const N: usize>(key: &Key, msg: &[u8]) -> [Key; N] {
-    assert!(N > 0);
-    assert!(N <= 255);
+pub struct Core;
 
-    let mut output = [Key::default(); N];
-
-    let (ipad_key, opad_key) = get_pad(&hmac(key, [msg]));
-
-    let mut ti = hmac_inner(&ipad_key, &opad_key, [&[1u8]]);
-    output[0] = ti;
-
-    for i in 1..N as u8 {
-        ti = hmac_inner(&ipad_key, &opad_key, [&ti[..], &[i + 1]]);
-        output[i as usize] = ti;
+impl CryptoPrimatives for Core {
+    fn blake2s_hash(left: &[u8], right: &[u8]) -> Key {
+        let mut mac = blake2s_simd::State::new();
+        mac.update(left);
+        mac.update(right);
+        *mac.finalize().as_array()
     }
 
-    output
+    fn blake2s_mac(key: &[u8], msg: &[u8]) -> Mac {
+        blake2s_simd::Params::new()
+            .hash_length(16)
+            .key(key)
+            .hash(msg)
+            .as_bytes()
+            .try_into()
+            .unwrap()
+    }
+
+    fn hmac_blake2s(key: &Key, msg: &[u8]) -> Key {
+        let (ipad_key, opad_key) = get_pad(key);
+        hmac_inner(&ipad_key, &opad_key, [msg])
+    }
+
+    /// Performs the operation
+    ///
+    /// ```ignore
+    /// let tmp_output = HKDF_BLAKE2S(key, msg, N+1);
+    /// *key = tmp_output[0];
+    /// output.copy_from_slice(&tmp_output[1..]);
+    /// ```
+    fn hkdf_blake2s<const N: usize>(key: &mut Key, msg: &[u8], output: &mut [Key; N]) {
+        assert!(N < 255);
+
+        let (ipad_key, opad_key) = get_pad(&Self::hmac_blake2s(key, msg));
+
+        let mut ti = hmac_inner(&ipad_key, &opad_key, [&[1u8]]);
+        *key = ti;
+
+        for i in 0..N as u8 {
+            ti = hmac_inner(&ipad_key, &opad_key, [&ti[..], &[i + 2]]);
+            output[i as usize] = ti;
+        }
+    }
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -130,21 +144,23 @@ impl Default for HandshakeState {
 
 impl HandshakeState {
     /// Like mix-key, but discards the unused key
-    pub fn mix_chain(&mut self, b: &[u8]) {
-        let [c] = hkdf(&self.chain, b);
-        self.chain = c;
+    pub fn mix_chain<C: CryptoPrimatives>(&mut self, b: &[u8]) {
+        C::hkdf_blake2s(&mut self.chain, b, &mut []);
     }
 
-    pub fn mix_dh(&mut self, sk: &StaticPrivateKey, pk: &PublicKey) -> Result<(), CryptoError> {
+    pub fn mix_dh<C: CryptoPrimatives>(
+        &mut self,
+        sk: &StaticPrivateKey,
+        pk: &PublicKey,
+    ) -> Result<(), CryptoError> {
         let shared_secret = sk
             .diffie_hellman(pk)
             .map_err(|_| CryptoError::KeyExchangeError)?;
-        let [c] = hkdf(&self.chain, &shared_secret.0);
-        self.chain = c;
+        C::hkdf_blake2s(&mut self.chain, &shared_secret.0, &mut []);
         Ok(())
     }
 
-    pub fn mix_key_dh(
+    pub fn mix_key_dh<C: CryptoPrimatives>(
         &mut self,
         sk: &StaticPrivateKey,
         pk: &PublicKey,
@@ -152,40 +168,49 @@ impl HandshakeState {
         let shared_secret = sk
             .diffie_hellman(pk)
             .map_err(|_| CryptoError::KeyExchangeError)?;
-        Ok(self.mix_key(&shared_secret.0))
+        Ok(self.mix_key::<C>(&shared_secret.0))
     }
 
-    pub fn mix_edh(&mut self, sk: &EphemeralPrivateKey, pk: &PublicKey) -> Result<(), CryptoError> {
-        self.mix_dh(&sk.0, pk)
+    pub fn mix_edh<C: CryptoPrimatives>(
+        &mut self,
+        sk: &EphemeralPrivateKey,
+        pk: &PublicKey,
+    ) -> Result<(), CryptoError> {
+        self.mix_dh::<C>(&sk.0, pk)
     }
 
-    pub fn mix_key_edh(
+    pub fn mix_key_edh<C: CryptoPrimatives>(
         &mut self,
         sk: &EphemeralPrivateKey,
         pk: &PublicKey,
     ) -> Result<Key, CryptoError> {
-        self.mix_key_dh(&sk.0, pk)
+        self.mix_key_dh::<C>(&sk.0, pk)
     }
 
-    fn mix_key(&mut self, b: &[u8]) -> Key {
-        let [c, k] = hkdf(&self.chain, b);
-        self.chain = c;
+    fn mix_key<C: CryptoPrimatives>(&mut self, b: &[u8]) -> Key {
+        let mut k = Key::default();
+        C::hkdf_blake2s(&mut self.chain, b, array::from_mut(&mut k));
         k
     }
 
-    pub fn mix_key_and_hash(&mut self, b: &[u8]) -> Key {
-        let [c, t, k] = hkdf(&self.chain, b);
-        self.chain = c;
-        self.mix_hash(&t[..]);
-        k
+    pub fn mix_key_and_hash<C: CryptoPrimatives>(&mut self, b: &[u8]) -> Key {
+        let mut tk = [Key::default(); 2];
+        C::hkdf_blake2s(&mut self.chain, b, &mut tk);
+        self.mix_hash::<C>(&tk[0]);
+        tk[1]
     }
 
-    pub fn mix_hash(&mut self, b: &[u8]) {
-        self.hash = hash([&self.hash, b]);
+    pub fn mix_hash<C: CryptoPrimatives>(&mut self, b: &[u8]) {
+        self.hash = C::blake2s_hash(&self.hash, b);
     }
 
-    pub fn split(&mut self, initiator: bool) -> (EncryptionKey, DecryptionKey) {
-        let [k1, k2] = hkdf(&self.chain, &[]);
+    pub fn split<C: CryptoPrimatives>(
+        &mut self,
+        initiator: bool,
+    ) -> (EncryptionKey, DecryptionKey) {
+        let mut k2 = Key::default();
+        C::hkdf_blake2s(&mut self.chain, &[], array::from_mut(&mut k2));
+        let k1 = self.chain;
         self.zeroize();
 
         if initiator {
@@ -197,19 +222,23 @@ impl HandshakeState {
 }
 
 pub trait Encrypted<const N: usize> {
-    fn decrypt_and_hash(
+    fn decrypt_and_hash<C: CryptoPrimatives>(
         &mut self,
         state: &mut HandshakeState,
         key: &Key,
     ) -> Result<&mut [u8; N], CryptoError>;
 
-    fn encrypt_and_hash(msg: [u8; N], state: &mut HandshakeState, key: &Key) -> Self;
+    fn encrypt_and_hash<C: CryptoPrimatives>(
+        msg: [u8; N],
+        state: &mut HandshakeState,
+        key: &Key,
+    ) -> Self;
 }
 
 macro_rules! encrypted {
     ($i:ident, $n:literal) => {
         impl Encrypted<$n> for $i {
-            fn decrypt_and_hash(
+            fn decrypt_and_hash<C: CryptoPrimatives>(
                 &mut self,
                 state: &mut HandshakeState,
                 key: &Key,
@@ -217,7 +246,7 @@ macro_rules! encrypted {
                 let key = ChaCha20Poly1305::new(*key);
 
                 let aad = state.hash;
-                state.mix_hash(self.as_bytes());
+                state.mix_hash::<C>(self.as_bytes());
 
                 key.decrypt(&nonce(0), &aad, &mut self.msg, &self.tag.0)
                     .map_err(|_| CryptoError::DecryptionError)?;
@@ -225,7 +254,11 @@ macro_rules! encrypted {
                 Ok(&mut self.msg)
             }
 
-            fn encrypt_and_hash(msg: [u8; $n], state: &mut HandshakeState, key: &Key) -> Self {
+            fn encrypt_and_hash<C: CryptoPrimatives>(
+                msg: [u8; $n],
+                state: &mut HandshakeState,
+                key: &Key,
+            ) -> Self {
                 let key = ChaCha20Poly1305::new(*key);
 
                 let aad = state.hash;
@@ -237,7 +270,7 @@ macro_rules! encrypted {
 
                 key.encrypt(&nonce(0), &aad, &mut out.msg, &mut out.tag.0);
 
-                state.mix_hash(out.as_bytes());
+                state.mix_hash::<C>(out.as_bytes());
 
                 out
             }
@@ -319,7 +352,10 @@ impl DecryptionKey {
 mod tests {
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-    use crate::prim::Key;
+    use crate::{
+        prim::{CryptoPrimatives, Key},
+        CryptoCore,
+    };
 
     #[test]
     fn construction_identifier() {
@@ -340,13 +376,18 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2);
         let mut key = Key::default();
         rng.fill_bytes(&mut key);
-        let [a, b, c] = super::hkdf(&key, b"msg data here even more data");
+
+        let mut bc = [Key::default(); 2];
+        CryptoCore::hkdf_blake2s(&mut key, b"msg data here even more data", &mut bc);
+
+        let a = key;
+        let [b, c] = bc;
         insta::assert_debug_snapshot!([a, b, c]);
     }
 
     #[test]
     fn hash_snapshot() {
-        let h = super::hash([b"msg data here", b" even more data"]);
+        let h = CryptoCore::blake2s_hash(b"msg data here", b" even more data");
         insta::assert_debug_snapshot!(h);
     }
 
@@ -355,7 +396,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2);
         let mut key = Key::default();
         rng.fill_bytes(&mut key);
-        let h = super::mac(&key, b"msg data here even more data");
+        let h = CryptoCore::blake2s_mac(&key, b"msg data here even more data");
         insta::assert_debug_snapshot!(h);
     }
 }

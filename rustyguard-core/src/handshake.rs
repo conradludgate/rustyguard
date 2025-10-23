@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use rand_core::RngCore;
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    EphemeralPrivateKey, HandshakeState, HasMac,
+    CryptoCore, EphemeralPrivateKey, HandshakeState, HasMac,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
@@ -109,7 +109,7 @@ impl Sessions {
         peer.current_transport = Some(session_id);
 
         // generate the encryption keys
-        let (encrypt, decrypt) = hs.split(false);
+        let (encrypt, decrypt) = hs.split::<CryptoCore>(false);
         let transport = SessionTransport {
             receiver: init_msg.sender.get(),
             encrypt,
@@ -202,7 +202,7 @@ impl Sessions {
 
         peer.endpoint = Some(addr);
 
-        let (encrypt, decrypt) = hs.state.split(true);
+        let (encrypt, decrypt) = hs.state.split::<CryptoCore>(true);
         hs.zeroize();
 
         session.state = SessionState::Transport(SessionTransport {
