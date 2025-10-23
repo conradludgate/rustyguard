@@ -1,6 +1,5 @@
 use core::array;
 
-use graviola::aead::ChaCha20Poly1305;
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
@@ -79,6 +78,36 @@ pub trait CryptoPrimatives {
     fn hkdf_blake2s<const N: usize>(key: &mut Key, msg: &[u8], output: &mut [Key; N]);
     fn x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError>;
     fn x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey;
+
+    fn chacha20poly1305_enc(
+        key: &Key,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        payload: &mut [u8],
+        tag: &mut [u8; 16],
+    );
+    fn chacha20poly1305_dec(
+        key: &Key,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        payload: &mut [u8],
+        tag: &[u8; 16],
+    ) -> Result<(), CryptoError>;
+
+    fn xchacha20poly1305_enc(
+        key: &Key,
+        nonce: &[u8; 24],
+        aad: &[u8],
+        payload: &mut [u8],
+        tag: &mut [u8; 16],
+    );
+    fn xchacha20poly1305_dec(
+        key: &Key,
+        nonce: &[u8; 24],
+        aad: &[u8],
+        payload: &mut [u8],
+        tag: &[u8; 16],
+    ) -> Result<(), CryptoError>;
 }
 
 pub struct Core;
@@ -145,6 +174,53 @@ impl CryptoPrimatives for Core {
                 .public_key()
                 .as_bytes(),
         )
+    }
+
+    fn chacha20poly1305_enc(
+        key: &Key,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        payload: &mut [u8],
+        tag: &mut [u8; 16],
+    ) {
+        use graviola::aead::ChaCha20Poly1305;
+        ChaCha20Poly1305::new(*key).encrypt(nonce, aad, payload, tag);
+    }
+
+    fn chacha20poly1305_dec(
+        key: &Key,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        payload: &mut [u8],
+        tag: &[u8; 16],
+    ) -> Result<(), CryptoError> {
+        use graviola::aead::ChaCha20Poly1305;
+        ChaCha20Poly1305::new(*key)
+            .decrypt(nonce, aad, payload, tag)
+            .map_err(|_| CryptoError::DecryptionError)
+    }
+    fn xchacha20poly1305_enc(
+        key: &Key,
+        nonce: &[u8; 24],
+        aad: &[u8],
+        payload: &mut [u8],
+        tag: &mut [u8; 16],
+    ) {
+        use graviola::aead::XChaCha20Poly1305;
+        XChaCha20Poly1305::new(*key).encrypt(nonce, aad, payload, tag);
+    }
+
+    fn xchacha20poly1305_dec(
+        key: &Key,
+        nonce: &[u8; 24],
+        aad: &[u8],
+        payload: &mut [u8],
+        tag: &[u8; 16],
+    ) -> Result<(), CryptoError> {
+        use graviola::aead::XChaCha20Poly1305;
+        XChaCha20Poly1305::new(*key)
+            .decrypt(nonce, aad, payload, tag)
+            .map_err(|_| CryptoError::DecryptionError)
     }
 }
 
@@ -259,13 +335,10 @@ macro_rules! encrypted {
                 state: &mut HandshakeState,
                 key: &Key,
             ) -> Result<&mut [u8; $n], CryptoError> {
-                let key = ChaCha20Poly1305::new(*key);
-
                 let aad = state.hash;
                 state.mix_hash::<C>(self.as_bytes());
 
-                key.decrypt(&nonce(0), &aad, &mut self.msg, &self.tag.0)
-                    .map_err(|_| CryptoError::DecryptionError)?;
+                C::chacha20poly1305_dec(key, &nonce(0), &aad, &mut self.msg, &self.tag.0)?;
 
                 Ok(&mut self.msg)
             }
@@ -275,8 +348,6 @@ macro_rules! encrypted {
                 state: &mut HandshakeState,
                 key: &Key,
             ) -> Self {
-                let key = ChaCha20Poly1305::new(*key);
-
                 let aad = state.hash;
 
                 let mut out = Self {
@@ -284,7 +355,7 @@ macro_rules! encrypted {
                     tag: Tag([0; 16]),
                 };
 
-                key.encrypt(&nonce(0), &aad, &mut out.msg, &mut out.tag.0);
+                C::chacha20poly1305_enc(key, &nonce(0), &aad, &mut out.msg, &mut out.tag.0);
 
                 state.mix_hash::<C>(out.as_bytes());
 
@@ -303,24 +374,21 @@ pub struct StaticPrivateKey(pub [u8; 32]);
 pub struct PublicKey(pub [u8; 32]);
 
 pub struct EncryptionKey {
-    key: ChaCha20Poly1305,
+    key: Key,
     counter: u64,
 }
 
 impl EncryptionKey {
     pub fn new(key: Key) -> Self {
-        Self {
-            key: ChaCha20Poly1305::new(key),
-            counter: 0,
-        }
+        Self { key, counter: 0 }
     }
 
-    pub fn encrypt(&mut self, payload: &mut [u8]) -> Tag {
+    pub fn encrypt<C: CryptoPrimatives>(&mut self, payload: &mut [u8]) -> Tag {
         let n = self.counter;
         self.counter += 1;
         let nonce = nonce(n);
         let mut tag = [0; 16];
-        self.key.encrypt(&nonce, &[], payload, &mut tag);
+        C::chacha20poly1305_enc(&self.key, &nonce, &[], payload, &mut tag);
 
         Tag(tag)
     }
@@ -331,19 +399,19 @@ impl EncryptionKey {
 }
 
 pub struct DecryptionKey {
-    key: ChaCha20Poly1305,
+    key: Key,
     replay: AntiReplay,
 }
 
 impl DecryptionKey {
     pub fn new(key: Key) -> Self {
         Self {
-            key: ChaCha20Poly1305::new(key),
+            key,
             replay: AntiReplay::default(),
         }
     }
 
-    pub fn decrypt<'b>(
+    pub fn decrypt<'b, C: CryptoPrimatives>(
         &mut self,
         counter: u64,
         payload_and_tag: &'b mut [u8],
@@ -355,12 +423,11 @@ impl DecryptionKey {
 
         let nonce = nonce(counter);
 
-        let pos = payload_and_tag.len() - 16;
-        let (payload, tag) = payload_and_tag.split_at_mut(pos);
+        let (payload, tag) = payload_and_tag
+            .split_last_chunk_mut::<16>()
+            .ok_or(CryptoError::DecryptionError)?;
 
-        self.key
-            .decrypt(&nonce, &[], payload, tag)
-            .map_err(|_| CryptoError::DecryptionError)?;
+        C::chacha20poly1305_dec(&self.key, &nonce, &[], payload, tag)?;
 
         Ok(payload)
     }

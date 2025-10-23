@@ -109,10 +109,7 @@ impl TunConfig {
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
             }
         }
-        println!(
-            "public key: {}",
-            Base64::encode_string(&private_key.0)
-        );
+        println!("public key: {}", Base64::encode_string(&private_key.0));
         private_key
     }
 

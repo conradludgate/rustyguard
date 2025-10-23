@@ -2,9 +2,6 @@
 
 use core::{net::SocketAddr, ops::ControlFlow};
 
-use graviola::aead::XChaCha20Poly1305;
-// pub use graviola::key_agreement::x25519::PublicKey;
-// pub use graviola::key_agreement::x25519::StaticPrivateKey;
 pub use prim::{DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
 use prim::{Encrypted, LABEL_COOKIE, LABEL_MAC1};
 
@@ -49,9 +46,7 @@ pub fn decrypt_cookie<'c>(
     nonce: &[u8; 24],
     aad: &[u8],
 ) -> Result<&'c mut Cookie, CryptoError> {
-    XChaCha20Poly1305::new(*key)
-        .decrypt(nonce, aad, &mut cookie.msg.0, &cookie.tag.0)
-        .map_err(|_| CryptoError::DecryptionError)?;
+    CryptoCore::xchacha20poly1305_dec(key, nonce, aad, &mut cookie.msg.0, &cookie.tag.0)?;
 
     Ok(&mut cookie.msg)
 }
@@ -62,7 +57,7 @@ pub fn encrypt_cookie(cookie: Cookie, key: &Key, nonce: &[u8; 24], aad: &[u8]) -
         tag: Tag([0; 16]),
     };
 
-    XChaCha20Poly1305::new(*key).encrypt(nonce, aad, &mut out.msg.0, &mut out.tag.0);
+    CryptoCore::xchacha20poly1305_enc(key, nonce, aad, &mut out.msg.0, &mut out.tag.0);
 
     out
 }
@@ -528,31 +523,31 @@ mod tests {
         let (mut ek2, mut dk2) = hs2.split::<CryptoCore>(false);
 
         let mut msg = b"hello world".to_vec();
-        let tag = ek1.encrypt(&mut msg);
+        let tag = ek1.encrypt::<CryptoCore>(&mut msg);
         insta::assert_debug_snapshot!((&msg, tag.0));
         msg.extend_from_slice(tag.as_bytes());
-        let msg = dk2.decrypt(0, &mut msg).unwrap();
+        let msg = dk2.decrypt::<CryptoCore>(0, &mut msg).unwrap();
         assert_eq!(msg, *b"hello world");
 
         let mut msg = b"goodbye world".to_vec();
-        let tag = ek2.encrypt(&mut msg);
+        let tag = ek2.encrypt::<CryptoCore>(&mut msg);
         insta::assert_debug_snapshot!((&msg, tag.0));
         msg.extend_from_slice(tag.as_bytes());
-        let msg = dk1.decrypt(0, &mut msg).unwrap();
+        let msg = dk1.decrypt::<CryptoCore>(0, &mut msg).unwrap();
         assert_eq!(msg, *b"goodbye world");
 
         let mut msg = b"hello world2".to_vec();
-        let tag = ek1.encrypt(&mut msg);
+        let tag = ek1.encrypt::<CryptoCore>(&mut msg);
         insta::assert_debug_snapshot!((&msg, tag.0));
         msg.extend_from_slice(tag.as_bytes());
-        let msg = dk2.decrypt(1, &mut msg).unwrap();
+        let msg = dk2.decrypt::<CryptoCore>(1, &mut msg).unwrap();
         assert_eq!(msg, *b"hello world2");
 
         let mut msg = b"goodbye world2".to_vec();
-        let tag = ek2.encrypt(&mut msg);
+        let tag = ek2.encrypt::<CryptoCore>(&mut msg);
         insta::assert_debug_snapshot!((&msg, tag.0));
         msg.extend_from_slice(tag.as_bytes());
-        let msg = dk1.decrypt(1, &mut msg).unwrap();
+        let msg = dk1.decrypt::<CryptoCore>(1, &mut msg).unwrap();
         assert_eq!(msg, *b"goodbye world2");
     }
 

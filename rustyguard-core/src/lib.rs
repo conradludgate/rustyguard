@@ -32,8 +32,8 @@ use hashbrown::{HashMap, HashTable};
 use rand_chacha::ChaCha12Rng as StdRng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoError, DecryptionKey, EncryptionKey, EphemeralPrivateKey,
-    HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
+    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, EncryptionKey,
+    EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -271,7 +271,7 @@ impl PeerState {
             unreachable!()
         };
         let n = ts.encrypt.counter();
-        let tag = ts.encrypt.encrypt(payload);
+        let tag = ts.encrypt.encrypt::<CryptoCore>(payload);
 
         session.sent = now;
         let header = DataHeader {
@@ -635,7 +635,9 @@ impl Sessions {
             });
         }
 
-        let payload = ts.decrypt.decrypt(header.counter.get(), payload_and_tag)?;
+        let payload = ts
+            .decrypt
+            .decrypt::<CryptoCore>(header.counter.get(), payload_and_tag)?;
 
         Ok((session.peer, payload))
     }
