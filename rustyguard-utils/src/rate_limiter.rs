@@ -7,6 +7,26 @@ use rand_core::RngCore;
 extern crate alloc;
 use alloc::vec::Vec;
 
+pub struct RateLimitParams {
+    pub delta: f64,
+    pub epsilon: f64,
+}
+impl RateLimitParams {
+    pub const STRONG: Self = Self {
+        delta: 0.01,
+        epsilon: 10.0 / 20_000.0,
+    };
+    pub const WEAK: Self = Self {
+        delta: 0.05,
+        epsilon: 100.0 / 20_000.0,
+    };
+}
+impl Default for RateLimitParams {
+    fn default() -> Self {
+        Self::STRONG
+    }
+}
+
 /// CountMinSketch is a fast, O(1) memory way to measure number of times we see a client
 /// over time.
 ///
