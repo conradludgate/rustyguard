@@ -8,7 +8,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::tun::platform::posix::Fd;
-use crate::tun::platform::{Device, Queue};
+use crate::tun::platform::Device;
 
 /// An async TUN device wrapper around a TUN device.
 pub struct AsyncDevice {
@@ -91,67 +91,5 @@ impl AsyncWrite for AsyncDevice {
 
     fn is_write_vectored(&self) -> bool {
         true
-    }
-}
-
-/// An async TUN device queue wrapper around a TUN device queue.
-pub struct AsyncQueue {
-    inner: AsyncFd<Queue>,
-}
-
-// impl AsyncQueue {
-//     /// Create a new `AsyncQueue` wrapping around a `Queue`.
-//     pub fn new(queue: Queue) -> io::Result<AsyncQueue> {
-//         queue.set_nonblock()?;
-//         Ok(AsyncQueue {
-//             inner: AsyncFd::new(queue)?,
-//         })
-//     }
-// }
-
-impl AsyncRead for AsyncQueue {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf,
-    ) -> Poll<io::Result<()>> {
-        loop {
-            let mut guard = ready!(self.inner.poll_read_ready_mut(cx))?;
-            let rbuf = buf.initialize_unfilled();
-            match guard.try_io(|inner| inner.get_mut().read(rbuf)) {
-                Ok(res) => return Poll::Ready(res.map(|n| buf.advance(n))),
-                Err(_wb) => continue,
-            }
-        }
-    }
-}
-
-impl AsyncWrite for AsyncQueue {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        loop {
-            let mut guard = ready!(self.inner.poll_write_ready_mut(cx))?;
-            match guard.try_io(|inner| inner.get_mut().write(buf)) {
-                Ok(res) => return Poll::Ready(res),
-                Err(_wb) => continue,
-            }
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        loop {
-            let mut guard = ready!(self.inner.poll_write_ready_mut(cx))?;
-            match guard.try_io(|inner| inner.get_mut().flush()) {
-                Ok(res) => return Poll::Ready(res),
-                Err(_wb) => continue,
-            }
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
     }
 }
