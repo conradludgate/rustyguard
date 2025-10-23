@@ -101,17 +101,17 @@ impl TunConfig {
         let private_key;
         match &self.interface.key {
             Some(key) => {
-                private_key = StaticPrivateKey::from_array((&**key).try_into().unwrap());
+                private_key = StaticPrivateKey((&**key).try_into().unwrap());
             }
             None => {
-                private_key = StaticPrivateKey::from_array(&OsRng.unwrap_err().random());
-                let c = private_key.as_bytes();
+                private_key = StaticPrivateKey(OsRng.unwrap_err().random());
+                let c = private_key.0;
                 println!("private key: {}", Base64::encode_string(c.as_ref()));
             }
         }
         println!(
             "public key: {}",
-            Base64::encode_string(&private_key.public_key().as_bytes())
+            Base64::encode_string(&private_key.0)
         );
         private_key
     }
@@ -121,7 +121,7 @@ impl TunConfig {
 
         let mut peer_net = Ipv4RTrieMap::with_root(PeerId::sentinal());
         for peer in self.peers {
-            let peer_pk = PublicKey::from_array(<&[u8; 32]>::try_from(&*peer.key).unwrap());
+            let peer_pk = PublicKey(<[u8; 32]>::try_from(&*peer.key).unwrap());
             let id = rg_config.insert_peer(StaticPeerConfig::new(
                 peer_pk,
                 None,

@@ -1,8 +1,6 @@
 use core::array;
 
 use graviola::aead::ChaCha20Poly1305;
-use graviola::key_agreement::x25519::PublicKey;
-use graviola::key_agreement::x25519::StaticPrivateKey;
 use rustyguard_types::EncryptedEmpty;
 use rustyguard_types::EncryptedPublicKey;
 use rustyguard_types::EncryptedTimestamp;
@@ -79,6 +77,8 @@ pub trait CryptoPrimatives {
     fn blake2s_mac(key: &[u8], msg: &[u8]) -> Mac;
     fn hmac_blake2s(key: &Key, msg: &[u8]) -> Key;
     fn hkdf_blake2s<const N: usize>(key: &mut Key, msg: &[u8], output: &mut [Key; N]);
+    fn x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError>;
+    fn x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey;
 }
 
 pub struct Core;
@@ -126,6 +126,26 @@ impl CryptoPrimatives for Core {
             output[i as usize] = ti;
         }
     }
+
+    fn x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError> {
+        use graviola::key_agreement::x25519::PublicKey;
+        use graviola::key_agreement::x25519::StaticPrivateKey;
+
+        StaticPrivateKey::from_array(&secret.0)
+            .diffie_hellman(&PublicKey::from_array(&public.0))
+            .map(|s| s.0)
+            .map_err(|_| CryptoError::KeyExchangeError)
+    }
+
+    fn x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey {
+        use graviola::key_agreement::x25519::StaticPrivateKey;
+
+        PublicKey(
+            StaticPrivateKey::from_array(&secret.0)
+                .public_key()
+                .as_bytes(),
+        )
+    }
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -153,10 +173,8 @@ impl HandshakeState {
         sk: &StaticPrivateKey,
         pk: &PublicKey,
     ) -> Result<(), CryptoError> {
-        let shared_secret = sk
-            .diffie_hellman(pk)
-            .map_err(|_| CryptoError::KeyExchangeError)?;
-        C::hkdf_blake2s(&mut self.chain, &shared_secret.0, &mut []);
+        let shared_secret = C::x25519(sk, pk)?;
+        C::hkdf_blake2s(&mut self.chain, &shared_secret, &mut []);
         Ok(())
     }
 
@@ -165,10 +183,8 @@ impl HandshakeState {
         sk: &StaticPrivateKey,
         pk: &PublicKey,
     ) -> Result<Key, CryptoError> {
-        let shared_secret = sk
-            .diffie_hellman(pk)
-            .map_err(|_| CryptoError::KeyExchangeError)?;
-        Ok(self.mix_key::<C>(&shared_secret.0))
+        let shared_secret = C::x25519(sk, pk)?;
+        Ok(self.mix_key::<C>(&shared_secret))
     }
 
     pub fn mix_edh<C: CryptoPrimatives>(
@@ -283,6 +299,8 @@ encrypted!(EncryptedTimestamp, 12);
 encrypted!(EncryptedPublicKey, 32);
 
 pub type Mac = [u8; 16];
+pub struct StaticPrivateKey(pub [u8; 32]);
+pub struct PublicKey(pub [u8; 32]);
 
 pub struct EncryptionKey {
     key: ChaCha20Poly1305,

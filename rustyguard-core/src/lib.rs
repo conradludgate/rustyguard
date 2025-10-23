@@ -126,9 +126,9 @@ impl Config {
     pub fn insert_peer(&mut self, peer: StaticPeerConfig) -> PeerId {
         use hashbrown::hash_table::Entry;
         match self.peers_by_pubkey.entry(
-            self.pubkey_hasher.hash_one(peer.key.as_bytes()),
-            |&i| self.peers[i].key.as_bytes() == peer.key.as_bytes(),
-            |&i| self.pubkey_hasher.hash_one(self.peers[i].key.as_bytes()),
+            self.pubkey_hasher.hash_one(peer.key.0),
+            |&i| self.peers[i].key.0 == peer.key.0,
+            |&i| self.pubkey_hasher.hash_one(self.peers[i].key.0),
         ) {
             Entry::Occupied(o) => {
                 let id = *o.get();
@@ -152,8 +152,8 @@ impl Config {
     fn get_peer_idx(&self, pk: &PublicKey) -> Option<PeerId> {
         let peers = &self.peers;
         self.peers_by_pubkey
-            .find(self.pubkey_hasher.hash_one(pk.as_bytes()), |&i| {
-                peers[i].key.as_bytes() == pk.as_bytes()
+            .find(self.pubkey_hasher.hash_one(pk.0), |&i| {
+                peers[i].key.0 == pk.0
             })
             .copied()
     }
@@ -651,7 +651,7 @@ mod tests {
         rngs::{OsRng, StdRng},
         Rng, RngCore, SeedableRng, TryRngCore,
     };
-    use rustyguard_crypto::{Key, StaticPeerConfig};
+    use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
     use tai64::Tai64N;
     use zerocopy::IntoBytes;
 
@@ -660,7 +660,7 @@ mod tests {
     fn gen_sk(r: &mut impl Rng) -> StaticPrivateKey {
         let mut b = [0u8; 32];
         r.fill_bytes(&mut b);
-        StaticPrivateKey::from_array(&b)
+        StaticPrivateKey(b)
     }
 
     fn session_with_peer(
@@ -685,8 +685,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut OsRng.unwrap_err());
         let ssk_r = gen_sk(&mut OsRng.unwrap_err());
-        let spk_i = ssk_i.public_key();
-        let spk_r = ssk_r.public_key();
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
@@ -749,8 +749,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut rng);
         let ssk_r = gen_sk(&mut rng);
-        let spk_i = ssk_i.public_key();
-        let spk_r = ssk_r.public_key();
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 

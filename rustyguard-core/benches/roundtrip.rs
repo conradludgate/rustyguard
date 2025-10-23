@@ -3,7 +3,7 @@ use core::net::SocketAddr;
 use divan::{black_box, Bencher};
 use rand::{rng, rngs::ThreadRng, RngCore};
 use rustyguard_core::{PublicKey, StaticPrivateKey};
-use rustyguard_crypto::{Key, StaticPeerConfig};
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
 use zerocopy::IntoBytes;
 
 use rustyguard_core::{Config, PeerId, Sessions};
@@ -31,7 +31,7 @@ struct AlignedPacket([u8; 256]);
 fn gen_sk(r: &mut ThreadRng) -> StaticPrivateKey {
     let mut b = [0u8; 32];
     r.fill_bytes(&mut b);
-    StaticPrivateKey::from_array(&b)
+    StaticPrivateKey(b)
 }
 
 #[divan::bench(sample_count = 100, sample_size = 100)]
@@ -42,8 +42,8 @@ fn roundtrip(b: Bencher) {
     b.with_inputs(|| {
         let ssk_i = gen_sk(&mut rng());
         let ssk_r = gen_sk(&mut rng());
-        let spk_i = ssk_i.public_key();
-        let spk_r = ssk_r.public_key();
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
         let mut psk = Key::default();
         rng().fill_bytes(&mut psk);
         (
