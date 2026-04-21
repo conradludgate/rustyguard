@@ -40,7 +40,12 @@ pub struct PeerConfig {
 
 impl TunConfig {
     pub fn parse() -> Self {
-        let i = Ini::load_from_file("rustyguard-tun/test-data/rg.conf").unwrap();
+        // First positional arg overrides the default, so e2e harnesses can
+        // point at a rendered config without baking the path into the binary.
+        let path = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "rustyguard-tun/test-data/rg.conf".to_string());
+        let i = Ini::load_from_file(&path).unwrap();
 
         let mut interface = None;
         let mut peers = vec![];
