@@ -162,6 +162,18 @@ pub trait HasMac: FromBytes + IntoBytes + Sized {
 
 macro_rules! mac_protected {
     ($i:ident, $t:ident) => {
+        // The wire format pins mac1 and mac2 as the two trailing 16-byte
+        // fields of every handshake message. compute_mac1/compute_mac2 sign
+        // everything *up to* their respective offset, so a future layout
+        // change that reordered or repadded these fields would silently
+        // produce wrong macs and break interop. Catch that at compile time.
+        const _: () = assert!(
+            core::mem::offset_of!($i, mac1) + 16 == core::mem::offset_of!($i, mac2)
+        );
+        const _: () = assert!(
+            core::mem::offset_of!($i, mac2) + 16 == core::mem::size_of::<$i>()
+        );
+
         impl HasMac for $i {
             fn compute_mac1(&self, mac1_key: &crate::Key) -> Mac {
                 let offset = core::mem::offset_of!($i, mac1);
