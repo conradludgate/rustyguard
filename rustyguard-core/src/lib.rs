@@ -291,24 +291,39 @@ impl PeerState {
 pub struct MessageEncrypter(u32, Tai64N);
 
 impl MessageEncrypter {
-    pub fn encrypt(self, sessions: &Sessions, payload: &mut [u8]) -> EncryptedMetadata {
+    /// Returns `None` if the session has been removed/rotated or has already
+    /// crossed REJECT_AFTER_{MESSAGES,TIME} since the encrypter was issued.
+    pub fn encrypt(self, sessions: &Sessions, payload: &mut [u8]) -> Option<EncryptedMetadata> {
         let mut state_ref = sessions.dynamic.borrow_mut();
         let state = &mut *state_ref;
 
-        let session = &mut state.peers_by_session.get_mut(&self.0).unwrap();
+        let session = state.peers_by_session.get_mut(&self.0)?;
+        let SessionState::Transport(ts) = &session.state else {
+            return None;
+        };
+        if session.should_reject(self.1, ts) {
+            return None;
+        }
         let peer = &mut state.peers[session.peer];
 
-        peer.force_encrypt(session, payload, self.1)
+        Some(peer.force_encrypt(session, payload, self.1))
     }
 
     /// Encrypts the payload and attaches the wireguard framing in-place.
     ///
     /// The payload is defined to be `buffer[16..buffer.len()-16]`, as first and last
     /// 16 bytes are reserved for the wireguard framing.
-    pub fn encrypt_and_frame(self, sessions: &Sessions, buffer: &mut [u8]) {
+    ///
+    /// Returns `false` (with `buffer` left in an unspecified state) if the
+    /// session has expired between issuance and use.
+    pub fn encrypt_and_frame(self, sessions: &Sessions, buffer: &mut [u8]) -> bool {
         let len = buffer.len();
         let payload = &mut buffer[16..len - 16];
-        self.encrypt(sessions, payload).frame_in_place(buffer);
+        let Some(meta) = self.encrypt(sessions, payload) else {
+            return false;
+        };
+        meta.frame_in_place(buffer);
+        true
     }
 }
 
@@ -728,7 +743,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg);
+            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);
@@ -785,7 +800,7 @@ mod tests {
             _ => panic!("expecting handshake complete"),
         };
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg);
+            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);
@@ -868,7 +883,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg);
+            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);

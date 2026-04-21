@@ -95,14 +95,14 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                 };
 
                 if should_keepalive {
-                    let EncryptedMetadata {
+                    let Some(EncryptedMetadata {
                         header,
                         tag,
                         payload_len: _,
-                    } = peer
-                        .encrypt_message(&mut state.peers_by_session, &mut [], state.now)
-                        .expect("a keepalive should only be scheduled if the data keys are set");
-
+                    }) = peer.encrypt_message(&mut state.peers_by_session, &mut [], state.now)
+                    else {
+                        continue;
+                    };
                     let socket = peer.endpoint.expect("a keepalive event should not be scheduled if we've never seen this endpoint before");
 
                     return Some(MaintenanceMsg {
