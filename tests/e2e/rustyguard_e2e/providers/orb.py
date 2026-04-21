@@ -1,22 +1,54 @@
+"""OrbStack backend.
+
+Mirrors the original Makefile flow. Orb machines share a network and
+resolve `<name>.orb.local`, so cross-VM addressing comes for free.
+"""
+
 from __future__ import annotations
 
 import pathlib
+import platform
 import shutil
 import subprocess
 
 from ..provider import Provider
 
 
+def _host_target_triple() -> str:
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return "aarch64-unknown-linux-gnu"
+    if machine in ("x86_64", "amd64"):
+        return "x86_64-unknown-linux-gnu"
+    raise RuntimeError(f"unsupported host arch for orb backend: {machine!r}")
+
+
 class OrbProvider(Provider):
     name = "orb"
-    target_triple = ""
+
+    def __init__(self) -> None:
+        self.target_triple = _host_target_triple()
 
     @classmethod
     def is_available(cls) -> bool:
         return shutil.which("orb") is not None
 
+    def _machines(self) -> set[str]:
+        result = subprocess.run(
+            ["orb", "list", "--format", "json"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        import json
+
+        data = json.loads(result.stdout or "[]")
+        return {entry["name"] for entry in data}
+
     def create(self, vm: str, *, image: str = "ubuntu:noble") -> None:
-        raise NotImplementedError
+        if vm in self._machines():
+            return
+        subprocess.run(["orb", "create", image, vm], check=True)
 
     def exec(
         self,
@@ -27,13 +59,36 @@ class OrbProvider(Provider):
         check: bool = True,
         capture: bool = False,
     ) -> subprocess.CompletedProcess:
-        raise NotImplementedError
+        argv = ["orb", "-m", vm]
+        if root:
+            argv += ["-u", "root"]
+        argv += cmd
+        return subprocess.run(
+            argv,
+            check=check,
+            capture_output=capture,
+            text=capture,
+        )
 
     def copy_in(self, vm: str, src: pathlib.Path, dst: str) -> None:
-        raise NotImplementedError
+        # `orb push` was added in modern orbstack; fall back to the shared
+        # ~/OrbStack/<vm>/ mount for older versions if it isn't present.
+        if shutil.which("orb"):
+            try:
+                subprocess.run(
+                    ["orb", "push", str(src), f"{vm}:{dst}"],
+                    check=True,
+                    capture_output=True,
+                )
+                return
+            except subprocess.CalledProcessError:
+                pass
+        raise RuntimeError(f"orb push failed for {src} -> {vm}:{dst}")
 
     def address(self, vm: str) -> str:
-        raise NotImplementedError
+        return f"{vm}.orb.local"
 
     def delete(self, vm: str) -> None:
-        raise NotImplementedError
+        if vm not in self._machines():
+            return
+        subprocess.run(["orb", "delete", "-f", vm], check=True)
