@@ -288,7 +288,10 @@ impl PeerState {
     }
 }
 
-pub struct MessageEncrypter(u32, Tai64N);
+/// Handle to a freshly-completed handshake's data session, returned to the
+/// caller of `recv_message`. Use [`MessageEncrypter::encrypt`] to send the
+/// first transport packet.
+pub struct MessageEncrypter(u32);
 
 impl MessageEncrypter {
     /// Returns `None` if the session has been removed/rotated or has already
@@ -297,16 +300,17 @@ impl MessageEncrypter {
         let mut state_ref = sessions.dynamic.borrow_mut();
         let state = &mut *state_ref;
 
+        let now = state.now;
         let session = state.peers_by_session.get_mut(&self.0)?;
         let SessionState::Transport(ts) = &session.state else {
             return None;
         };
-        if session.should_reject(self.1, ts) {
+        if session.should_reject(now, ts) {
             return None;
         }
         let peer = &mut state.peers[session.peer];
 
-        Some(peer.force_encrypt(session, payload, self.1))
+        Some(peer.force_encrypt(session, payload, now))
     }
 
     /// Encrypts the payload and attaches the wireguard framing in-place.

@@ -224,9 +224,7 @@ impl Sessions {
             kind: TimerEntryType::ExpireTransport { session_id },
         });
 
-        Ok(Message::HandshakeComplete(MessageEncrypter(
-            session_id, state.now,
-        )))
+        Ok(Message::HandshakeComplete(MessageEncrypter(session_id)))
     }
 
     #[inline(never)]
