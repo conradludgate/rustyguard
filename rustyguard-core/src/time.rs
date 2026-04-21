@@ -36,6 +36,7 @@ pub(crate) enum TimerEntryType {
     RekeyAttempt { session_id: u32 },
     Keepalive { session_id: u32 },
     ExpireTransport { session_id: u32 },
+    ExpireHandshake { session_id: u32 },
 }
 
 pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
@@ -84,6 +85,21 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                     }
                     state.peers_by_session.remove(&session_id);
                 }
+            }
+            TimerEntryType::ExpireHandshake { session_id } => {
+                // Completed handshakes are reaped by ExpireTransport instead.
+                let Some(session) = state.peers_by_session.get(&session_id) else {
+                    continue;
+                };
+                if !matches!(session.state, SessionState::Handshake(_)) {
+                    continue;
+                }
+                let peer_idx = session.peer;
+                let peer = &mut state.peers[peer_idx];
+                if peer.current_handshake == Some(session_id) {
+                    peer.current_handshake = None;
+                }
+                state.peers_by_session.remove(&session_id);
             }
             TimerEntryType::Keepalive { session_id } => {
                 let session = state.peers_by_session.get_mut(&session_id).unwrap();
