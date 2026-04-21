@@ -13,6 +13,11 @@ fuzz_target!(|data: Vec<u64>| {
         let too_old = d < last && last - d >= 1984;
         last = u64::max(d, last);
 
-        assert_eq!(replay.check(d), allowed && !too_old);
+        let accepted = if replay.would_accept(d) {
+            replay.mark_seen(d)
+        } else {
+            false
+        };
+        assert_eq!(accepted, allowed && !too_old);
     }
 });

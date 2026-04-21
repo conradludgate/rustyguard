@@ -9,8 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rand = { version = "0.8", default-features = false, features = ["std_rng"] }
-chacha20poly1305 = { version = "0.10", default-features = false }
+rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 
 [dependencies.rustyguard-core]
 path = "../rustyguard-core"
@@ -18,6 +17,8 @@ path = "../rustyguard-core"
 path = "../rustyguard-types"
 [dependencies.rustyguard-crypto]
 path = "../rustyguard-crypto"
+[dependencies.rustyguard-utils]
+path = "../rustyguard-utils"
 
 # Prevent this from interfering with workspaces
 [workspace]

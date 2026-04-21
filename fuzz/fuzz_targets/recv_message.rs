@@ -4,11 +4,11 @@ use std::{fmt::Debug, net::SocketAddr};
 
 use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use rustyguard_core::{Config, Peer, PublicKey, Sessions, StaticSecret, Tai64N};
-use rustyguard_crypto::Key;
+use rustyguard_core::{
+    Config, Message, PublicKey, SendMessage, Sessions, StaticPrivateKey, Tai64N,
+};
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
 
-/// 16-byte aligned packet of 2048 bytes.
-/// MTU is assumed to be in the range of 1500 or so, so 2048 should be sufficient.
 #[repr(align(16))]
 struct AlignedPacket([u8; 2048]);
 
@@ -31,31 +31,92 @@ impl<'a> Arbitrary<'a> for Packet {
         let len = len.min(2048);
 
         let mut packet = Box::new(AlignedPacket([0; 2048]));
-
         packet.0[..len].copy_from_slice(u.bytes(len)?);
 
         Ok(Self { b: packet, len })
     }
 }
 
-fuzz_target!(|data: Packet| {
-    let mut data = data;
+#[derive(Debug)]
+struct FuzzInput {
+    src_v4: [u8; 4],
+    src_port: u16,
+    packet: Packet,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(
+        u: &mut libfuzzer_sys::arbitrary::Unstructured<'a>,
+    ) -> libfuzzer_sys::arbitrary::Result<Self> {
+        let src_v4 = <[u8; 4]>::arbitrary(u)?;
+        let src_port = u16::arbitrary(u)?;
+        let packet = Packet::arbitrary(u)?;
+        Ok(Self {
+            src_v4,
+            src_port,
+            packet,
+        })
+    }
+}
+
+fn gen_sk(r: &mut StdRng) -> StaticPrivateKey {
+    let mut b = [0u8; 32];
+    r.fill_bytes(&mut b);
+    StaticPrivateKey(b)
+}
+
+// Forged packets from an arbitrary source address must not redirect the
+// responder's outbound endpoint away from the legitimate peer.
+fuzz_target!(|input: FuzzInput| {
+    let mut input = input;
 
     let mut rng = StdRng::seed_from_u64(1);
     let server_addr: SocketAddr = "10.0.1.1:1234".parse().unwrap();
-    let ssk_i = StaticSecret::random_from_rng(&mut rng);
-    let ssk_r = StaticSecret::random_from_rng(&mut rng);
-    let spk_r = PublicKey::from(&ssk_r);
+    let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
+
+    let ssk_i = gen_sk(&mut rng);
+    let ssk_r = gen_sk(&mut rng);
+    let spk_i: PublicKey = CryptoCore::x25519_pubkey(&ssk_i);
+    let spk_r: PublicKey = CryptoCore::x25519_pubkey(&ssk_r);
     let mut psk = Key::default();
     rng.fill_bytes(&mut psk);
 
-    let now = Tai64N::UNIX_EPOCH;
+    let mut config_i = Config::new(ssk_i);
+    let peer_r = config_i.insert_peer(StaticPeerConfig::new(spk_r, Some(psk), Some(server_addr)));
+    let mut sessions_i = Sessions::new(config_i, &mut rng);
 
-    let peer = Peer::new(spk_r, Some(psk), Some(server_addr));
-    let mut config = Config::new(ssk_i);
-    let _ = config.insert_peer(peer);
-    let mut sessions_i = Sessions::new(config);
-    sessions_i.turn(now, &mut rng);
+    let mut config_r = Config::new(ssk_r);
+    let peer_i = config_r.insert_peer(StaticPeerConfig::new(spk_i, Some(psk), Some(client_addr)));
+    let mut sessions_r = Sessions::new(config_r, &mut rng);
 
-    _ = sessions_i.recv_message(server_addr, &mut data.b.0[..data.len]);
+    sessions_i.turn(Tai64N::UNIX_EPOCH, &mut rng);
+    sessions_r.turn(Tai64N::UNIX_EPOCH, &mut rng);
+
+    let mut buf = Box::new(AlignedPacket([0; 2048]));
+    let mut payload = [0u8; 16];
+    let init = match sessions_i.send_message(peer_r, &mut payload).unwrap() {
+        SendMessage::Maintenance(m) => m,
+        SendMessage::Data(_, _) => return,
+    };
+    let init_bytes = init.data();
+    buf.0[..init_bytes.len()].copy_from_slice(init_bytes);
+    let resp = match sessions_r.recv_message(client_addr, &mut buf.0[..init_bytes.len()]) {
+        Ok(Message::Write(b)) => b.to_vec(),
+        _ => return,
+    };
+    buf.0[..resp.len()].copy_from_slice(&resp);
+    let _ = sessions_i.recv_message(server_addr, &mut buf.0[..resp.len()]);
+
+    let mut attacker_addr: SocketAddr =
+        SocketAddr::from((std::net::Ipv4Addr::from(input.src_v4), input.src_port));
+    if attacker_addr == client_addr {
+        attacker_addr.set_port(client_addr.port().wrapping_add(1));
+    }
+
+    let _ = sessions_r.recv_message(attacker_addr, &mut input.packet.b.0[..input.packet.len]);
+
+    match sessions_r.send_message(peer_i, &mut payload).unwrap() {
+        SendMessage::Data(addr, _) => assert_eq!(addr, client_addr),
+        SendMessage::Maintenance(m) => assert_eq!(m.to(), client_addr),
+    }
 });
