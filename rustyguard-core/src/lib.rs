@@ -179,6 +179,7 @@ struct Session {
     started: Tai64N,
     sent: Tai64N,
     state: SessionState,
+    keepalive_pending: bool,
 }
 
 impl Session {
@@ -650,7 +651,11 @@ impl Sessions {
             .decrypt::<CryptoCore>(header.counter.get(), payload_and_tag)?;
 
         let peer_idx = session.peer;
-        let needs_keepalive = session.sent + KEEPALIVE_TIMEOUT < state.now;
+        let needs_keepalive =
+            session.sent + KEEPALIVE_TIMEOUT < state.now && !session.keepalive_pending;
+        if needs_keepalive {
+            session.keepalive_pending = true;
+        }
         let peer = &mut state.peers[peer_idx];
         peer.endpoint = Some(socket);
 

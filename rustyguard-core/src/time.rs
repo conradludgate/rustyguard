@@ -48,7 +48,9 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
         match entry {
             TimerEntryType::InitAttempt { session_id }
             | TimerEntryType::RekeyAttempt { session_id } => {
-                let session = state.peers_by_session.get_mut(&session_id).unwrap();
+                let Some(session) = state.peers_by_session.get_mut(&session_id) else {
+                    continue;
+                };
                 let peer_idx = session.peer;
                 let peer = &sessions.config.peers[peer_idx];
 
@@ -74,7 +76,9 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                 }
             }
             TimerEntryType::ExpireTransport { session_id } => {
-                let session = state.peers_by_session.get_mut(&session_id).unwrap();
+                let Some(session) = state.peers_by_session.get_mut(&session_id) else {
+                    continue;
+                };
 
                 let peer_idx = session.peer;
                 let peer = &mut state.peers[peer_idx];
@@ -102,7 +106,10 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                 state.peers_by_session.remove(&session_id);
             }
             TimerEntryType::Keepalive { session_id } => {
-                let session = state.peers_by_session.get_mut(&session_id).unwrap();
+                let Some(session) = state.peers_by_session.get_mut(&session_id) else {
+                    continue;
+                };
+                session.keepalive_pending = false;
                 let peer = &mut state.peers[session.peer];
 
                 let should_keepalive = match &session.state {

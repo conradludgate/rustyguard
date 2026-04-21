@@ -121,6 +121,7 @@ impl Sessions {
             started: state.now,
             sent: state.now,
             state: SessionState::Transport(transport),
+            keepalive_pending: false,
         };
 
         vacant.insert(Box::new(session));
@@ -288,6 +289,7 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<Han
             started: state.now,
             sent: state.now,
             state: SessionState::Handshake(handshake),
+            keepalive_pending: false,
         }),
     };
 
