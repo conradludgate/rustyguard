@@ -416,7 +416,8 @@ impl DecryptionKey {
         counter: u64,
         payload_and_tag: &'b mut [u8],
     ) -> Result<&'b mut [u8], CryptoError> {
-        if !self.replay.check(counter) {
+        // RFC 6479 §3.4.3: only advance the window for packets that authenticate.
+        if !self.replay.would_accept(counter) {
             unsafe_log!("payload replayed or is too old");
             return Err(CryptoError::Rejected);
         }
@@ -428,6 +429,8 @@ impl DecryptionKey {
             .ok_or(CryptoError::DecryptionError)?;
 
         C::chacha20poly1305_dec(&self.key, &nonce, &[], payload, tag)?;
+
+        self.replay.mark_seen(counter);
 
         Ok(payload)
     }
