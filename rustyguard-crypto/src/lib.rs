@@ -18,6 +18,13 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 #[cfg(any(test, rustyguard_unsafe_logging))]
 extern crate std;
 
+/// Internal debug-trace macro. The output is "unsafe" because it can leak
+/// keying material, peer identifiers, and other secrets — never enable it
+/// in production.
+///
+/// It is a no-op unless one of the following is true:
+/// * the crate is built under `cfg(test)`, or
+/// * the consumer sets `--cfg rustyguard_unsafe_logging`.
 macro_rules! unsafe_log {
     ($($t:tt)*) => {
         match core::format_args!($($t)*) {

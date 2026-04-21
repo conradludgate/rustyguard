@@ -4,6 +4,14 @@
 #[cfg(any(test, rustyguard_unsafe_logging))]
 extern crate std;
 
+/// Internal debug-trace macro. The output is "unsafe" because it can leak
+/// secrets, peer ids, addresses, and other privacy-sensitive data — never
+/// enable it in production.
+///
+/// It is a no-op unless one of the following is true:
+/// * the crate is built under `cfg(test)`, or
+/// * the consumer sets `--cfg rustyguard_unsafe_logging` (allowed via the
+///   `unexpected_cfgs` lints config in this crate's Cargo.toml).
 macro_rules! unsafe_log {
     ($($t:tt)*) => {
         match core::format_args!($($t)*) {
@@ -584,6 +592,9 @@ impl Sessions {
     /// * [`Message::Noop`] - The packet was ok, but there is nothing to do right now
     /// * [`Message::Read`] - The packet was a data packet, the data is decrypted and ready to be read
     /// * [`Message::Write`] - This is a new packet that must be sent back.
+    /// * [`Message::HandshakeComplete`] - We just completed a handshake as the
+    ///   initiator; the returned [`MessageEncrypter`] can be used to send the
+    ///   first transport packet on this fresh session.
     ///
     /// # Errors
     ///
