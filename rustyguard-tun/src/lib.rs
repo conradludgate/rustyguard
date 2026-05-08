@@ -7,9 +7,16 @@ use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
 use rustyguard_crypto::StaticPeerConfig;
 
+use crate::tun::{platform, Device as _, KERNEL_HEADER_LEN};
+
 pub mod tun;
 
-pub const H: usize = std::mem::size_of::<DataHeader>();
+/// Starting buffer position of the IP packet after all headers
+/// defined as `max(size_of::<DataHeader>(), KERNEL_HEADER_LEN)`
+const IP_PACKET_START: usize = const_max(std::mem::size_of::<DataHeader>(), KERNEL_HEADER_LEN);
+
+/// Starting buffer position where the TUN must be read
+pub const TUN_BUF_START: usize = IP_PACKET_START - KERNEL_HEADER_LEN;
 
 /// 16-byte aligned packet of 2048 bytes.
 /// MTU is assumed to be in the range of 1500 or so, so 2048 should be sufficient.
@@ -180,11 +187,24 @@ pub fn handle_extern<'a>(
                 return Write::None;
             }
 
-            return Write::Inbound(buf);
+            let len_data = buf.len();
+            // recv_message wrote the decrypted packet for the TUN
+            // of len_data bytes starting at IP_PACKET_START
+            // we prepend the kernel header before it if needed
+            let tun_buf = &mut ep_buf[TUN_BUF_START..IP_PACKET_START + len_data];
+            let (header, packet) = tun_buf
+                .split_first_chunk_mut()
+                .expect("Enough len for header by definition of TUN_BUF_START");
+            *header = platform::Device::get_header_for(packet);
+
+            // and return KERNEL_HEADER || IP_PACKET for the TUN
+            return Write::Inbound(tun_buf);
         }
+
         Ok(Message::Write(buf)) => {
+            let len_data = buf.len();
             // println!("sending: {buf:?}");
-            return Write::Outbound(buf, addr);
+            return Write::Outbound(&mut ep_buf[..len_data], addr);
         }
     }
 
@@ -197,8 +217,8 @@ pub fn handle_intern<'a>(
     reply_buf: &'a mut [u8],
     filled: usize,
 ) -> Write<'a> {
-    let tun_buf = &mut reply_buf[H..filled];
-    let n = filled - H;
+    let tun_buf = &mut reply_buf[IP_PACKET_START..filled];
+    let n = filled - IP_PACKET_START;
 
     // println!("tun->wg {:02X?}", tun_buf.filled());
     let Ok(ipv4) = packet::ip::v4::Packet::new(tun_buf) else {
@@ -214,11 +234,11 @@ pub fn handle_intern<'a>(
         return Write::None;
     }
 
-    let pad_to = H + n.next_multiple_of(16);
+    let pad_to = IP_PACKET_START + n.next_multiple_of(16);
     reply_buf[filled..pad_to].fill(0);
 
     match sessions
-        .send_message(*peer_idx, &mut reply_buf[H..pad_to])
+        .send_message(*peer_idx, &mut reply_buf[IP_PACKET_START..pad_to])
         .unwrap()
     {
         rustyguard_core::SendMessage::Maintenance(msg) => {
@@ -227,9 +247,26 @@ pub fn handle_intern<'a>(
             Write::Outbound(&reply_buf[..data.len()], msg.to())
         }
         rustyguard_core::SendMessage::Data(ep, metadata) => {
-            let buf = &mut reply_buf[..pad_to + 16];
+            /// Size of the WireGuard tag
+            const TAG_FOOTER_SIZE: usize = 16;
+
+            /// Starting position of the WireGuard packet to send to a peer
+            const WG_PACKET_START: usize = IP_PACKET_START - std::mem::size_of::<DataHeader>();
+            // send_message wrote the cypher text at [IP_PACKET_START..pad_to]
+            // so the header place is [WG_PACKET_START..IP_PACKET_START]
+            // and the footer [pad_to..pad_to + TAG_FOOTER_SIZE].
+            let buf = &mut reply_buf[WG_PACKET_START..pad_to + TAG_FOOTER_SIZE];
             metadata.frame_in_place(buf);
             Write::Outbound(buf, ep)
         }
+    }
+}
+
+/// TODO: replace by max once const stable
+const fn const_max(a: usize, b: usize) -> usize {
+    if a <= b {
+        b
+    } else {
+        a
     }
 }

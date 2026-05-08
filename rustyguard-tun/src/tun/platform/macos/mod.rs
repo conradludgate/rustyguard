@@ -3,7 +3,7 @@
 pub mod sys;
 
 mod device;
-pub use self::device::{Device, Queue};
+pub use self::device::{Device, Queue, KERNEL_HEADER_LEN};
 
 use crate::tun::configuration::Configuration as C;
 use crate::tun::error::*;
