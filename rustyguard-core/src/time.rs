@@ -1,5 +1,6 @@
 //! wireguard timers
 
+use rustyguard_crypto::DhOracle;
 use tai64::Tai64N;
 
 use crate::{
@@ -39,7 +40,7 @@ pub(crate) enum TimerEntryType {
     ExpireHandshake { session_id: u32 },
 }
 
-pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
+pub(crate) fn tick_timers<O: DhOracle>(sessions: &Sessions<O>) -> Option<MaintenanceMsg> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let mut state = &mut *state_ref;
 

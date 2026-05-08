@@ -40,7 +40,7 @@ use hashbrown::{HashMap, HashTable};
 use rand_chacha::ChaCha12Rng as StdRng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, EncryptionKey,
+    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, DhOracle, EncryptionKey,
     EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
 };
 use rustyguard_types::{
@@ -83,8 +83,8 @@ impl PeerId {
     }
 }
 
-pub struct Config {
-    static_: StaticInitiatorConfig,
+pub struct Config<O = StaticPrivateKey> {
+    static_: StaticInitiatorConfig<O>,
 
     /// This hashtable identifies peers by their public key.
     ///
@@ -120,16 +120,24 @@ impl<P> PeerList<P> {
 }
 
 impl Config {
-    pub fn new(private_key: StaticPrivateKey) -> Self {
+    pub fn new(key: StaticPrivateKey) -> Self {
+        Config::from_oracle(key)
+    }
+}
+
+impl<O: DhOracle> Config<O> {
+    pub fn from_oracle(oracle: O) -> Self {
         Config {
-            static_: StaticInitiatorConfig::new(private_key),
+            static_: StaticInitiatorConfig::from_oracle(oracle),
             // TODO(conrad): seed this
             pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
             peers: PeerList(Vec::new()),
         }
     }
+}
 
+impl<O> Config<O> {
     /// Adds a new peer to this wireguard config.
     pub fn insert_peer(&mut self, peer: StaticPeerConfig) -> PeerId {
         use hashbrown::hash_table::Entry;
@@ -346,8 +354,8 @@ type Tai64NBytes = [u8; 12];
 // and don't need a high-quality hasher
 type SessionMap = HashMap<u32, Box<Session>, FixedState>;
 
-pub struct Sessions {
-    config: Config,
+pub struct Sessions<O = StaticPrivateKey> {
+    config: Config<O>,
     dynamic: RefCell<DynamicState>,
 }
 
@@ -385,12 +393,20 @@ impl DynamicState {
 
 impl Sessions {
     pub fn new(config: Config, rng: &mut impl CryptoRng) -> Self {
+        Self::new_with(config, rng)
+    }
+}
+
+impl<O> Sessions<O> {
+    pub fn new_with(config: Config<O>, rng: &mut impl CryptoRng) -> Self {
         Self {
             dynamic: RefCell::new(DynamicState::new(&config.peers, rng)),
             config,
         }
     }
+}
 
+impl<O: DhOracle> Sessions<O> {
     /// Should be called at least once per second.
     /// Should be called until it returns None.
     pub fn turn(&self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<MaintenanceMsg> {
@@ -514,7 +530,7 @@ impl DynamicState {
     }
 }
 
-impl Sessions {
+impl<O> Sessions<O> {
     fn write_cookie_message<'b>(
         &self,
         mac1: Mac,
@@ -539,6 +555,59 @@ impl Sessions {
         write_msg(buf, &msg)
     }
 
+    #[inline(never)]
+    fn decrypt_packet<'m>(
+        &self,
+        socket: SocketAddr,
+        msg: &'m mut [u8],
+    ) -> Result<(PeerId, &'m mut [u8]), Error> {
+        let mut state_ref = self.dynamic.borrow_mut();
+        let state = &mut *state_ref;
+
+        unsafe_log!("[{socket:?}] parsed as data packet");
+
+        let (header, payload_and_tag) =
+            DataHeader::message_mut_from(msg).ok_or(Error::InvalidMessage)?;
+
+        let session_id = header.receiver.get();
+        let Some(session) = state.peers_by_session.get_mut(&session_id) else {
+            unsafe_log!("[{socket:?}] [{session_id:?}] session not ready");
+            return Err(Error::Rejected);
+        };
+        let ts = match &mut session.state {
+            SessionState::Handshake(_) => {
+                unsafe_log!("[{socket:?}] [{session_id:?}] session not ready");
+                return Err(Error::Rejected);
+            }
+            SessionState::Transport(ts) => ts,
+        };
+
+        // WireGuard whitepaper §6.5: only update peer.endpoint after AEAD auth.
+        let payload = ts
+            .decrypt
+            .decrypt::<CryptoCore>(header.counter.get(), payload_and_tag)?;
+
+        let peer_idx = session.peer;
+        let needs_keepalive =
+            session.sent + KEEPALIVE_TIMEOUT < state.now && !session.keepalive_pending;
+        if needs_keepalive {
+            session.keepalive_pending = true;
+        }
+        let peer = &mut state.peers[peer_idx];
+        peer.endpoint = Some(socket);
+
+        if needs_keepalive {
+            state.timers.push(TimerEntry {
+                time: state.now,
+                kind: TimerEntryType::Keepalive { session_id },
+            });
+        }
+
+        Ok((peer_idx, payload))
+    }
+}
+
+impl<O: DhOracle> Sessions<O> {
     pub fn send_message(
         &mut self,
         peer_idx: PeerId,
@@ -628,57 +697,6 @@ impl Sessions {
             _ => Err(Error::InvalidMessage),
         }
     }
-
-    #[inline(never)]
-    fn decrypt_packet<'m>(
-        &self,
-        socket: SocketAddr,
-        msg: &'m mut [u8],
-    ) -> Result<(PeerId, &'m mut [u8]), Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
-
-        unsafe_log!("[{socket:?}] parsed as data packet");
-
-        let (header, payload_and_tag) =
-            DataHeader::message_mut_from(msg).ok_or(Error::InvalidMessage)?;
-
-        let session_id = header.receiver.get();
-        let Some(session) = state.peers_by_session.get_mut(&session_id) else {
-            unsafe_log!("[{socket:?}] [{session_id:?}] session not ready");
-            return Err(Error::Rejected);
-        };
-        let ts = match &mut session.state {
-            SessionState::Handshake(_) => {
-                unsafe_log!("[{socket:?}] [{session_id:?}] session not ready");
-                return Err(Error::Rejected);
-            }
-            SessionState::Transport(ts) => ts,
-        };
-
-        // WireGuard whitepaper §6.5: only update peer.endpoint after AEAD auth.
-        let payload = ts
-            .decrypt
-            .decrypt::<CryptoCore>(header.counter.get(), payload_and_tag)?;
-
-        let peer_idx = session.peer;
-        let needs_keepalive =
-            session.sent + KEEPALIVE_TIMEOUT < state.now && !session.keepalive_pending;
-        if needs_keepalive {
-            session.keepalive_pending = true;
-        }
-        let peer = &mut state.peers[peer_idx];
-        peer.endpoint = Some(socket);
-
-        if needs_keepalive {
-            state.timers.push(TimerEntry {
-                time: state.now,
-                kind: TimerEntryType::Keepalive { session_id },
-            });
-        }
-
-        Ok((peer_idx, payload))
-    }
 }
 
 #[cfg(test)]
@@ -691,7 +709,7 @@ mod tests {
         rngs::{OsRng, StdRng},
         Rng, RngCore, SeedableRng, TryRngCore,
     };
-    use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
+    use rustyguard_crypto::{DhOracle, Key, StaticPeerConfig};
     use tai64::Tai64N;
     use zerocopy::IntoBytes;
 
@@ -725,8 +743,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut OsRng.unwrap_err());
         let ssk_r = gen_sk(&mut OsRng.unwrap_err());
-        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
-        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
+        let spk_i = ssk_i.x25519_pubkey();
+        let spk_r = ssk_r.x25519_pubkey();
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
@@ -792,8 +810,8 @@ mod tests {
 
         let ssk_i = gen_sk(&mut OsRng.unwrap_err());
         let ssk_r = gen_sk(&mut OsRng.unwrap_err());
-        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
-        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
+        let spk_i = ssk_i.x25519_pubkey();
+        let spk_r = ssk_r.x25519_pubkey();
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
@@ -850,8 +868,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut rng);
         let ssk_r = gen_sk(&mut rng);
-        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
-        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
+        let spk_i = ssk_i.x25519_pubkey();
+        let spk_r = ssk_r.x25519_pubkey();
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 

@@ -5,7 +5,7 @@ use ini::Ini;
 use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
 use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
-use rustyguard_crypto::StaticPeerConfig;
+use rustyguard_crypto::{DhOracle, StaticPeerConfig};
 
 use crate::tun::{platform, Device as _, KERNEL_HEADER_LEN};
 
@@ -156,8 +156,8 @@ pub enum Write<'a> {
     None,
 }
 
-pub fn handle_extern<'a>(
-    sessions: &mut Sessions,
+pub fn handle_extern<'a, O: DhOracle>(
+    sessions: &mut Sessions<O>,
     peer_net: &Ipv4LCTrieMap<PeerId>,
     addr: SocketAddr,
     ep_buf: &'a mut [u8],
@@ -211,8 +211,8 @@ pub fn handle_extern<'a>(
     Write::None
 }
 
-pub fn handle_intern<'a>(
-    sessions: &mut Sessions,
+pub fn handle_intern<'a, O: DhOracle>(
+    sessions: &mut Sessions<O>,
     peer_net: &Ipv4LCTrieMap<PeerId>,
     reply_buf: &'a mut [u8],
     filled: usize,
