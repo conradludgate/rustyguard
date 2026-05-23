@@ -1,3 +1,10 @@
 /target
 /mutants.out
 /mutants.out.old
+
+# Python / uv
+__pycache__/
+.venv/
+.pytest_cache/
+*.pyc
+uv.lock

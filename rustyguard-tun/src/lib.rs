@@ -40,7 +40,12 @@ pub struct PeerConfig {
 
 impl TunConfig {
     pub fn parse() -> Self {
-        let i = Ini::load_from_file("rustyguard-tun/test-data/rg.conf").unwrap();
+        // First positional arg overrides the default, so e2e harnesses can
+        // point at a rendered config without baking the path into the binary.
+        let path = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "rustyguard-tun/test-data/rg.conf".to_string());
+        let i = Ini::load_from_file(&path).unwrap();
 
         let mut interface = None;
         let mut peers = vec![];
@@ -202,6 +207,12 @@ pub fn handle_intern<'a>(
     // println!("{ipv4:?}");
     let dest = ipv4.destination();
     let (_, peer_idx) = peer_net.lookup(&dest);
+
+    // Packets whose destination doesn't match any peer's AllowedIPs land on
+    // the sentinal peer; drop them rather than crashing on send_message.
+    if *peer_idx == PeerId::sentinal() {
+        return Write::None;
+    }
 
     let pad_to = H + n.next_multiple_of(16);
     reply_buf[filled..pad_to].fill(0);
