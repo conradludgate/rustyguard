@@ -11,10 +11,10 @@ import platform
 import shutil
 import subprocess
 
-from ..provider import Provider
+from ..provider import GuestOS, Provider
 
 
-def _host_target_triple() -> str:
+def _linux_target_triple() -> str:
     machine = platform.machine().lower()
     if machine in ("arm64", "aarch64"):
         return "aarch64-unknown-linux-gnu"
@@ -26,12 +26,20 @@ def _host_target_triple() -> str:
 class OrbProvider(Provider):
     name = "orb"
 
-    def __init__(self) -> None:
-        self.target_triple = _host_target_triple()
-
     @classmethod
     def is_available(cls) -> bool:
         return shutil.which("orb") is not None
+
+    def supported_guest_os(self) -> tuple[GuestOS, ...]:
+        return ("linux",)
+
+    def target_triple(self, os: GuestOS) -> str:
+        if os != "linux":
+            raise NotImplementedError(f"orb cannot run {os!r} guests")
+        return _linux_target_triple()
+
+    def vm_os(self, vm: str) -> GuestOS:
+        return "linux"
 
     def _machines(self) -> set[str]:
         result = subprocess.run(
@@ -45,10 +53,12 @@ class OrbProvider(Provider):
         data = json.loads(result.stdout or "[]")
         return {entry["name"] for entry in data}
 
-    def create(self, vm: str, *, image: str = "ubuntu:noble") -> None:
+    def create(self, vm: str, *, os: GuestOS = "linux") -> None:
+        if os != "linux":
+            raise NotImplementedError(f"orb cannot run {os!r} guests")
         if vm in self._machines():
             return
-        subprocess.run(["orb", "create", image, vm], check=True)
+        subprocess.run(["orb", "create", "ubuntu:noble", vm], check=True)
 
     def exec(
         self,
