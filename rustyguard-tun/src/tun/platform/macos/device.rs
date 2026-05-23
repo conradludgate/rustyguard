@@ -24,7 +24,7 @@ use std::{
 
 /// A TUN device using the TUN macOS driver.
 pub struct Device {
-    pub(crate) name: String,
+    name: String,
     pub(crate) queue: Queue,
     pub(crate) ctl: Fd,
 }
@@ -162,20 +162,40 @@ impl Read for Device {
 
 impl Write for Device {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.queue.tun.write(buf)
+        self.queue.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.queue.tun.flush()
+        self.queue.flush()
     }
 
     fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
-        self.queue.tun.write_vectored(bufs)
+        self.queue.write_vectored(bufs)
     }
 }
 
-impl D for Device {
+/// macOS TUN prepends a header of this size to any packet.
+pub const KERNEL_HEADER_LEN: usize = 4;
+const KERNEL_HEADER_V4: [u8; KERNEL_HEADER_LEN] = (libc::AF_INET as u32).to_be_bytes();
+const KERNEL_HEADER_V6: [u8; KERNEL_HEADER_LEN] = (libc::AF_INET6 as u32).to_be_bytes();
+
+impl D<KERNEL_HEADER_LEN> for Device {
     type Queue = Queue;
+
+    /// macOS TUN requires prepending the returned header before sending the given packet.
+    ///
+    /// Panic if ip_pkt is not an IP packet.
+    fn get_header_for(ip_pkt: &[u8]) -> [u8; KERNEL_HEADER_LEN] {
+        match ip_pkt[0] >> 4 {
+            4 => KERNEL_HEADER_V4,
+            6 => KERNEL_HEADER_V6,
+            _ => panic!("Invalid IP packet"),
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn enabled(&mut self, value: bool) -> Result<()> {
         unsafe {
@@ -271,6 +291,34 @@ impl Queue {
     pub fn set_nonblock(&self) -> io::Result<()> {
         self.tun.set_nonblock()
     }
+
+    pub(crate) fn write_fd(fd: &mut Fd, buf: &[u8]) -> io::Result<usize> {
+        assert_af_header(buf.first_chunk().unwrap_or(&[0; _]))?;
+
+        fd.write(buf)
+    }
+
+    pub(crate) fn write_fd_vectored(fd: &mut Fd, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        let mut af_check = [0; 5];
+        af_check.as_mut_slice().write_vectored(bufs)?;
+        assert_af_header(&af_check)?;
+
+        fd.write_vectored(bufs)
+    }
+}
+
+/// Check that the first chunk of a packet to write has the correct AF_INET header
+fn assert_af_header(chunk: &[u8; 5]) -> io::Result<()> {
+    let [chunk @ .., version_byte] = chunk;
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        match (version_byte >> 4, chunk) {
+        (4, &KERNEL_HEADER_V4) | (6, &KERNEL_HEADER_V6) => return Ok(()),
+        (4, _) => "The IPv4 packet must start with libc::AF_INET header to be written to the TUN on macOS",
+        (6, _) => "The IPv6 packet must start with libc::AF_INET6 header to be written to the TUN on macOS",
+        _ => "Unable to recognize the IP version of the packet, on macOS target it must start with the
+        AF_INET(6) header depending on IP version, use Device trait method get_header_for",
+    }))
 }
 
 impl AsRawFd for Queue {
@@ -297,7 +345,7 @@ impl Read for Queue {
 
 impl Write for Queue {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.tun.write(buf)
+        Self::write_fd(&mut self.tun, buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -305,6 +353,6 @@ impl Write for Queue {
     }
 
     fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
-        self.tun.write_vectored(bufs)
+        Self::write_fd_vectored(&mut self.tun, bufs)
     }
 }

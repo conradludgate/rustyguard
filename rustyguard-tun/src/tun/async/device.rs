@@ -8,7 +8,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::tun::platform::posix::Fd;
-use crate::tun::platform::Device;
+use crate::tun::platform::{Device, Queue};
 
 /// An async TUN device wrapper around a TUN device.
 pub struct AsyncDevice {
@@ -54,7 +54,7 @@ impl AsyncWrite for AsyncDevice {
     ) -> Poll<io::Result<usize>> {
         loop {
             let mut guard = ready!(self.inner.poll_write_ready_mut(cx))?;
-            match guard.try_io(|inner| inner.get_mut().write(buf)) {
+            match guard.try_io(|inner| Queue::write_fd(inner.get_mut(), buf)) {
                 Ok(res) => return Poll::Ready(res),
                 Err(_wb) => continue,
             }

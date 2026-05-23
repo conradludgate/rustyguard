@@ -41,7 +41,7 @@ pub(crate) enum TimerEntryType {
 
 pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
     let mut state_ref = sessions.dynamic.borrow_mut();
-    let state = &mut *state_ref;
+    let mut state = &mut *state_ref;
 
     while state.timers.peek().is_some_and(|t| t.time < state.now) {
         let entry = state.timers.pop().unwrap().kind;
@@ -65,6 +65,9 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
 
                 if should_reinit {
                     let socket = peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before");
+                    // Must drop the borrow before calling new_handshake,
+                    // which needs its own mutable borrow of dynamic.
+                    drop(state_ref);
                     // if this errors, it's due to a key-exchange error (diffie-hellman produced all zeros).
                     // nothign we can really do about that.
                     if let Ok(hs) = new_handshake(sessions, peer_idx) {
@@ -73,6 +76,9 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                             data: MaintenanceRepr::Init(hs),
                         });
                     }
+                    // Re-borrow for the next loop iteration
+                    state_ref = sessions.dynamic.borrow_mut();
+                    state = &mut *state_ref;
                 }
             }
             TimerEntryType::ExpireTransport { session_id } => {

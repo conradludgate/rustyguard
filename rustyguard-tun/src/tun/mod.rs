@@ -5,13 +5,14 @@ mod address;
 // pub use address::IntoAddress;
 
 mod device;
-// pub use device::Device;
+pub use device::Device;
 
 mod configuration;
 pub use configuration::Configuration;
 
 pub mod platform;
 // pub use platform::create;
+pub use platform::KERNEL_HEADER_LEN;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod r#async;

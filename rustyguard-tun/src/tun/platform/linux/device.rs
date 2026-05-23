@@ -167,9 +167,19 @@ impl Write for Device {
         self.queues[0].write_vectored(bufs)
     }
 }
+/// Is 0 in Linux, used for other platform
+pub const KERNEL_HEADER_LEN: usize = 0;
 
-impl D for Device {
+impl D<KERNEL_HEADER_LEN> for Device {
     type Queue = Queue;
+
+    fn get_header_for(ip_pkt: &[u8]) -> [u8; KERNEL_HEADER_LEN] {
+        []
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn enabled(&mut self, value: bool) -> Result<()> {
         unsafe {
@@ -266,6 +276,14 @@ pub struct Queue {
 impl Queue {
     pub fn set_nonblock(&self) -> io::Result<()> {
         self.tun.set_nonblock()
+    }
+
+    pub(crate) fn write_fd(fd: &mut Fd, buf: &[u8]) -> io::Result<usize> {
+        fd.write(buf)
+    }
+
+    pub(crate) fn write_fd_vectored(fd: &mut Fd, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        fd.write_vectored(bufs)
     }
 }
 

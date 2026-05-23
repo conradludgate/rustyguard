@@ -5,8 +5,14 @@ use super::configuration::Configuration;
 use super::error::*;
 
 /// A TUN device.
-pub trait Device: Read + Write {
+pub trait Device<const HEADER_LEN: usize>: Read + Write {
     type Queue: Read + Write;
+
+    /// Header prepended/to prepend for given packet to read/write to tun
+    fn get_header_for(ip_pkt: &[u8]) -> [u8; HEADER_LEN];
+
+    /// The OS-assigned interface name (e.g. `"wg0"`, `"utun3"`).
+    fn name(&self) -> &str;
 
     /// Reconfigure the device.
     fn configure(&mut self, config: &Configuration) -> Result<()> {

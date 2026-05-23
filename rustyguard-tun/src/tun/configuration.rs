@@ -29,6 +29,12 @@ impl Configuration {
         self
     }
 
+    /// Set MTU
+    pub fn mtu(&mut self, value: i32) -> &mut Self {
+        self.mtu = Some(value);
+        self
+    }
+
     /// Set the interface to be enabled once created.
     pub fn up(&mut self) -> &mut Self {
         self.enabled = Some(true);
