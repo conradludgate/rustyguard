@@ -1,0 +1,64 @@
+name: e2e
+
+# Lima-based VM tests. Only run on push to main or PRs labeled `e2e`,
+# since the suite takes a few minutes per run.
+#
+# The macOS guest path is not exercised here: GitHub-hosted macOS runners
+# don't support nested virtualization, so Apple's Virtualization.framework
+# refuses to start (VZErrorDomain Code=2). Run `pytest --rg-os=darwin`
+# locally on an Apple Silicon host instead.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LIMA_VERSION: "2.1.1"
+
+jobs:
+  linux-guest:
+    name: lima + ubuntu guest
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      - name: Install QEMU + Lima
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf
+          curl -fsSL "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local
+          # Lima needs the running user to access /dev/kvm without sudo.
+          sudo chmod 666 /dev/kvm || true
+          ls -la /dev/kvm || true
+          limactl --version
+          qemu-system-x86_64 --version | head -1
+      - name: Run pytest
+        working-directory: tests/e2e
+        run: uv run pytest -v --vm-backend=lima --rg-os=linux
+      - name: Dump lima logs on failure
+        if: failure()
+        run: |
+          for d in ~/.lima/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            for f in "$d"ha.stderr.log "$d"ha.stdout.log "$d"serial.log "$d"qemu.log; do
+              [ -f "$f" ] && echo "----- $f -----" && cat "$f"
+            done
+          done
+      - name: Cleanup VMs
+        if: always()
+        working-directory: tests/e2e
+        run: uv run python -m rustyguard_e2e.cli clean --backend=lima

@@ -1,7 +1,8 @@
 """Build the rustyguard-tun binary for the target VM.
 
-Uses `cross` for cross-architecture builds; falls back to plain `cargo`
-when the host arch matches the VM and `cross` is not available.
+Linux targets use `cross` for cross-architecture builds (falling back to
+`cargo` when the host arch matches). Darwin targets use plain `cargo`
+since `cross` doesn't support darwin-on-darwin.
 """
 
 from __future__ import annotations
@@ -18,22 +19,30 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 def _host_target_triple() -> str | None:
     machine = platform.machine().lower()
     system = platform.system().lower()
-    if system != "linux":
-        return None
+    arch = None
     if machine in ("arm64", "aarch64"):
-        return "aarch64-unknown-linux-gnu"
-    if machine in ("x86_64", "amd64"):
-        return "x86_64-unknown-linux-gnu"
+        arch = "aarch64"
+    elif machine in ("x86_64", "amd64"):
+        arch = "x86_64"
+    if arch is None:
+        return None
+    if system == "linux":
+        return f"{arch}-unknown-linux-gnu"
+    if system == "darwin":
+        return f"{arch}-apple-darwin"
     return None
 
 
 def build(target_triple: str, *, repo_root: pathlib.Path = REPO_ROOT) -> pathlib.Path:
     """Build rustyguard-tun for `target_triple` and return the binary path."""
 
-    use_cross = shutil.which("cross") is not None and target_triple != _host_target_triple()
-    cmd = (
-        ["cross"] if use_cross else ["cargo"]
-    ) + [
+    is_darwin_target = target_triple.endswith("-apple-darwin")
+    use_cross = (
+        not is_darwin_target
+        and shutil.which("cross") is not None
+        and target_triple != _host_target_triple()
+    )
+    cmd = (["cross"] if use_cross else ["cargo"]) + [
         "build",
         "--bin",
         "rustyguard-tun",

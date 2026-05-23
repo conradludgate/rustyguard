@@ -37,7 +37,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         return 1
     print("available backends:")
     for name in available:
-        print(f"  - {name}")
+        provider = registry.select(name)
+        guest_os = ", ".join(provider.supported_guest_os())
+        print(f"  - {name}  (guests: {guest_os})")
     return 0
 
 
