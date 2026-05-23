@@ -74,7 +74,8 @@ def peers(
     provider.create(RG_VM, os=rg_os)
 
     try:
-        provider.install_packages(WG_VM, "wireguard")
+        provider.install_packages(WG_VM, "wireguard", "iperf3")
+        provider.install_packages(RG_VM, "iperf3")
 
         binary = build.build(provider.target_triple(rg_os))
         rg_binary_path = "/tmp/rustyguard-tun"
