@@ -1,7 +1,11 @@
 # rustyguard end-to-end tests
 
-VM-based ping/handshake suite that runs the kernel WireGuard implementation
-against `rustyguard-tun` across two Linux VMs.
+VM-based suite that runs the kernel WireGuard implementation against
+`rustyguard-tun` across two VMs and exercises the resulting tunnel.
+
+The default run covers handshake completion, bidirectional ICMP, near-MTU
+ping flood, iperf3 TCP throughput and UDP loss/jitter, and `wg show transfer`
+counter sanity. A multi-minute rekey soak is available under `--run-slow`.
 
 ## Quick start
 
@@ -32,6 +36,8 @@ Colima users: install `lima` directly and use the `lima` backend.
 - `--keep-vms` - leave VMs running after the suite for debugging.
 - `--rg-os=darwin` - run the rustyguard peer in a macOS guest (lima backend only,
   Apple Silicon host required, ~14 GB IPSW download on first use).
+- `--run-slow` - include `@pytest.mark.slow` tests (currently the ~150s rekey
+  soak in `tests/test_soak.py`).
 - `pytest -k <pattern>` - select a subset of tests.
 
 ## CI
