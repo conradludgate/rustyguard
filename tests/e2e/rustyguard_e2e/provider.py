@@ -82,14 +82,17 @@ class Provider(abc.ABC):
         """Tear down the VM. Idempotent."""
 
     def install_packages(self, vm: str, *packages: str) -> None:
-        """Linux-only apt install helper; Darwin guests must override or skip."""
-        if self.vm_os(vm) != "linux":
-            raise NotImplementedError(
-                f"install_packages on non-linux guest {vm!r} not supported"
+        """Install OS packages inside the guest, dispatching on guest OS."""
+        if self.vm_os(vm) == "linux":
+            self.exec(vm, ["apt-get", "update", "-qq"], root=True)
+            self.exec(
+                vm,
+                ["apt-get", "install", "-y", "-qq", *packages],
+                root=True,
             )
-        self.exec(vm, ["apt-get", "update", "-qq"], root=True)
-        self.exec(
-            vm,
-            ["apt-get", "install", "-y", "-qq", *packages],
-            root=True,
-        )
+            return
+        # Lima's macOS template installs Homebrew at /opt/homebrew for the
+        # default unprivileged guest user. `limactl shell` runs a non-login
+        # shell, so brew is not guaranteed to be on PATH; call it by absolute
+        # path to avoid depending on the shell rc files.
+        self.exec(vm, ["/opt/homebrew/bin/brew", "install", "--quiet", *packages])
