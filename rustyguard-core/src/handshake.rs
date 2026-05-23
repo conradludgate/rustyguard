@@ -14,7 +14,8 @@ use zeroize::Zeroize;
 
 use crate::{
     write_msg, Error, Message, MessageEncrypter, PeerId, Session, SessionHandshake, SessionState,
-    SessionTransport, Sessions, REJECT_AFTER_TIME, REKEY_AFTER_TIME, REKEY_TIMEOUT,
+    SessionTransport, Sessions, REJECT_AFTER_TIME, REKEY_AFTER_TIME, REKEY_ATTEMPT_TIME,
+    REKEY_TIMEOUT,
 };
 
 macro_rules! allocate_session {
@@ -120,6 +121,7 @@ impl Sessions {
             started: state.now,
             sent: state.now,
             state: SessionState::Transport(transport),
+            keepalive_pending: false,
         };
 
         vacant.insert(Box::new(session));
@@ -224,9 +226,7 @@ impl Sessions {
             kind: TimerEntryType::ExpireTransport { session_id },
         });
 
-        Ok(Message::HandshakeComplete(MessageEncrypter(
-            session_id, state.now,
-        )))
+        Ok(Message::HandshakeComplete(MessageEncrypter(session_id)))
     }
 
     #[inline(never)]
@@ -289,6 +289,7 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<Han
             started: state.now,
             sent: state.now,
             state: SessionState::Handshake(handshake),
+            keepalive_pending: false,
         }),
     };
 
@@ -311,6 +312,13 @@ pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<Han
     state.timers.push(TimerEntry {
         time: state.now + REKEY_TIMEOUT,
         kind: TimerEntryType::InitAttempt { session_id },
+    });
+    // Bound the lifetime of the handshake-state session: if it never
+    // completes, ExpireHandshake removes it after REKEY_ATTEMPT_TIME so
+    // that abandoned handshakes don't leak in peers_by_session forever.
+    state.timers.push(TimerEntry {
+        time: state.now + REKEY_ATTEMPT_TIME,
+        kind: TimerEntryType::ExpireHandshake { session_id },
     });
 
     Ok(msg)

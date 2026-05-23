@@ -4,6 +4,14 @@
 #[cfg(any(test, rustyguard_unsafe_logging))]
 extern crate std;
 
+/// Internal debug-trace macro. The output is "unsafe" because it can leak
+/// secrets, peer ids, addresses, and other privacy-sensitive data — never
+/// enable it in production.
+///
+/// It is a no-op unless one of the following is true:
+/// * the crate is built under `cfg(test)`, or
+/// * the consumer sets `--cfg rustyguard_unsafe_logging` (allowed via the
+///   `unexpected_cfgs` lints config in this crate's Cargo.toml).
 macro_rules! unsafe_log {
     ($($t:tt)*) => {
         match core::format_args!($($t)*) {
@@ -179,6 +187,7 @@ struct Session {
     started: Tai64N,
     sent: Tai64N,
     state: SessionState,
+    keepalive_pending: bool,
 }
 
 impl Session {
@@ -288,27 +297,46 @@ impl PeerState {
     }
 }
 
-pub struct MessageEncrypter(u32, Tai64N);
+/// Handle to a freshly-completed handshake's data session, returned to the
+/// caller of `recv_message`. Use [`MessageEncrypter::encrypt`] to send the
+/// first transport packet.
+pub struct MessageEncrypter(u32);
 
 impl MessageEncrypter {
-    pub fn encrypt(self, sessions: &Sessions, payload: &mut [u8]) -> EncryptedMetadata {
+    /// Returns `None` if the session has been removed/rotated or has already
+    /// crossed REJECT_AFTER_{MESSAGES,TIME} since the encrypter was issued.
+    pub fn encrypt(self, sessions: &Sessions, payload: &mut [u8]) -> Option<EncryptedMetadata> {
         let mut state_ref = sessions.dynamic.borrow_mut();
         let state = &mut *state_ref;
 
-        let session = &mut state.peers_by_session.get_mut(&self.0).unwrap();
+        let now = state.now;
+        let session = state.peers_by_session.get_mut(&self.0)?;
+        let SessionState::Transport(ts) = &session.state else {
+            return None;
+        };
+        if session.should_reject(now, ts) {
+            return None;
+        }
         let peer = &mut state.peers[session.peer];
 
-        peer.force_encrypt(session, payload, self.1)
+        Some(peer.force_encrypt(session, payload, now))
     }
 
     /// Encrypts the payload and attaches the wireguard framing in-place.
     ///
     /// The payload is defined to be `buffer[16..buffer.len()-16]`, as first and last
     /// 16 bytes are reserved for the wireguard framing.
-    pub fn encrypt_and_frame(self, sessions: &Sessions, buffer: &mut [u8]) {
+    ///
+    /// Returns `false` (with `buffer` left in an unspecified state) if the
+    /// session has expired between issuance and use.
+    pub fn encrypt_and_frame(self, sessions: &Sessions, buffer: &mut [u8]) -> bool {
         let len = buffer.len();
         let payload = &mut buffer[16..len - 16];
-        self.encrypt(sessions, payload).frame_in_place(buffer);
+        let Some(meta) = self.encrypt(sessions, payload) else {
+            return false;
+        };
+        meta.frame_in_place(buffer);
+        true
     }
 }
 
@@ -564,6 +592,9 @@ impl Sessions {
     /// * [`Message::Noop`] - The packet was ok, but there is nothing to do right now
     /// * [`Message::Read`] - The packet was a data packet, the data is decrypted and ready to be read
     /// * [`Message::Write`] - This is a new packet that must be sent back.
+    /// * [`Message::HandshakeComplete`] - We just completed a handshake as the
+    ///   initiator; the returned [`MessageEncrypter`] can be used to send the
+    ///   first transport packet on this fresh session.
     ///
     /// # Errors
     ///
@@ -624,22 +655,29 @@ impl Sessions {
             }
             SessionState::Transport(ts) => ts,
         };
-        let peer = &mut state.peers[session.peer];
+
+        // WireGuard whitepaper §6.5: only update peer.endpoint after AEAD auth.
+        let payload = ts
+            .decrypt
+            .decrypt::<CryptoCore>(header.counter.get(), payload_and_tag)?;
+
+        let peer_idx = session.peer;
+        let needs_keepalive =
+            session.sent + KEEPALIVE_TIMEOUT < state.now && !session.keepalive_pending;
+        if needs_keepalive {
+            session.keepalive_pending = true;
+        }
+        let peer = &mut state.peers[peer_idx];
         peer.endpoint = Some(socket);
 
-        if session.sent + KEEPALIVE_TIMEOUT < state.now {
-            // schedule the keepalive immediately
+        if needs_keepalive {
             state.timers.push(TimerEntry {
                 time: state.now,
                 kind: TimerEntryType::Keepalive { session_id },
             });
         }
 
-        let payload = ts
-            .decrypt
-            .decrypt::<CryptoCore>(header.counter.get(), payload_and_tag)?;
-
-        Ok((session.peer, payload))
+        Ok((peer_idx, payload))
     }
 }
 
@@ -725,7 +763,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg);
+            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);
@@ -741,6 +779,67 @@ mod tests {
                 }
                 _ => panic!("expecting read"),
             }
+        }
+    }
+
+    /// Regression for whitepaper §6.5: a forged data packet from a wrong
+    /// source address must not redirect the peer's outbound endpoint.
+    #[test]
+    fn forged_packet_does_not_update_peer_endpoint() {
+        let server_addr: SocketAddr = "10.0.1.1:1234".parse().unwrap();
+        let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
+        let attacker_addr: SocketAddr = "10.0.3.1:9999".parse().unwrap();
+
+        let ssk_i = gen_sk(&mut OsRng.unwrap_err());
+        let ssk_r = gen_sk(&mut OsRng.unwrap_err());
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
+        let mut psk = Key::default();
+        OsRng.unwrap_err().fill_bytes(&mut psk);
+
+        let (peer_r, mut sessions_i) = session_with_peer(ssk_i, spk_r, psk, server_addr);
+        let (peer_i, mut sessions_r) = session_with_peer(ssk_r, spk_i, psk, client_addr);
+
+        let mut buf = Box::new(AlignedPacket([0; 256]));
+        let mut msg = *b"Hello, World!\0\0\0";
+
+        let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
+            crate::SendMessage::Maintenance(m) => m,
+            _ => panic!("expecting handshake"),
+        };
+        let response_buf = {
+            let handshake_buf = &mut buf.0[..m.data().len()];
+            handshake_buf.copy_from_slice(m.data());
+            match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
+                crate::Message::Write(buf) => buf,
+                _ => panic!("expecting write"),
+            }
+        };
+        let encryptor = match sessions_i.recv_message(server_addr, response_buf).unwrap() {
+            crate::Message::HandshakeComplete(e) => e,
+            _ => panic!("expecting handshake complete"),
+        };
+        let data_msg = {
+            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+            buf.0[..16].copy_from_slice(metadata.header.as_bytes());
+            buf.0[16..32].copy_from_slice(&msg);
+            buf.0[32..48].copy_from_slice(&metadata.tag.0);
+            &mut buf.0[..48]
+        };
+        match sessions_r.recv_message(client_addr, data_msg).unwrap() {
+            crate::Message::Read(_, _) => {}
+            _ => panic!("expecting read"),
+        }
+
+        let mut forged = Box::new(AlignedPacket([0; 256]));
+        forged.0[..48].copy_from_slice(&buf.0[..48]);
+        forged.0[47] ^= 0x01;
+        let _ = sessions_r.recv_message(attacker_addr, &mut forged.0[..48]);
+
+        let mut reply = *b"hi back\0\0\0\0\0\0\0\0\0";
+        match sessions_r.send_message(peer_i, &mut reply).unwrap() {
+            crate::SendMessage::Data(addr, _) => assert_eq!(addr, client_addr),
+            crate::SendMessage::Maintenance(m) => assert_eq!(m.to(), client_addr),
         }
     }
 
@@ -804,7 +903,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg);
+            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);
