@@ -44,6 +44,29 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Skip VM teardown so failures can be inspected.",
     )
+    group.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="Include tests marked @pytest.mark.slow (e.g. multi-minute soaks).",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "slow: tests that take >1 minute; opt in with --run-slow"
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if config.getoption("--run-slow"):
+        return
+    skip_slow = pytest.mark.skip(reason="requires --run-slow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)
 
 
 @pytest.fixture(scope="session")
