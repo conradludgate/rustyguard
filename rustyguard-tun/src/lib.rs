@@ -208,6 +208,12 @@ pub fn handle_intern<'a>(
     let dest = ipv4.destination();
     let (_, peer_idx) = peer_net.lookup(&dest);
 
+    // Packets whose destination doesn't match any peer's AllowedIPs land on
+    // the sentinal peer; drop them rather than crashing on send_message.
+    if *peer_idx == PeerId::sentinal() {
+        return Write::None;
+    }
+
     let pad_to = H + n.next_multiple_of(16);
     reply_buf[filled..pad_to].fill(0);
 
