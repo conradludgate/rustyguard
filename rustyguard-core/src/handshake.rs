@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use rand_core::RngCore;
 use rustyguard_crypto::{
     decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    CryptoCore, EphemeralPrivateKey, HandshakeState, HasMac,
+    CryptoCore, DhOracle, EphemeralPrivateKey, HandshakeState, HasMac,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
@@ -31,7 +31,7 @@ macro_rules! allocate_session {
     }};
 }
 
-impl Sessions {
+impl<O: DhOracle> Sessions<O> {
     #[inline(never)]
     pub(crate) fn handle_handshake_init<'m>(
         &self,
@@ -228,7 +228,9 @@ impl Sessions {
 
         Ok(Message::HandshakeComplete(MessageEncrypter(session_id)))
     }
+}
 
+impl<O> Sessions<O> {
     #[inline(never)]
     pub(crate) fn handle_cookie(&self, msg: &mut [u8]) -> Result<(), Error> {
         let mut state_ref = self.dynamic.borrow_mut();
@@ -257,7 +259,10 @@ impl Sessions {
     }
 }
 
-pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<HandshakeInit, Error> {
+pub(crate) fn new_handshake<O: DhOracle>(
+    sessions: &Sessions<O>,
+    peer_idx: PeerId,
+) -> Result<HandshakeInit, Error> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let state = &mut *state_ref;
     let peer_config = &sessions.config.peers[peer_idx];

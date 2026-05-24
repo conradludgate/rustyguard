@@ -76,8 +76,6 @@ pub trait CryptoPrimatives {
     fn blake2s_mac(key: &[u8], msg: &[u8]) -> Mac;
     fn hmac_blake2s(key: &Key, msg: &[u8]) -> Key;
     fn hkdf_blake2s<const N: usize>(key: &mut Key, msg: &[u8], output: &mut [Key; N]);
-    fn x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError>;
-    fn x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey;
 
     fn chacha20poly1305_enc(
         key: &Key,
@@ -156,26 +154,6 @@ impl CryptoPrimatives for Core {
         }
     }
 
-    fn x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError> {
-        use graviola::key_agreement::x25519::PublicKey;
-        use graviola::key_agreement::x25519::StaticPrivateKey;
-
-        StaticPrivateKey::from_array(&secret.0)
-            .diffie_hellman(&PublicKey::from_array(&public.0))
-            .map(|s| s.0)
-            .map_err(|_| CryptoError::KeyExchangeError)
-    }
-
-    fn x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey {
-        use graviola::key_agreement::x25519::StaticPrivateKey;
-
-        PublicKey(
-            StaticPrivateKey::from_array(&secret.0)
-                .public_key()
-                .as_bytes(),
-        )
-    }
-
     fn chacha20poly1305_enc(
         key: &Key,
         nonce: &[u8; 12],
@@ -224,6 +202,33 @@ impl CryptoPrimatives for Core {
     }
 }
 
+pub trait DhOracle {
+    fn x25519(&self, public: &PublicKey) -> Result<Key, CryptoError>;
+    fn x25519_pubkey(&self) -> PublicKey;
+}
+
+impl DhOracle for StaticPrivateKey {
+    fn x25519(&self, public: &PublicKey) -> Result<Key, CryptoError> {
+        use graviola::key_agreement::x25519::PublicKey;
+        use graviola::key_agreement::x25519::StaticPrivateKey;
+
+        StaticPrivateKey::from_array(&self.0)
+            .diffie_hellman(&PublicKey::from_array(&public.0))
+            .map(|s| s.0)
+            .map_err(|_| CryptoError::KeyExchangeError)
+    }
+
+    fn x25519_pubkey(&self) -> PublicKey {
+        use graviola::key_agreement::x25519::StaticPrivateKey;
+
+        PublicKey(
+            StaticPrivateKey::from_array(&self.0)
+                .public_key()
+                .as_bytes(),
+        )
+    }
+}
+
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct HandshakeState {
     hash: [u8; 32],
@@ -244,22 +249,22 @@ impl HandshakeState {
         C::hkdf_blake2s(&mut self.chain, b, &mut []);
     }
 
-    pub fn mix_dh<C: CryptoPrimatives>(
+    pub fn mix_dh<C: CryptoPrimatives, O: DhOracle>(
         &mut self,
-        sk: &StaticPrivateKey,
-        pk: &PublicKey,
+        oracle: &O,
+        peer: &PublicKey,
     ) -> Result<(), CryptoError> {
-        let shared_secret = C::x25519(sk, pk)?;
+        let shared_secret = oracle.x25519(peer)?;
         C::hkdf_blake2s(&mut self.chain, &shared_secret, &mut []);
         Ok(())
     }
 
-    pub fn mix_key_dh<C: CryptoPrimatives>(
+    pub fn mix_key_dh<C: CryptoPrimatives, O: DhOracle>(
         &mut self,
-        sk: &StaticPrivateKey,
-        pk: &PublicKey,
+        oracle: &O,
+        peer: &PublicKey,
     ) -> Result<Key, CryptoError> {
-        let shared_secret = C::x25519(sk, pk)?;
+        let shared_secret = oracle.x25519(peer)?;
         Ok(self.mix_key::<C>(&shared_secret))
     }
 
@@ -268,7 +273,7 @@ impl HandshakeState {
         sk: &EphemeralPrivateKey,
         pk: &PublicKey,
     ) -> Result<(), CryptoError> {
-        self.mix_dh::<C>(&sk.0, pk)
+        self.mix_dh::<C, StaticPrivateKey>(&sk.0, pk)
     }
 
     pub fn mix_key_edh<C: CryptoPrimatives>(
@@ -276,7 +281,7 @@ impl HandshakeState {
         sk: &EphemeralPrivateKey,
         pk: &PublicKey,
     ) -> Result<Key, CryptoError> {
-        self.mix_key_dh::<C>(&sk.0, pk)
+        self.mix_key_dh::<C, StaticPrivateKey>(&sk.0, pk)
     }
 
     fn mix_key<C: CryptoPrimatives>(&mut self, b: &[u8]) -> Key {
