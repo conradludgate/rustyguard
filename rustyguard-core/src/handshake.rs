@@ -5,8 +5,8 @@ use crate::time::{TimerEntry, TimerEntryType};
 use alloc::boxed::Box;
 use rand_core::RngCore;
 use rustyguard_crypto::{
-    decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    CryptoCore, DhOracle, EphemeralPrivateKey, HandshakeState, HasMac,
+    async_decrypt_handshake_init, async_decrypt_handshake_resp, decrypt_cookie,
+    encrypt_handshake_resp, AsyncDhOracle, CryptoCore, EphemeralPrivateKey, HandshakeState, HasMac,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
@@ -31,15 +31,14 @@ macro_rules! allocate_session {
     }};
 }
 
-impl<O: DhOracle> Sessions<O> {
+impl<O: AsyncDhOracle> Sessions<O> {
     #[inline(never)]
-    pub(crate) fn handle_handshake_init<'m>(
-        &self,
+    pub(crate) async fn async_handle_handshake_init<'m>(
+        &mut self,
         addr: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<&'m mut [u8], Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
+        let state = &mut self.dynamic;
 
         unsafe_log!("[{addr:?}] parsed as handshake init packet");
         let init_msg = HandshakeInit::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
@@ -72,7 +71,8 @@ impl<O: DhOracle> Sessions<O> {
         // start new handshake state.
         let mut hs = HandshakeState::default();
 
-        let data = decrypt_handshake_init(init_msg, &mut hs, &self.config.static_)?;
+        let data =
+            async_decrypt_handshake_init(init_msg, &mut hs, &mut self.config.static_).await?;
 
         unsafe_log!("payload decrypted");
         // check if we know this peer
@@ -137,13 +137,12 @@ impl<O: DhOracle> Sessions<O> {
     }
 
     #[inline(never)]
-    pub(crate) fn handle_handshake_resp<'m>(
-        &self,
+    pub(crate) async fn async_handle_handshake_resp<'m>(
+        &mut self,
         addr: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<Message<'m>, Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
+        let state = &mut self.dynamic;
 
         unsafe_log!("[{addr:?}] parsed as handshake resp packet");
         let resp_msg = HandshakeResp::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
@@ -190,13 +189,14 @@ impl<O: DhOracle> Sessions<O> {
         let peer_config = &self.config.peers[session.peer];
         let peer = &mut state.peers[session.peer];
 
-        decrypt_handshake_resp(
+        async_decrypt_handshake_resp(
             resp_msg,
             &mut hs.state,
-            &self.config.static_,
+            &mut self.config.static_,
             peer_config,
             &hs.esk_i,
-        )?;
+        )
+        .await?;
 
         let hs_session = peer.current_handshake.take();
         debug_assert_eq!(hs_session, Some(session_id));
@@ -232,9 +232,8 @@ impl<O: DhOracle> Sessions<O> {
 
 impl<O> Sessions<O> {
     #[inline(never)]
-    pub(crate) fn handle_cookie(&self, msg: &mut [u8]) -> Result<(), Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
+    pub(crate) fn handle_cookie(&mut self, msg: &mut [u8]) -> Result<(), Error> {
+        let state = &mut self.dynamic;
 
         unsafe_log!("parsed as cookie packet");
         let cookie_msg = CookieMessage::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
@@ -259,12 +258,11 @@ impl<O> Sessions<O> {
     }
 }
 
-pub(crate) fn new_handshake<O: DhOracle>(
-    sessions: &Sessions<O>,
+pub(crate) async fn async_new_handshake<O: AsyncDhOracle>(
+    sessions: &mut Sessions<O>,
     peer_idx: PeerId,
 ) -> Result<HandshakeInit, Error> {
-    let mut state_ref = sessions.dynamic.borrow_mut();
-    let state = &mut *state_ref;
+    let state = &mut sessions.dynamic;
     let peer_config = &sessions.config.peers[peer_idx];
     let peer = &mut state.peers[peer_idx];
 
@@ -304,15 +302,16 @@ pub(crate) fn new_handshake<O: DhOracle>(
         unreachable!()
     };
 
-    let msg = rustyguard_crypto::encrypt_handshake_init(
+    let msg = rustyguard_crypto::async_encrypt_handshake_init(
         &mut handshake.state,
-        &sessions.config.static_,
+        &mut sessions.config.static_,
         peer_config,
         &handshake.esk_i,
         state.now,
         sender,
         peer.cookie.as_ref(),
-    )?;
+    )
+    .await?;
 
     state.timers.push(TimerEntry {
         time: state.now + REKEY_TIMEOUT,

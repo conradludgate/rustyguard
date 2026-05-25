@@ -1,9 +1,9 @@
 use divan::Bencher;
 use rand::{rng, rngs::ThreadRng, Rng, RngCore};
 use rustyguard_crypto::{
-    decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, DhOracle,
-    EphemeralPrivateKey, HandshakeState, Key, StaticInitiatorConfig, StaticPeerConfig,
-    StaticPrivateKey,
+    decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, CryptoCore,
+    CryptoPrimatives, EphemeralPrivateKey, HandshakeState, Key, StaticInitiatorConfig,
+    StaticPeerConfig, StaticPrivateKey,
 };
 use tai64::Tai64N;
 
@@ -22,15 +22,15 @@ fn handshake(b: Bencher) {
     b.with_inputs(|| {
         let ssk_i = gen_sk(&mut rng());
         let ssk_r = gen_sk(&mut rng());
-        let spk_i = ssk_i.x25519_pubkey();
-        let spk_r = ssk_r.x25519_pubkey();
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
         let mut psk = Key::default();
         rng().fill_bytes(&mut psk);
 
         let mut hs = HandshakeState::default();
         let init = encrypt_handshake_init(
             &mut hs,
-            &StaticInitiatorConfig::new(ssk_i),
+            &mut StaticInitiatorConfig::new(ssk_i),
             &StaticPeerConfig::new(spk_r, Some(psk), None),
             &EphemeralPrivateKey::generate(&mut rng()),
             Tai64N::now(),
@@ -45,9 +45,9 @@ fn handshake(b: Bencher) {
             StaticPeerConfig::new(spk_i, Some(psk), None),
         )
     })
-    .bench_local_values(|(mut msg, config, peer)| {
+    .bench_local_values(|(mut msg, mut config, peer)| {
         let mut hs = HandshakeState::default();
-        let decrypted = decrypt_handshake_init(&mut msg, &mut hs, &config).unwrap();
+        let decrypted = decrypt_handshake_init(&mut msg, &mut hs, &mut config).unwrap();
         assert_eq!(decrypted.static_key().0, peer.key.0);
         encrypt_handshake_resp(
             &mut hs,

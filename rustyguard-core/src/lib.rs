@@ -25,7 +25,6 @@ macro_rules! unsafe_log {
 
 extern crate alloc;
 
-use core::cell::RefCell;
 use core::net::SocketAddr;
 use core::time::Duration;
 use core::{hash::BuildHasher, net::IpAddr};
@@ -35,18 +34,18 @@ use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 
 use foldhash::fast::FixedState;
-use handshake::new_handshake;
 use hashbrown::{HashMap, HashTable};
 use rand_chacha::ChaCha12Rng as StdRng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, DhOracle, EncryptionKey,
-    EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
+    encrypt_cookie, AsyncDhOracle, CookieState, CryptoCore, CryptoError, DecryptionKey,
+    EncryptionKey, EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig,
+    StaticPeerConfig,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
 };
-use rustyguard_utils::rate_limiter::CountMinSketch;
+use rustyguard_utils::{async_convert, rate_limiter::CountMinSketch};
 use tai64::Tai64;
 use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -125,7 +124,19 @@ impl Config {
     }
 }
 
-impl<O: DhOracle> Config<O> {
+impl<O: AsyncDhOracle> Config<O> {
+    pub async fn from_oracle_async(oracle: O) -> Self {
+        Config {
+            static_: StaticInitiatorConfig::from_oracle_async(oracle).await,
+            // TODO(conrad): seed this
+            pubkey_hasher: FixedState::with_seed(0),
+            peers_by_pubkey: HashTable::default(),
+            peers: PeerList(Vec::new()),
+        }
+    }
+}
+
+impl<O: rustyguard_crypto::DhOracle> Config<O> {
     pub fn from_oracle(oracle: O) -> Self {
         Config {
             static_: StaticInitiatorConfig::from_oracle(oracle),
@@ -313,9 +324,8 @@ pub struct MessageEncrypter(u32);
 impl MessageEncrypter {
     /// Returns `None` if the session has been removed/rotated or has already
     /// crossed REJECT_AFTER_{MESSAGES,TIME} since the encrypter was issued.
-    pub fn encrypt(self, sessions: &Sessions, payload: &mut [u8]) -> Option<EncryptedMetadata> {
-        let mut state_ref = sessions.dynamic.borrow_mut();
-        let state = &mut *state_ref;
+    pub fn encrypt(self, sessions: &mut Sessions, payload: &mut [u8]) -> Option<EncryptedMetadata> {
+        let state = &mut sessions.dynamic;
 
         let now = state.now;
         let session = state.peers_by_session.get_mut(&self.0)?;
@@ -337,7 +347,7 @@ impl MessageEncrypter {
     ///
     /// Returns `false` (with `buffer` left in an unspecified state) if the
     /// session has expired between issuance and use.
-    pub fn encrypt_and_frame(self, sessions: &Sessions, buffer: &mut [u8]) -> bool {
+    pub fn encrypt_and_frame(self, sessions: &mut Sessions, buffer: &mut [u8]) -> bool {
         let len = buffer.len();
         let payload = &mut buffer[16..len - 16];
         let Some(meta) = self.encrypt(sessions, payload) else {
@@ -356,7 +366,7 @@ type SessionMap = HashMap<u32, Box<Session>, FixedState>;
 
 pub struct Sessions<O = StaticPrivateKey> {
     config: Config<O>,
-    dynamic: RefCell<DynamicState>,
+    dynamic: DynamicState,
 }
 
 pub struct DynamicState {
@@ -400,17 +410,21 @@ impl Sessions {
 impl<O> Sessions<O> {
     pub fn new_with(config: Config<O>, rng: &mut impl CryptoRng) -> Self {
         Self {
-            dynamic: RefCell::new(DynamicState::new(&config.peers, rng)),
+            dynamic: DynamicState::new(&config.peers, rng),
             config,
         }
     }
 }
 
-impl<O: DhOracle> Sessions<O> {
+impl<O: AsyncDhOracle> Sessions<O> {
     /// Should be called at least once per second.
     /// Should be called until it returns None.
-    pub fn turn(&self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<MaintenanceMsg> {
-        let mut state = self.dynamic.borrow_mut();
+    pub async fn async_turn(
+        &mut self,
+        now: Tai64N,
+        rng: &mut impl CryptoRng,
+    ) -> Option<MaintenanceMsg> {
+        let state = &mut self.dynamic;
         if now > state.now {
             state.now = now;
             if now.duration_since(&state.last_reseed).unwrap() > Duration::from_secs(120) {
@@ -423,9 +437,17 @@ impl<O: DhOracle> Sessions<O> {
                 state.ip_rate_limit.reset(rng);
             }
         }
-        drop(state);
 
-        time::tick_timers(self)
+        time::async_tick_timers(self).await
+    }
+}
+
+impl<O: rustyguard_crypto::DhOracle> Sessions<O> {
+    #[inline]
+    /// Should be called at least once per second.
+    /// Should be called until it returns None.
+    pub fn turn(&mut self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<MaintenanceMsg> {
+        async_convert::poll_spin(self.async_turn(now, rng))
     }
 }
 
@@ -532,7 +554,7 @@ impl DynamicState {
 
 impl<O> Sessions<O> {
     fn write_cookie_message<'b>(
-        &self,
+        &mut self,
         mac1: Mac,
         receiver: u32,
         cookie: Cookie,
@@ -543,7 +565,7 @@ impl<O> Sessions<O> {
         // This brings us to 500k handshakes processed per second.
         // As I said above, this should be parallisable with an rng per thread.
         let mut nonce = [0u8; 24];
-        self.dynamic.borrow_mut().rng.fill_bytes(&mut nonce);
+        self.dynamic.rng.fill_bytes(&mut nonce);
         let cookie = encrypt_cookie(cookie, &self.config.static_.cookie_key, &nonce, &mac1);
 
         let msg = CookieMessage {
@@ -554,15 +576,127 @@ impl<O> Sessions<O> {
         };
         write_msg(buf, &msg)
     }
+}
 
+impl<O: AsyncDhOracle> Sessions<O> {
+    pub async fn async_send_message(
+        &mut self,
+        peer_idx: PeerId,
+        payload: &mut [u8],
+    ) -> Result<SendMessage, Error> {
+        let state = &mut self.dynamic;
+
+        let peer = state.peers.get_mut(peer_idx).ok_or(Error::Rejected)?;
+        let Some(ep) = peer.endpoint else {
+            return Err(Error::Rejected);
+        };
+
+        match peer.encrypt_message(&mut state.peers_by_session, payload, state.now) {
+            // we encrypted the message in-place in payload.
+            Some(metadata) => {
+                let session_id = peer.current_transport.unwrap();
+                let session = state.peers_by_session.get_mut(&session_id).unwrap();
+                let SessionState::Transport(ts) = &session.state else {
+                    unreachable!()
+                };
+
+                if ts.encrypt.counter() >= REKEY_AFTER_MESSAGES {
+                    // the encryption key needs rotating. schedule a rekey attempt
+                    state.timers.push(TimerEntry {
+                        time: state.now,
+                        kind: TimerEntryType::RekeyAttempt { session_id },
+                    });
+                }
+                Ok(SendMessage::Data(ep, metadata))
+            }
+            // we could not encrypt the message as we don't yet have an active session.
+            // create a handshake init message to be sent.
+            None => Ok(SendMessage::Maintenance(MaintenanceMsg {
+                socket: ep,
+                data: MaintenanceRepr::Init(handshake::async_new_handshake(self, peer_idx).await?),
+            })),
+        }
+    }
+
+    /// Given a packet, and the socket addr it was received from,
+    /// it will be parsed, processed, decrypted and the payload returned.
+    ///
+    /// The buffer the packet is contained within must be 16-byte aligned.
+    ///
+    /// # Returns
+    ///
+    /// * [`Message::Noop`] - The packet was ok, but there is nothing to do right now
+    /// * [`Message::Read`] - The packet was a data packet, the data is decrypted and ready to be read
+    /// * [`Message::Write`] - This is a new packet that must be sent back.
+    /// * [`Message::HandshakeComplete`] - We just completed a handshake as the
+    ///   initiator; the returned [`MessageEncrypter`] can be used to send the
+    ///   first transport packet on this fresh session.
+    ///
+    /// # Errors
+    ///
+    /// * Any invalid messages will be reported as [`Error::InvalidMessage`].
+    /// * Any valid messages that could not be decrypted or processed will be reported as [`Error::Rejected`]
+    ///
+    // TODO(conrad): enforce the msg is 16 byte aligned.
+    pub async fn async_recv_message<'m>(
+        &mut self,
+        socket: SocketAddr,
+        msg: &'m mut [u8],
+    ) -> Result<Message<'m>, Error> {
+        unsafe_log!("[{socket:?}] received packet");
+
+        // For optimisation purposes, we want to assume the message is 16-byte aligned.
+        if msg.as_ptr().align_offset(16) != 0 {
+            return Err(Error::Unaligned);
+        }
+
+        // Every message in wireguard starts with a 1 byte message tag and 3 bytes empty.
+        // This happens to be easy to read as a little-endian u32.
+        let (msg_type, _) =
+            little_endian::U32::ref_from_prefix(msg).map_err(|_| Error::InvalidMessage)?;
+        match msg_type.get() {
+            MSG_FIRST => self
+                .async_handle_handshake_init(socket, msg)
+                .await
+                .map(Message::Write),
+            MSG_SECOND => self.async_handle_handshake_resp(socket, msg).await,
+            MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
+            MSG_DATA => self
+                .decrypt_packet(socket, msg)
+                .map(|(id, m)| Message::Read(id, m)),
+            _ => Err(Error::InvalidMessage),
+        }
+    }
+}
+
+impl<O: rustyguard_crypto::DhOracle> Sessions<O> {
+    #[inline]
+    pub fn send_message(
+        &mut self,
+        peer_idx: PeerId,
+        payload: &mut [u8],
+    ) -> Result<SendMessage, Error> {
+        async_convert::poll_spin(self.async_send_message(peer_idx, payload))
+    }
+
+    #[inline]
+    pub fn recv_message<'m>(
+        &mut self,
+        socket: SocketAddr,
+        msg: &'m mut [u8],
+    ) -> Result<Message<'m>, Error> {
+        async_convert::poll_spin(self.async_recv_message(socket, msg))
+    }
+}
+
+impl<O> Sessions<O> {
     #[inline(never)]
     fn decrypt_packet<'m>(
-        &self,
+        &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
     ) -> Result<(PeerId, &'m mut [u8]), Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
+        let state = &mut self.dynamic;
 
         unsafe_log!("[{socket:?}] parsed as data packet");
 
@@ -607,98 +741,6 @@ impl<O> Sessions<O> {
     }
 }
 
-impl<O: DhOracle> Sessions<O> {
-    pub fn send_message(
-        &mut self,
-        peer_idx: PeerId,
-        payload: &mut [u8],
-    ) -> Result<SendMessage, Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
-
-        let peer = state.peers.get_mut(peer_idx).ok_or(Error::Rejected)?;
-        let Some(ep) = peer.endpoint else {
-            return Err(Error::Rejected);
-        };
-
-        match peer.encrypt_message(&mut state.peers_by_session, payload, state.now) {
-            // we encrypted the message in-place in payload.
-            Some(metadata) => {
-                let session_id = peer.current_transport.unwrap();
-                let session = state.peers_by_session.get_mut(&session_id).unwrap();
-                let SessionState::Transport(ts) = &session.state else {
-                    unreachable!()
-                };
-
-                if ts.encrypt.counter() >= REKEY_AFTER_MESSAGES {
-                    // the encryption key needs rotating. schedule a rekey attempt
-                    state.timers.push(TimerEntry {
-                        time: state.now,
-                        kind: TimerEntryType::RekeyAttempt { session_id },
-                    });
-                }
-                Ok(SendMessage::Data(ep, metadata))
-            }
-            // we could not encrypt the message as we don't yet have an active session.
-            // create a handshake init message to be sent.
-            None => {
-                drop(state_ref);
-                Ok(SendMessage::Maintenance(MaintenanceMsg {
-                    socket: ep,
-                    data: MaintenanceRepr::Init(new_handshake(self, peer_idx)?),
-                }))
-            }
-        }
-    }
-
-    /// Given a packet, and the socket addr it was received from,
-    /// it will be parsed, processed, decrypted and the payload returned.
-    ///
-    /// The buffer the packet is contained within must be 16-byte aligned.
-    ///
-    /// # Returns
-    ///
-    /// * [`Message::Noop`] - The packet was ok, but there is nothing to do right now
-    /// * [`Message::Read`] - The packet was a data packet, the data is decrypted and ready to be read
-    /// * [`Message::Write`] - This is a new packet that must be sent back.
-    /// * [`Message::HandshakeComplete`] - We just completed a handshake as the
-    ///   initiator; the returned [`MessageEncrypter`] can be used to send the
-    ///   first transport packet on this fresh session.
-    ///
-    /// # Errors
-    ///
-    /// * Any invalid messages will be reported as [`Error::InvalidMessage`].
-    /// * Any valid messages that could not be decrypted or processed will be reported as [`Error::Rejected`]
-    ///
-    // TODO(conrad): enforce the msg is 16 byte aligned.
-    pub fn recv_message<'m>(
-        &mut self,
-        socket: SocketAddr,
-        msg: &'m mut [u8],
-    ) -> Result<Message<'m>, Error> {
-        unsafe_log!("[{socket:?}] received packet");
-
-        // For optimisation purposes, we want to assume the message is 16-byte aligned.
-        if msg.as_ptr().align_offset(16) != 0 {
-            return Err(Error::Unaligned);
-        }
-
-        // Every message in wireguard starts with a 1 byte message tag and 3 bytes empty.
-        // This happens to be easy to read as a little-endian u32.
-        let (msg_type, _) =
-            little_endian::U32::ref_from_prefix(msg).map_err(|_| Error::InvalidMessage)?;
-        match msg_type.get() {
-            MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
-            MSG_SECOND => self.handle_handshake_resp(socket, msg),
-            MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
-            MSG_DATA => self
-                .decrypt_packet(socket, msg)
-                .map(|(id, m)| Message::Read(id, m)),
-            _ => Err(Error::InvalidMessage),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use core::net::SocketAddr;
@@ -709,7 +751,7 @@ mod tests {
         rngs::{OsRng, StdRng},
         Rng, RngCore, SeedableRng, TryRngCore,
     };
-    use rustyguard_crypto::{DhOracle, Key, StaticPeerConfig};
+    use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
     use tai64::Tai64N;
     use zerocopy::IntoBytes;
 
@@ -743,8 +785,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut OsRng.unwrap_err());
         let ssk_r = gen_sk(&mut OsRng.unwrap_err());
-        let spk_i = ssk_i.x25519_pubkey();
-        let spk_r = ssk_r.x25519_pubkey();
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
@@ -781,7 +823,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+            let metadata = encryptor.encrypt(&mut sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);
@@ -810,8 +852,8 @@ mod tests {
 
         let ssk_i = gen_sk(&mut OsRng.unwrap_err());
         let ssk_r = gen_sk(&mut OsRng.unwrap_err());
-        let spk_i = ssk_i.x25519_pubkey();
-        let spk_r = ssk_r.x25519_pubkey();
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
@@ -838,7 +880,7 @@ mod tests {
             _ => panic!("expecting handshake complete"),
         };
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+            let metadata = encryptor.encrypt(&mut sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);
@@ -868,8 +910,8 @@ mod tests {
         let client_addr: SocketAddr = "10.0.2.1:1234".parse().unwrap();
         let ssk_i = gen_sk(&mut rng);
         let ssk_r = gen_sk(&mut rng);
-        let spk_i = ssk_i.x25519_pubkey();
-        let spk_r = ssk_r.x25519_pubkey();
+        let spk_i = CryptoCore::x25519_pubkey(&ssk_i);
+        let spk_r = CryptoCore::x25519_pubkey(&ssk_r);
         let mut psk = Key::default();
         rng.fill_bytes(&mut psk);
 
@@ -921,7 +963,7 @@ mod tests {
 
         // wrap the messasge and encode into buffer
         let data_msg = {
-            let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+            let metadata = encryptor.encrypt(&mut sessions_i, &mut msg).unwrap();
             buf.0[..16].copy_from_slice(metadata.header.as_bytes());
             buf.0[16..32].copy_from_slice(&msg);
             buf.0[32..48].copy_from_slice(&metadata.tag.0);

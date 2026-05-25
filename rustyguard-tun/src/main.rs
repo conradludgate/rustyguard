@@ -32,7 +32,7 @@ async fn main() {
         let mut tun_buf = ReadBuf::new(&mut reply_buf[TUN_BUF_START..]);
         let write = tokio::select! {
             _ = tick.tick() => {
-                while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng.unwrap_err()) {
+                while let Some(msg) = sessions.async_turn(Tai64N::now(), &mut OsRng.unwrap_err()).await {
                     endpoint.send_to(msg.data(), msg.to()).await.unwrap();
                 }
 
@@ -41,11 +41,11 @@ async fn main() {
             res = endpoint.recv_buf_from(&mut ep_buf) => {
                 let addr = res.unwrap().1;
 
-                handle_extern(&mut sessions, &peer_net, addr, ep_buf.filled_mut())
+                handle_extern(&mut sessions, &peer_net, addr, ep_buf.filled_mut()).await
             }
             res = dev.read_buf(&mut tun_buf) => {
                 let n = res.unwrap();
-                handle_intern(&mut sessions, &peer_net, &mut reply_buf, TUN_BUF_START + n)
+                handle_intern(&mut sessions, &peer_net, &mut reply_buf, TUN_BUF_START + n).await
             }
         };
 

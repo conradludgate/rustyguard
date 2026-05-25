@@ -8,7 +8,7 @@ use clap::Parser;
 use packet::{Builder, Packet};
 use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, Message, PublicKey, Sessions, StaticPrivateKey};
-use rustyguard_crypto::{DhOracle, StaticPeerConfig};
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, StaticPeerConfig};
 use tai64::Tai64N;
 
 /// 16-byte aligned packet of 2048 bytes.
@@ -37,7 +37,7 @@ fn main() {
             let private_key = StaticPrivateKey(pk.try_into().unwrap());
             println!(
                 "public key: {}",
-                Base64::encode_string(&private_key.x25519_pubkey().0)
+                Base64::encode_string(&CryptoCore::x25519_pubkey(&private_key).0)
             );
             private_key
         }
@@ -47,7 +47,7 @@ fn main() {
             println!("private key: {}", Base64::encode_string(c.as_ref()));
             println!(
                 "public key: {}",
-                Base64::encode_string(&private_key.x25519_pubkey().0)
+                Base64::encode_string(&CryptoCore::x25519_pubkey(&private_key).0)
             );
             private_key
         }

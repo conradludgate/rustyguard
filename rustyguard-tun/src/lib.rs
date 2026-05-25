@@ -5,7 +5,7 @@ use ini::Ini;
 use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
 use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
-use rustyguard_crypto::{DhOracle, StaticPeerConfig};
+use rustyguard_crypto::{AsyncDhOracle, StaticPeerConfig};
 
 use crate::tun::{platform, Device as _, KERNEL_HEADER_LEN};
 
@@ -156,14 +156,14 @@ pub enum Write<'a> {
     None,
 }
 
-pub fn handle_extern<'a, O: DhOracle>(
+pub async fn handle_extern<'a, O: AsyncDhOracle>(
     sessions: &mut Sessions<O>,
     peer_net: &Ipv4LCTrieMap<PeerId>,
     addr: SocketAddr,
     ep_buf: &'a mut [u8],
 ) -> Write<'a> {
     // println!("packet from {addr:?}: {:?}", &ep_buf.filled());
-    match sessions.recv_message(addr, ep_buf) {
+    match sessions.async_recv_message(addr, ep_buf).await {
         Err(e) => println!("error: {e:?}"),
         Ok(Message::Noop) => println!("noop"),
         Ok(Message::HandshakeComplete(_encryptor)) => {
@@ -211,7 +211,7 @@ pub fn handle_extern<'a, O: DhOracle>(
     Write::None
 }
 
-pub fn handle_intern<'a, O: DhOracle>(
+pub async fn handle_intern<'a, O: AsyncDhOracle>(
     sessions: &mut Sessions<O>,
     peer_net: &Ipv4LCTrieMap<PeerId>,
     reply_buf: &'a mut [u8],
@@ -238,7 +238,8 @@ pub fn handle_intern<'a, O: DhOracle>(
     reply_buf[filled..pad_to].fill(0);
 
     match sessions
-        .send_message(*peer_idx, &mut reply_buf[IP_PACKET_START..pad_to])
+        .async_send_message(*peer_idx, &mut reply_buf[IP_PACKET_START..pad_to])
+        .await
         .unwrap()
     {
         rustyguard_core::SendMessage::Maintenance(msg) => {
