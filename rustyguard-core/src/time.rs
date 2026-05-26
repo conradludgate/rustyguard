@@ -1,9 +1,12 @@
 //! wireguard timers
 
+use alloc::collections::binary_heap::PeekMut;
+
+use rustyguard_crypto::AsyncDhOracle;
 use tai64::Tai64N;
 
 use crate::{
-    handshake::new_handshake, EncryptedMetadata, Keepalive, MaintenanceMsg, MaintenanceRepr,
+    handshake::async_new_handshake, EncryptedMetadata, Keepalive, MaintenanceMsg, MaintenanceRepr,
     SessionState, Sessions,
 };
 
@@ -39,13 +42,16 @@ pub(crate) enum TimerEntryType {
     ExpireHandshake { session_id: u32 },
 }
 
-pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
-    let mut state_ref = sessions.dynamic.borrow_mut();
-    let mut state = &mut *state_ref;
+pub(crate) async fn async_tick_timers<O: AsyncDhOracle>(
+    sessions: &mut Sessions<O>,
+) -> Option<MaintenanceMsg> {
+    loop {
+        let state = &mut sessions.dynamic;
+        let Some(timer) = state.timers.peek_mut().filter(|t| t.time >= state.now) else {
+            break;
+        };
 
-    while state.timers.peek().is_some_and(|t| t.time < state.now) {
-        let entry = state.timers.pop().unwrap().kind;
-        match entry {
+        match PeekMut::pop(timer).kind {
             TimerEntryType::InitAttempt { session_id }
             | TimerEntryType::RekeyAttempt { session_id } => {
                 let Some(session) = state.peers_by_session.get_mut(&session_id) else {
@@ -65,20 +71,14 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
 
                 if should_reinit {
                     let socket = peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before");
-                    // Must drop the borrow before calling new_handshake,
-                    // which needs its own mutable borrow of dynamic.
-                    drop(state_ref);
                     // if this errors, it's due to a key-exchange error (diffie-hellman produced all zeros).
                     // nothign we can really do about that.
-                    if let Ok(hs) = new_handshake(sessions, peer_idx) {
+                    if let Ok(hs) = async_new_handshake(sessions, peer_idx).await {
                         return Some(MaintenanceMsg {
                             socket,
                             data: MaintenanceRepr::Init(hs),
                         });
                     }
-                    // Re-borrow for the next loop iteration
-                    state_ref = sessions.dynamic.borrow_mut();
-                    state = &mut *state_ref;
                 }
             }
             TimerEntryType::ExpireTransport { session_id } => {

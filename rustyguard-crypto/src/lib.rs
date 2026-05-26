@@ -10,6 +10,7 @@ use rustyguard_types::{
     Cookie, EncryptedCookie, EncryptedEmpty, EncryptedPublicKey, EncryptedTimestamp, HandshakeInit,
     HandshakeResp, Tag, MSG_FIRST, MSG_SECOND,
 };
+use rustyguard_utils::async_convert;
 
 use tai64::Tai64N;
 use zerocopy::{little_endian, transmute_mut, FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -37,10 +38,13 @@ macro_rules! unsafe_log {
 }
 
 mod prim;
-pub use prim::{Core as CryptoCore, CryptoPrimatives, PublicKey, StaticPrivateKey};
+pub use prim::{
+    AsyncDhOracle, Core as CryptoCore, CryptoPrimatives, DhOracle, PublicKey, StaticPrivateKey,
+};
+
 pub struct EphemeralPrivateKey(StaticPrivateKey);
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum CryptoError {
     KeyExchangeError,
     DecryptionError,
@@ -112,9 +116,9 @@ impl CookieState {
 /// overloaded and second MAC is invalid, a CookieReply is sent to the client,
 /// which contains an encrypted key that can be used to re-sign the handshake later.
 pub trait HasMac: FromBytes + IntoBytes + Sized {
-    fn verify<'m>(
+    fn verify<'m, O>(
         &'m mut self,
-        config: &StaticInitiatorConfig,
+        config: &StaticInitiatorConfig<O>,
         overload: bool,
         cookie: &CookieState,
         addr: SocketAddr,
@@ -174,12 +178,9 @@ macro_rules! mac_protected {
         // everything *up to* their respective offset, so a future layout
         // change that reordered or repadded these fields would silently
         // produce wrong macs and break interop. Catch that at compile time.
-        const _: () = assert!(
-            core::mem::offset_of!($i, mac1) + 16 == core::mem::offset_of!($i, mac2)
-        );
-        const _: () = assert!(
-            core::mem::offset_of!($i, mac2) + 16 == core::mem::size_of::<$i>()
-        );
+        const _: () =
+            assert!(core::mem::offset_of!($i, mac1) + 16 == core::mem::offset_of!($i, mac2));
+        const _: () = assert!(core::mem::offset_of!($i, mac2) + 16 == core::mem::size_of::<$i>());
 
         impl HasMac for $i {
             fn compute_mac1(&self, mac1_key: &crate::Key) -> Mac {
@@ -234,10 +235,10 @@ pub struct StaticPeerConfig {
     pub endpoint: Option<SocketAddr>,
 }
 
-pub struct StaticInitiatorConfig {
-    /// Our private key
-    pub private_key: StaticPrivateKey,
-    /// Cached public key, derived from the above private key
+pub struct StaticInitiatorConfig<O = StaticPrivateKey> {
+    /// Our Diffie-Hellman oracle
+    pub dh_oracle: O,
+    /// Public key of the key exchanges the oracle above produce
     pub public_key: PublicKey,
     /// Cached mac1_key: calculated using `mac1_key(&self.public_key)`
     pub mac1_key: Key,
@@ -257,14 +258,32 @@ impl StaticPeerConfig {
     }
 }
 
-impl StaticInitiatorConfig {
+impl StaticInitiatorConfig<StaticPrivateKey> {
     pub fn new(key: StaticPrivateKey) -> Self {
-        let public_key = CryptoCore::x25519_pubkey(&key);
+        Self::from_oracle(key)
+    }
+}
+
+impl<O: AsyncDhOracle> StaticInitiatorConfig<O> {
+    pub async fn from_oracle_async(mut dh_oracle: O) -> Self {
+        let public_key = PublicKey(dh_oracle.async_x25519_pubkey().await);
         Self {
             mac1_key: mac1_key(&public_key.0),
             cookie_key: cookie_key(&public_key.0),
             public_key,
-            private_key: key,
+            dh_oracle,
+        }
+    }
+}
+
+impl<O: DhOracle> StaticInitiatorConfig<O> {
+    pub fn from_oracle(dh_oracle: O) -> Self {
+        let public_key = dh_oracle.x25519_pubkey();
+        Self {
+            mac1_key: mac1_key(&public_key.0),
+            cookie_key: cookie_key(&public_key.0),
+            public_key,
+            dh_oracle,
         }
     }
 }
@@ -284,9 +303,9 @@ impl DecryptedHandshakeInit {
     }
 }
 
-pub fn encrypt_handshake_init(
+pub async fn async_encrypt_handshake_init<AsyncO: AsyncDhOracle>(
     hs: &mut HandshakeState,
-    initiator: &StaticInitiatorConfig,
+    initiator: &mut StaticInitiatorConfig<AsyncO>,
     peer: &StaticPeerConfig,
     esk_i: &EphemeralPrivateKey,
     now: Tai64N,
@@ -320,7 +339,9 @@ pub fn encrypt_handshake_init(
         EncryptedPublicKey::encrypt_and_hash::<CryptoCore>(initiator.public_key.0, hs, &k);
 
     // -> ss:
-    let k = hs.mix_key_dh::<CryptoCore>(&initiator.private_key, &peer.key)?;
+    let k = hs
+        .async_mix_key_dh::<CryptoCore, AsyncO>(&mut initiator.dh_oracle, &peer.key)
+        .await?;
 
     // payload:
     let timestamp = EncryptedTimestamp::encrypt_and_hash::<CryptoCore>(now.to_bytes(), hs, &k);
@@ -343,10 +364,25 @@ pub fn encrypt_handshake_init(
     Ok(msg)
 }
 
-pub fn decrypt_handshake_init<'m>(
+#[inline]
+pub fn encrypt_handshake_init<O: DhOracle>(
+    hs: &mut HandshakeState,
+    initiator: &mut StaticInitiatorConfig<O>,
+    peer: &StaticPeerConfig,
+    esk_i: &EphemeralPrivateKey,
+    now: Tai64N,
+    sender: u32,
+    cookie: Option<&Cookie>,
+) -> Result<HandshakeInit, CryptoError> {
+    async_convert::poll_spin(async_encrypt_handshake_init(
+        hs, initiator, peer, esk_i, now, sender, cookie,
+    ))
+}
+
+pub async fn async_decrypt_handshake_init<'m, AsyncO: AsyncDhOracle>(
     init: &'m mut HandshakeInit,
     hs: &mut HandshakeState,
-    receiver: &StaticInitiatorConfig,
+    receiver: &mut StaticInitiatorConfig<AsyncO>,
 ) -> Result<&'m mut DecryptedHandshakeInit, CryptoError> {
     // IKpsk2:
     // <- s
@@ -365,7 +401,9 @@ pub fn decrypt_handshake_init<'m>(
 
     // -> es:
     let epk_i = PublicKey(init.ephemeral_key);
-    let k = hs.mix_key_dh::<CryptoCore>(&receiver.private_key, &epk_i)?;
+    let k = hs
+        .async_mix_key_dh::<CryptoCore, AsyncO>(&mut receiver.dh_oracle, &epk_i)
+        .await?;
 
     unsafe_log!("decrypting static key");
     // -> s:
@@ -374,13 +412,24 @@ pub fn decrypt_handshake_init<'m>(
     unsafe_log!("decrypted public key {:?}", spk_i.0);
 
     // -> ss:
-    let k = hs.mix_key_dh::<CryptoCore>(&receiver.private_key, &spk_i)?;
+    let k = hs
+        .async_mix_key_dh::<CryptoCore, AsyncO>(&mut receiver.dh_oracle, &spk_i)
+        .await?;
 
     unsafe_log!("decrypting payload");
     // payload:
     let _timestamp = *init.timestamp.decrypt_and_hash::<CryptoCore>(hs, &k)?;
 
     Ok(transmute_mut!(init))
+}
+
+#[inline]
+pub fn decrypt_handshake_init<'m, O: DhOracle>(
+    init: &'m mut HandshakeInit,
+    hs: &mut HandshakeState,
+    receiver: &mut StaticInitiatorConfig<O>,
+) -> Result<&'m mut DecryptedHandshakeInit, CryptoError> {
+    async_convert::poll_spin(async_decrypt_handshake_init(init, hs, receiver))
 }
 
 pub fn encrypt_handshake_resp(
@@ -432,10 +481,10 @@ pub fn encrypt_handshake_resp(
     Ok(msg)
 }
 
-pub fn decrypt_handshake_resp(
+pub async fn async_decrypt_handshake_resp<AsyncO: AsyncDhOracle>(
     resp: &mut HandshakeResp,
     hs: &mut HandshakeState,
-    initiator: &StaticInitiatorConfig,
+    initiator: &mut StaticInitiatorConfig<AsyncO>,
     peer: &StaticPeerConfig,
     esk_i: &EphemeralPrivateKey,
 ) -> Result<(), CryptoError> {
@@ -452,7 +501,8 @@ pub fn decrypt_handshake_resp(
     hs.mix_edh::<CryptoCore>(esk_i, &epk_r)?;
 
     // <- se:
-    hs.mix_dh::<CryptoCore>(&initiator.private_key, &epk_r)?;
+    hs.async_mix_dh::<CryptoCore, AsyncO>(&mut initiator.dh_oracle, &epk_r)
+        .await?;
 
     // <- psk:
     let k = hs.mix_key_and_hash::<CryptoCore>(&peer.preshared_key);
@@ -462,6 +512,19 @@ pub fn decrypt_handshake_resp(
     resp.empty.decrypt_and_hash::<CryptoCore>(hs, &k)?;
 
     Ok(())
+}
+
+#[inline]
+pub fn decrypt_handshake_resp<O: DhOracle>(
+    resp: &mut HandshakeResp,
+    hs: &mut HandshakeState,
+    initiator: &mut StaticInitiatorConfig<O>,
+    peer: &StaticPeerConfig,
+    esk_i: &EphemeralPrivateKey,
+) -> Result<(), CryptoError> {
+    async_convert::poll_spin(async_decrypt_handshake_resp::<O>(
+        resp, hs, initiator, peer, esk_i,
+    ))
 }
 
 impl EphemeralPrivateKey {
@@ -503,8 +566,8 @@ mod tests {
         let peer_i = StaticPeerConfig::new(CryptoCore::x25519_pubkey(&sk_i), Some(psk), None);
         let peer_r = StaticPeerConfig::new(CryptoCore::x25519_pubkey(&sk_r), Some(psk), None);
 
-        let init_i = StaticInitiatorConfig::new(sk_i);
-        let init_r = StaticInitiatorConfig::new(sk_r);
+        let mut init_i = StaticInitiatorConfig::new(sk_i);
+        let mut init_r = StaticInitiatorConfig::new(sk_r);
 
         insta::assert_debug_snapshot!(init_i.mac1_key);
         insta::assert_debug_snapshot!(init_i.cookie_key);
@@ -517,15 +580,22 @@ mod tests {
         let mut hs1 = HandshakeState::default();
 
         let esk_i = EphemeralPrivateKey::generate(&mut rng);
-        let mut init =
-            encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie))
-                .unwrap();
+        let mut init = encrypt_handshake_init(
+            &mut hs1,
+            &mut init_i,
+            &peer_r,
+            &esk_i,
+            now,
+            1,
+            Some(&cookie),
+        )
+        .unwrap();
 
         init.verify_mac1(&init_r.mac1_key).unwrap();
         init.verify_mac2(&cookie).unwrap();
 
         let mut hs2 = HandshakeState::default();
-        let init = decrypt_handshake_init(&mut init, &mut hs2, &init_r).unwrap();
+        let init = decrypt_handshake_init(&mut init, &mut hs2, &mut init_r).unwrap();
 
         assert_eq!(init.static_key().0, peer_i.key.0);
         assert_eq!(init.timestamp(), &now.to_bytes());
@@ -536,7 +606,7 @@ mod tests {
         resp.verify_mac1(&init_i.mac1_key).unwrap();
         insta::assert_debug_snapshot!(resp.empty.as_bytes());
 
-        decrypt_handshake_resp(&mut resp, &mut hs1, &init_i, &peer_r, &esk_i).unwrap();
+        decrypt_handshake_resp(&mut resp, &mut hs1, &mut init_i, &peer_r, &esk_i).unwrap();
 
         let (mut ek1, mut dk1) = hs1.split::<CryptoCore>(true);
         let (mut ek2, mut dk2) = hs2.split::<CryptoCore>(false);
@@ -581,7 +651,7 @@ mod tests {
 
         let peer_r = StaticPeerConfig::new(CryptoCore::x25519_pubkey(&sk_r), Some(psk), None);
 
-        let init_i = StaticInitiatorConfig::new(sk_i);
+        let mut init_i = StaticInitiatorConfig::new(sk_i);
         let init_r = StaticInitiatorConfig::new(sk_r);
 
         let now = Tai64N(Tai64(1), 2);
@@ -592,9 +662,16 @@ mod tests {
         let mut hs1 = HandshakeState::default();
 
         let esk_i = EphemeralPrivateKey::generate(&mut rng);
-        let mut init =
-            encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie))
-                .unwrap();
+        let mut init = encrypt_handshake_init(
+            &mut hs1,
+            &mut init_i,
+            &peer_r,
+            &esk_i,
+            now,
+            1,
+            Some(&cookie),
+        )
+        .unwrap();
 
         init.mac2[0] = 0;
         init.verify_mac2(&cookie).unwrap_err();

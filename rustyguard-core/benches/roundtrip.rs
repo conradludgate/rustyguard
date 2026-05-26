@@ -92,7 +92,7 @@ fn roundtrip_impl(
 
     // wrap the messasge and encode into buffer
     let data_msg = {
-        let metadata = encryptor.encrypt(&sessions_i, &mut msg).unwrap();
+        let metadata = encryptor.encrypt(&mut sessions_i, &mut msg).unwrap();
         buf.0[..16].copy_from_slice(metadata.header.as_bytes());
         buf.0[16..32].copy_from_slice(&msg);
         buf.0[32..48].copy_from_slice(&metadata.tag.0);
