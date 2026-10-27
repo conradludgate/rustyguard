@@ -416,6 +416,10 @@ impl DecryptionKey {
         counter: u64,
         payload_and_tag: &'b mut [u8],
     ) -> Result<&'b mut [u8], CryptoError> {
+        if counter >= crate::REJECT_AFTER_MESSAGES {
+            return Err(CryptoError::Rejected);
+        }
+
         // RFC 6479 §3.4.3: only advance the window for packets that authenticate.
         if !self.replay.would_accept(counter) {
             unsafe_log!("payload replayed or is too old");
@@ -444,6 +448,58 @@ mod tests {
         prim::{CryptoPrimatives, Key},
         CryptoCore,
     };
+
+    #[test]
+    fn incoming_counter_limit() {
+        let key = [42; 32];
+        for counter in [
+            crate::REJECT_AFTER_MESSAGES - 1,
+            crate::REJECT_AFTER_MESSAGES,
+            crate::REJECT_AFTER_MESSAGES + 1,
+            u64::MAX,
+        ] {
+            let mut data = [0; 32];
+            let (payload, tag) = data.split_at_mut(16);
+            CryptoCore::chacha20poly1305_enc(
+                &key,
+                &super::nonce(counter),
+                &[],
+                payload,
+                tag.try_into().unwrap(),
+            );
+            let original = data;
+            let mut decrypt = super::DecryptionKey::new(key);
+            if counter < crate::REJECT_AFTER_MESSAGES {
+                assert_eq!(
+                    decrypt.decrypt::<CryptoCore>(counter, &mut data).unwrap(),
+                    [0; 16]
+                );
+                assert!(matches!(
+                    decrypt.decrypt::<CryptoCore>(counter, &mut data),
+                    Err(crate::CryptoError::Rejected)
+                ));
+            } else {
+                assert!(
+                    matches!(
+                        decrypt.decrypt::<CryptoCore>(counter, &mut data),
+                        Err(crate::CryptoError::Rejected)
+                    ),
+                    "counter {counter}"
+                );
+                assert_eq!(data, original);
+                let mut valid = [0; 32];
+                let (payload, tag) = valid.split_at_mut(16);
+                CryptoCore::chacha20poly1305_enc(
+                    &key,
+                    &super::nonce(0),
+                    &[],
+                    payload,
+                    tag.try_into().unwrap(),
+                );
+                assert!(decrypt.decrypt::<CryptoCore>(0, &mut valid).is_ok());
+            }
+        }
+    }
 
     #[test]
     fn construction_identifier() {
