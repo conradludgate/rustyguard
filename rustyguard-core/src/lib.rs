@@ -405,6 +405,7 @@ impl Sessions {
             }
             if now.duration_since(&state.last_rate_reset).unwrap() > Duration::from_secs(1) {
                 state.ip_rate_limit.reset(rng);
+                state.last_rate_reset = now;
             }
         }
         drop(state);

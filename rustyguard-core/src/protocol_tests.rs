@@ -148,3 +148,44 @@ fn initiation_timestamps_must_strictly_increase() {
         }
     }
 }
+
+#[test]
+fn rate_limit_survives_frequent_turns() {
+    let (client, _, _, _) = pair();
+    let ip = CLIENT_ADDR.parse::<core::net::SocketAddr>().unwrap().ip();
+    for _ in 0..10 {
+        assert!(!client.dynamic.borrow_mut().overloaded(ip));
+    }
+    let mut rng = StdRng::seed_from_u64(456);
+    client.turn(Tai64N(Tai64(1000), 100_000_000), &mut rng);
+    assert!(client.dynamic.borrow_mut().overloaded(ip));
+}
+
+#[test]
+fn rate_limit_reset_tracks_each_window() {
+    let (client, _, _, _) = pair();
+    let mut rng = StdRng::seed_from_u64(789);
+    let key = 123_u64;
+    let mut count = 0;
+    for (seconds, nanos, reset) in [
+        (1000, 100_000_000, false),
+        (1000, 999_999_999, false),
+        // Preserve the existing strictly-more-than-one-second boundary.
+        (1001, 0, false),
+        (1001, 1, true),
+        (1001, 1, false),
+        (1001, 500_000_000, false),
+        (1002, 1, false),
+        (1002, 2, true),
+        (1010, 0, true),
+        (1009, 0, false),
+    ] {
+        client.turn(Tai64N(Tai64(seconds), nanos), &mut rng);
+        count = if reset { 1 } else { count + 1 };
+        assert_eq!(
+            client.dynamic.borrow_mut().ip_rate_limit.count(&key),
+            count,
+            "at {seconds}:{nanos}"
+        );
+    }
+}
