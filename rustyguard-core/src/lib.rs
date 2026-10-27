@@ -713,6 +713,8 @@ mod tests {
         let mut config = Config::new(secret_key);
         let id = config.insert_peer(peer);
         let session = Sessions::new(config, &mut OsRng.unwrap_err());
+        // Initialize protocol time before generating handshake timestamps.
+        session.turn(Tai64N::UNIX_EPOCH, &mut OsRng.unwrap_err());
         (id, session)
     }
 
@@ -924,3 +926,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod protocol_tests;

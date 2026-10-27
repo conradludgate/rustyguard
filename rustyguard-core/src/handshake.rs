@@ -85,7 +85,7 @@ impl Sessions {
 
         unsafe_log!("peer id: {peer_idx:?}");
         // check for potential replay attack
-        if *data.timestamp() < peer.latest_ts {
+        if *data.timestamp() <= peer.latest_ts {
             return Err(Error::Rejected);
         }
         peer.latest_ts = *data.timestamp();
