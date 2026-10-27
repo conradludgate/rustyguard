@@ -189,3 +189,72 @@ fn rate_limit_reset_tracks_each_window() {
         );
     }
 }
+
+#[test]
+fn incoming_counter_limit_preserves_transport_state() {
+    let (_, mut server, _, sp) = pair();
+    let key = [42; 32];
+    let session_id = 42;
+    {
+        let mut state = server.dynamic.borrow_mut();
+        let now = state.now;
+        state.peers_by_session.insert(
+            session_id,
+            Box::new(Session {
+                peer: sp,
+                started: now,
+                sent: now,
+                state: SessionState::Transport(SessionTransport {
+                    receiver: 123,
+                    encrypt: EncryptionKey::new(key),
+                    decrypt: DecryptionKey::new(key),
+                }),
+                keepalive_pending: false,
+            }),
+        );
+        state.peers[sp].current_transport = Some(session_id);
+    }
+    let source = "127.0.0.1:9999".parse().unwrap();
+    for counter in [
+        REJECT_AFTER_MESSAGES,
+        REJECT_AFTER_MESSAGES + 1,
+        u64::MAX,
+        0,
+        REJECT_AFTER_MESSAGES - 1,
+    ] {
+        let mut packet = Packet([0; 256]);
+        let header = DataHeader {
+            _type: little_endian::U32::new(MSG_DATA),
+            receiver: little_endian::U32::new(session_id),
+            counter: little_endian::U64::new(counter),
+        };
+        packet.0[..16].copy_from_slice(header.as_bytes());
+        packet.0[16..32].copy_from_slice(b"Hello, World!\0\0\0");
+        let mut nonce = [0; 12];
+        nonce[4..].copy_from_slice(&counter.to_le_bytes());
+        let (payload, tag) = packet.0[16..48].split_at_mut(16);
+        CryptoCore::chacha20poly1305_enc(&key, &nonce, &[], payload, tag.try_into().unwrap());
+        let original = packet.0;
+        let result = server.recv_message(source, &mut packet.0[..48]);
+        if counter >= REJECT_AFTER_MESSAGES {
+            assert!(matches!(result, Err(Error::Rejected)), "counter {counter}");
+            assert_eq!(packet.0, original, "rejected packet must not be decrypted");
+            assert_eq!(
+                server.dynamic.borrow().peers[sp].endpoint,
+                Some(CLIENT_ADDR.parse().unwrap())
+            );
+        } else {
+            match result {
+                Ok(Message::Read(peer, payload)) => {
+                    assert_eq!(peer, sp);
+                    assert_eq!(payload, b"Hello, World!\0\0\0");
+                }
+                _ => panic!("valid packet rejected after over-limit packet"),
+            }
+        }
+    }
+    assert_eq!(
+        server.dynamic.borrow().peers[sp].current_transport,
+        Some(session_id)
+    );
+}

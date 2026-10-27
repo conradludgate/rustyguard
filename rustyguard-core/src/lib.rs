@@ -42,6 +42,7 @@ use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
     encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, EncryptionKey,
     EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
+    REJECT_AFTER_MESSAGES,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -61,8 +62,6 @@ mod time;
 
 /// After sending this many messages, a rekey should take place.
 const REKEY_AFTER_MESSAGES: u64 = 1 << 60; // 2^60
-/// After sending this many messages, a rekey must take place.
-const REJECT_AFTER_MESSAGES: u64 = u64::MAX - (1 << 13); // 2^64 - 2^13 - 1
 const REKEY_AFTER_TIME: Duration = Duration::from_secs(120);
 const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
 const REKEY_ATTEMPT_TIME: Duration = Duration::from_secs(90);

@@ -5,6 +5,9 @@ use core::{net::SocketAddr, ops::ControlFlow};
 pub use prim::{DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
 use prim::{Encrypted, LABEL_COOKIE, LABEL_MAC1};
 
+/// Transport packets at or above this counter must be rejected and keys renewed.
+pub const REJECT_AFTER_MESSAGES: u64 = u64::MAX - (1 << 13);
+
 use rand_core::CryptoRng;
 use rustyguard_types::{
     Cookie, EncryptedCookie, EncryptedEmpty, EncryptedPublicKey, EncryptedTimestamp, HandshakeInit,
@@ -174,12 +177,9 @@ macro_rules! mac_protected {
         // everything *up to* their respective offset, so a future layout
         // change that reordered or repadded these fields would silently
         // produce wrong macs and break interop. Catch that at compile time.
-        const _: () = assert!(
-            core::mem::offset_of!($i, mac1) + 16 == core::mem::offset_of!($i, mac2)
-        );
-        const _: () = assert!(
-            core::mem::offset_of!($i, mac2) + 16 == core::mem::size_of::<$i>()
-        );
+        const _: () =
+            assert!(core::mem::offset_of!($i, mac1) + 16 == core::mem::offset_of!($i, mac2));
+        const _: () = assert!(core::mem::offset_of!($i, mac2) + 16 == core::mem::size_of::<$i>());
 
         impl HasMac for $i {
             fn compute_mac1(&self, mac1_key: &crate::Key) -> Mac {
