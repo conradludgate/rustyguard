@@ -5,7 +5,7 @@ use ini::Ini;
 use iptrie::{Ipv4LCTrieMap, Ipv4Prefix, Ipv4RTrieMap};
 use rand::{rngs::OsRng, Rng, TryRngCore};
 use rustyguard_core::{Config, DataHeader, Message, PeerId, PublicKey, Sessions, StaticPrivateKey};
-use rustyguard_crypto::StaticPeerConfig;
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, StaticPeerConfig};
 
 use crate::tun::{platform, Device as _, KERNEL_HEADER_LEN};
 
@@ -117,11 +117,10 @@ impl TunConfig {
             }
             None => {
                 private_key = StaticPrivateKey(OsRng.unwrap_err().random());
-                let c = private_key.0;
-                println!("private key: {}", Base64::encode_string(c.as_ref()));
             }
         }
-        println!("public key: {}", Base64::encode_string(&private_key.0));
+        let public_key = CryptoCore::x25519_pubkey(&private_key);
+        println!("public key: {}", Base64::encode_string(&public_key.0));
         private_key
     }
 
