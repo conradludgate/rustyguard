@@ -157,10 +157,13 @@ pub struct CookieMessage {
 /// #[repr(C)]
 /// struct DataMessage {
 ///     header: DataHeader,
-///     payload: [u8; 16*n],
+///     payload: [u8; n],
 ///     tag: Tag
 /// }
 /// ```
+///
+/// Padding normally rounds the payload length up to a multiple of 16, but
+/// WireGuard caps it at the interface MTU, which may not be a multiple of 16.
 ///
 /// Unfortunately, this is impossible to express in the Rust type system
 /// with [`zerocopy`], thus we split off the header from the other payload+tag.
@@ -185,12 +188,11 @@ impl DataHeader {
         #[repr(C, align(16))]
         struct DataSegment([u8; 16]);
 
-        let segments = <[DataSegment]>::mut_from_bytes(msg).ok()?;
-        let [header, payload_and_tag @ ..] = segments else {
+        let (header, payload_and_tag) = DataSegment::mut_from_prefix(msg).ok()?;
+        if payload_and_tag.len() < core::mem::size_of::<Tag>() {
             return None;
-        };
+        }
         let header: Self = transmute!(*header);
-        let payload_and_tag = payload_and_tag.as_mut_bytes();
         Some((header, payload_and_tag))
     }
 }
@@ -198,6 +200,51 @@ impl DataHeader {
 #[cfg(test)]
 mod tests {
     use super::{CookieMessage, DataHeader, HandshakeInit, HandshakeResp};
+    use zerocopy::IntoBytes;
+
+    #[repr(align(16))]
+    struct AlignedPacket([u8; 1504]);
+
+    #[test]
+    fn data_message_accepts_arbitrary_payload_lengths() {
+        let expected_header = DataHeader {
+            _type: super::MSG_DATA.into(),
+            receiver: 123.into(),
+            counter: 456.into(),
+        };
+        // Includes keepalives, every length modulo 16, and full-MTU packets
+        // whose padding is capped at 1420 rather than rounded up to 1424.
+        for payload_len in 0..=1450 {
+            let mut packet = AlignedPacket([0xa5; 1504]);
+            packet.0[..16].copy_from_slice(expected_header.as_bytes());
+            let message_len = 16 + payload_len + 16;
+            let (header, payload_and_tag) =
+                DataHeader::message_mut_from(&mut packet.0[..message_len])
+                    .expect("complete transport message");
+            assert_eq!(header.as_bytes(), expected_header.as_bytes());
+            assert_eq!(payload_and_tag.len(), payload_len + 16);
+            assert!(payload_and_tag.iter().all(|&byte| byte == 0xa5));
+            payload_and_tag[0] = 0x5a;
+            assert_eq!(packet.0[16], 0x5a);
+        }
+    }
+
+    #[test]
+    fn data_message_rejects_truncated_header_or_tag() {
+        let mut packet = AlignedPacket([0; 1504]);
+        for len in 0..32 {
+            assert!(DataHeader::message_mut_from(&mut packet.0[..len]).is_none());
+        }
+        assert!(DataHeader::message_mut_from(&mut packet.0[..32]).is_some());
+    }
+
+    #[test]
+    fn data_message_preserves_alignment_requirement() {
+        let mut packet = AlignedPacket([0; 1504]);
+        for offset in 1..16 {
+            assert!(DataHeader::message_mut_from(&mut packet.0[offset..offset + 48]).is_none());
+        }
+    }
 
     #[test]
     fn test_size_align() {
