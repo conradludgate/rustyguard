@@ -7,6 +7,37 @@ use rand_core::CryptoRng;
 extern crate alloc;
 use alloc::vec::Vec;
 
+/// Accuracy parameters for the per-IP handshake count-min sketch.
+///
+/// These control counter overestimation and memory usage, not the packet-count
+/// threshold or reset interval. Larger epsilon and delta use less memory but
+/// increase false positives. Parameters are checked when constructing the sketch.
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitParams {
+    /// Failure probability; must be strictly between zero and one.
+    pub delta: f64,
+    /// Additive error relative to the total number of packets counted. Must be
+    /// finite and positive. The storage dimensions must also be representable.
+    pub epsilon: f64,
+}
+impl RateLimitParams {
+    /// The original handshake counter's accuracy and memory usage.
+    pub const DEFAULT: Self = Self {
+        delta: 0.01,
+        epsilon: 10.0 / 20_000.0,
+    };
+    /// A smaller sketch with a looser overestimation bound.
+    pub const LOW_MEMORY: Self = Self {
+        delta: 0.05,
+        epsilon: 100.0 / 20_000.0,
+    };
+}
+impl Default for RateLimitParams {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// CountMinSketch is a fast, O(1) memory way to measure number of times we see a client
 /// over time.
 ///
@@ -28,45 +59,64 @@ impl CountMinSketch {
     /// guarantees:
     /// actual <= estimate
     /// estimate <= actual + ε * N with probability 1 - δ
-    /// where N is the cardinality of the stream
+    /// where N is the total number of items counted, including repetitions.
     ///
     /// example:
-    /// Expecting 20,000 different IP addresses, and wanting a 95% accuracy of
-    /// estimating the counts with +- 50 of the actual value, we have
+    /// For 20,000 packets counted since reset, allow up to 100 excess counts
+    /// with probability at least 95%:
     ///
     /// ```
     /// let δ = 0.05;
     /// let ε = 100.0 / 20_000.0;
     /// ```
     ///
-    /// These parameters will use a total of 6,688 bytes.
+    /// These parameters use 544 * 3 u32 buckets, plus the row hashers.
     ///
     /// example:
-    /// Expecting 20,000 different IP addresses, and wanting a 99% accuracy of
-    /// estimating the counts with +- 5 of the actual value, we have
+    /// For 20,000 packets counted since reset, allow up to 10 excess counts
+    /// with probability at least 99%:
     ///
     /// ```
     /// let δ = 0.01;
     /// let ε = 10.0 / 20_000.0;
     /// ```
     ///
-    /// These parameters will use a total of 108,964 bytes.
+    /// These parameters use 5,437 * 5 u32 buckets, plus the row hashers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if epsilon is not finite and positive, delta is not strictly
+    /// between zero and one, or either storage layout is too large to represent.
     pub fn with_params(epsilon: f64, delta: f64, rng: &mut dyn CryptoRng) -> Self {
+        assert!(
+            epsilon.is_finite() && epsilon > 0.0,
+            "epsilon must be finite and positive"
+        );
+        assert!(
+            delta > 0.0 && delta < 1.0,
+            "delta must be between zero and one"
+        );
         CountMinSketch::new(
             ceil(core::f64::consts::E / epsilon) as usize,
-            ceil(log(delta.recip())) as usize,
+            ceil(-log(delta)) as usize,
             rng,
         )
     }
 
     fn new(width: usize, depth: usize, rng: &mut dyn CryptoRng) -> Self {
+        let len = width
+            .checked_mul(depth)
+            .expect("sketch dimensions overflow");
+        core::alloc::Layout::array::<u32>(len).expect("sketch bucket storage is too large");
+        core::alloc::Layout::array::<FixedState>(depth)
+            .expect("sketch hasher storage is too large");
         Self {
             hashers: (0..depth)
                 .map(|_| FixedState::with_seed(rng.next_u64()))
                 .collect(),
             width,
             depth,
-            buckets: alloc::vec![0; width * depth],
+            buckets: alloc::vec![0; len],
         }
     }
 
@@ -100,7 +150,49 @@ mod tests {
     extern crate alloc;
     extern crate std;
 
-    use super::CountMinSketch;
+    use super::{CountMinSketch, RateLimitParams};
+
+    #[test]
+    fn low_memory_preset_uses_less_storage() {
+        let default = RateLimitParams::default();
+        let small = RateLimitParams::LOW_MEMORY;
+        let default = CountMinSketch::with_params(default.epsilon, default.delta, &mut rng());
+        let small = CountMinSketch::with_params(small.epsilon, small.delta, &mut rng());
+        assert_eq!((default.width, default.depth), (5437, 5));
+        assert_eq!((small.width, small.depth), (544, 3));
+        assert!(small.buckets.len() < default.buckets.len());
+    }
+
+    #[test]
+    fn invalid_parameters_are_rejected_before_using_rng() {
+        for (epsilon, delta) in [
+            (0.0, 0.01),
+            (-1.0, 0.01),
+            (f64::NAN, 0.01),
+            (f64::INFINITY, 0.01),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (1.0, -1.0),
+            (1.0, f64::NAN),
+            (1.0, f64::INFINITY),
+            (f64::MIN_POSITIVE, 0.01),
+        ] {
+            let mut rng = StdRng::seed_from_u64(123);
+            let expected = rng.clone().random::<u64>();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CountMinSketch::with_params(epsilon, delta, &mut rng)
+            }));
+            assert!(result.is_err(), "accepted epsilon={epsilon}, delta={delta}");
+            assert_eq!(rng.random::<u64>(), expected);
+        }
+    }
+
+    #[test]
+    fn small_failure_probability_does_not_overflow_its_reciprocal() {
+        let mut sketch = CountMinSketch::with_params(1.0, f64::from_bits(1), &mut rng());
+        assert_eq!((sketch.width, sketch.depth), (3, 745));
+        assert_eq!(sketch.count(&42), 1);
+    }
 
     fn eval_precision(n: usize, p: f64, q: f64) -> usize {
         // fixed value of phi for consistent test

@@ -48,6 +48,7 @@ use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
 };
 use rustyguard_utils::rate_limiter::CountMinSketch;
+pub use rustyguard_utils::rate_limiter::RateLimitParams;
 use tai64::Tai64;
 use time::{TimerEntry, TimerEntryType};
 use zerocopy::{little_endian, FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -97,6 +98,9 @@ pub struct Config {
 
     /// List of peers that this wireguard server can talk to.
     peers: PeerList<StaticPeerConfig>,
+
+    /// Rate-limit protection configuration
+    ip_rate_limit_params: RateLimitParams,
 }
 
 struct PeerList<P>(Vec<P>);
@@ -126,6 +130,7 @@ impl Config {
             pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
             peers: PeerList(Vec::new()),
+            ip_rate_limit_params: RateLimitParams::default(),
         }
     }
 
@@ -153,6 +158,18 @@ impl Config {
 
                 id
             }
+        }
+    }
+
+    /// Set the memory/accuracy tradeoff of the per-IP handshake counter.
+    ///
+    /// This does not change the packet-count threshold or reset interval.
+    /// Invalid parameters panic when constructing [`Sessions`]; see
+    /// [`RateLimitParams`] for the supported ranges.
+    pub fn with_rate_limit_params(self, ip_rate_limit_params: RateLimitParams) -> Self {
+        Self {
+            ip_rate_limit_params,
+            ..self
         }
     }
 
@@ -367,15 +384,26 @@ pub struct DynamicState {
 }
 
 impl DynamicState {
-    fn new(peers: &PeerList<StaticPeerConfig>, rng: &mut impl CryptoRng) -> Self {
+    fn new(config: &Config, rng: &mut impl CryptoRng) -> Self {
         Self {
             cookie: CookieState::new(rng),
             last_reseed: Tai64N(Tai64(0), 0),
             now: Tai64N(Tai64(0), 0),
             last_rate_reset: Tai64N(Tai64(0), 0),
-            ip_rate_limit: CountMinSketch::with_params(10.0 / 20_000.0, 0.01, rng),
+            ip_rate_limit: CountMinSketch::with_params(
+                config.ip_rate_limit_params.epsilon,
+                config.ip_rate_limit_params.delta,
+                rng,
+            ),
             rng: StdRng::from_rng(rng),
-            peers: PeerList(peers.0.iter().map(|p| PeerState::new(p.endpoint)).collect()),
+            peers: PeerList(
+                config
+                    .peers
+                    .0
+                    .iter()
+                    .map(|p| PeerState::new(p.endpoint))
+                    .collect(),
+            ),
             peers_by_session: HashMap::default(),
             timers: BinaryHeap::new(),
         }
@@ -385,7 +413,7 @@ impl DynamicState {
 impl Sessions {
     pub fn new(config: Config, rng: &mut impl CryptoRng) -> Self {
         Self {
-            dynamic: RefCell::new(DynamicState::new(&config.peers, rng)),
+            dynamic: RefCell::new(DynamicState::new(&config, rng)),
             config,
         }
     }
@@ -695,7 +723,24 @@ mod tests {
     use tai64::Tai64N;
     use zerocopy::IntoBytes;
 
-    use crate::{Config, PeerId, Sessions};
+    use crate::{Config, PeerId, RateLimitParams, Sessions};
+
+    #[test]
+    fn configured_counter_retains_the_packet_threshold() {
+        let mut rng = StdRng::seed_from_u64(123);
+        let config =
+            Config::new(StaticPrivateKey([7; 32])).with_rate_limit_params(RateLimitParams {
+                // One bucket and one row: distinct IPs deliberately collide.
+                epsilon: 3.0,
+                delta: 0.5,
+            });
+        let sessions = Sessions::new(config, &mut rng);
+        let mut state = sessions.dynamic.borrow_mut();
+        for _ in 0..10 {
+            assert!(!state.overloaded(core::net::Ipv4Addr::LOCALHOST.into()));
+        }
+        assert!(state.overloaded(core::net::Ipv4Addr::UNSPECIFIED.into()));
+    }
 
     fn gen_sk(r: &mut impl Rng) -> StaticPrivateKey {
         let mut b = [0u8; 32];
