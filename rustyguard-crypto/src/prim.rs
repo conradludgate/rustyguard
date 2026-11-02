@@ -71,48 +71,14 @@ fn hmac_inner<const M: usize>(ipad_key: &[u8; 64], opad_key: &[u8; 64], msg: [&[
     *h.finalize().as_array()
 }
 
+/// Synchronous implementations of WireGuard's fixed cryptographic suite.
+///
+/// The BLAKE2s/MAC/HMAC/HKDF defaults use the shared no_std software implementation;
+/// providers can override them. X25519 must reject noncontributory agreement
+/// (an all-zero shared secret). AEAD decryption must authenticate the supplied
+/// associated data and tag before returning success. Payload contents after an
+/// error are unspecified. Implementations must support empty payloads.
 pub trait CryptoPrimatives {
-    fn blake2s_hash(left: &[u8], right: &[u8]) -> Key;
-    fn blake2s_mac(key: &[u8], msg: &[u8]) -> Mac;
-    fn hmac_blake2s(key: &Key, msg: &[u8]) -> Key;
-    fn hkdf_blake2s<const N: usize>(key: &mut Key, msg: &[u8], output: &mut [Key; N]);
-    fn x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError>;
-    fn x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey;
-
-    fn chacha20poly1305_enc(
-        key: &Key,
-        nonce: &[u8; 12],
-        aad: &[u8],
-        payload: &mut [u8],
-        tag: &mut [u8; 16],
-    );
-    fn chacha20poly1305_dec(
-        key: &Key,
-        nonce: &[u8; 12],
-        aad: &[u8],
-        payload: &mut [u8],
-        tag: &[u8; 16],
-    ) -> Result<(), CryptoError>;
-
-    fn xchacha20poly1305_enc(
-        key: &Key,
-        nonce: &[u8; 24],
-        aad: &[u8],
-        payload: &mut [u8],
-        tag: &mut [u8; 16],
-    );
-    fn xchacha20poly1305_dec(
-        key: &Key,
-        nonce: &[u8; 24],
-        aad: &[u8],
-        payload: &mut [u8],
-        tag: &[u8; 16],
-    ) -> Result<(), CryptoError>;
-}
-
-pub struct Core;
-
-impl CryptoPrimatives for Core {
     fn blake2s_hash(left: &[u8], right: &[u8]) -> Key {
         let mut mac = blake2s_simd::State::new();
         mac.update(left);
@@ -156,25 +122,8 @@ impl CryptoPrimatives for Core {
         }
     }
 
-    fn x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError> {
-        use graviola::key_agreement::x25519::PublicKey;
-        use graviola::key_agreement::x25519::StaticPrivateKey;
-
-        StaticPrivateKey::from_array(&secret.0)
-            .diffie_hellman(&PublicKey::from_array(&public.0))
-            .map(|s| s.0)
-            .map_err(|_| CryptoError::KeyExchangeError)
-    }
-
-    fn x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey {
-        use graviola::key_agreement::x25519::StaticPrivateKey;
-
-        PublicKey(
-            StaticPrivateKey::from_array(&secret.0)
-                .public_key()
-                .as_bytes(),
-        )
-    }
+    fn x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError>;
+    fn x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey;
 
     fn chacha20poly1305_enc(
         key: &Key,
@@ -182,46 +131,29 @@ impl CryptoPrimatives for Core {
         aad: &[u8],
         payload: &mut [u8],
         tag: &mut [u8; 16],
-    ) {
-        use graviola::aead::ChaCha20Poly1305;
-        ChaCha20Poly1305::new(*key).encrypt(nonce, aad, payload, tag);
-    }
-
+    );
     fn chacha20poly1305_dec(
         key: &Key,
         nonce: &[u8; 12],
         aad: &[u8],
         payload: &mut [u8],
         tag: &[u8; 16],
-    ) -> Result<(), CryptoError> {
-        use graviola::aead::ChaCha20Poly1305;
-        ChaCha20Poly1305::new(*key)
-            .decrypt(nonce, aad, payload, tag)
-            .map_err(|_| CryptoError::DecryptionError)
-    }
+    ) -> Result<(), CryptoError>;
+
     fn xchacha20poly1305_enc(
         key: &Key,
         nonce: &[u8; 24],
         aad: &[u8],
         payload: &mut [u8],
         tag: &mut [u8; 16],
-    ) {
-        use graviola::aead::XChaCha20Poly1305;
-        XChaCha20Poly1305::new(*key).encrypt(nonce, aad, payload, tag);
-    }
-
+    );
     fn xchacha20poly1305_dec(
         key: &Key,
         nonce: &[u8; 24],
         aad: &[u8],
         payload: &mut [u8],
         tag: &[u8; 16],
-    ) -> Result<(), CryptoError> {
-        use graviola::aead::XChaCha20Poly1305;
-        XChaCha20Poly1305::new(*key)
-            .decrypt(nonce, aad, payload, tag)
-            .map_err(|_| CryptoError::DecryptionError)
-    }
+    ) -> Result<(), CryptoError>;
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -440,7 +372,7 @@ impl DecryptionKey {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "graviola", feature = "rustcrypto")))]
 mod tests {
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 

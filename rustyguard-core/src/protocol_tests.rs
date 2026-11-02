@@ -9,18 +9,23 @@ const SERVER_ADDR: &str = "127.0.0.1:2000";
 struct Packet([u8; 256]);
 
 fn pair() -> (Sessions, Sessions, PeerId, PeerId) {
+    pair_with::<CryptoCore, CryptoCore>()
+}
+
+fn pair_with<C: CryptoPrimatives, S: CryptoPrimatives>(
+) -> (Sessions<C>, Sessions<S>, PeerId, PeerId) {
     let client_key = StaticPrivateKey([1; 32]);
     let server_key = StaticPrivateKey([2; 32]);
-    let client_pk = CryptoCore::x25519_pubkey(&client_key);
-    let server_pk = CryptoCore::x25519_pubkey(&server_key);
-    let mut client_cfg = Config::new(client_key);
-    let mut server_cfg = Config::new(server_key);
-    let cp = client_cfg.insert_peer(StaticPeerConfig::new(
+    let client_pk = C::x25519_pubkey(&client_key);
+    let server_pk = S::x25519_pubkey(&server_key);
+    let mut client_cfg = Config::<C>::with_crypto(client_key);
+    let mut server_cfg = Config::<S>::with_crypto(server_key);
+    let cp = client_cfg.insert_peer(StaticPeerConfig::with_crypto::<C>(
         server_pk,
         None,
         Some(SERVER_ADDR.parse().unwrap()),
     ));
-    let sp = server_cfg.insert_peer(StaticPeerConfig::new(
+    let sp = server_cfg.insert_peer(StaticPeerConfig::with_crypto::<S>(
         client_pk,
         None,
         Some(CLIENT_ADDR.parse().unwrap()),
@@ -33,7 +38,12 @@ fn pair() -> (Sessions, Sessions, PeerId, PeerId) {
     (client, server, cp, sp)
 }
 
-fn exchange_data(sender: &mut Sessions, peer: PeerId, receiver: &mut Sessions, source: &str) {
+fn exchange_data<C: CryptoPrimatives, S: CryptoPrimatives>(
+    sender: &mut Sessions<C>,
+    peer: PeerId,
+    receiver: &mut Sessions<S>,
+    source: &str,
+) {
     let mut payload = *b"Hello, World!\0\0\0";
     let metadata = match sender.send_message(peer, &mut payload).unwrap() {
         SendMessage::Data(_, metadata) => metadata,
@@ -50,6 +60,144 @@ fn exchange_data(sender: &mut Sessions, peer: PeerId, receiver: &mut Sessions, s
         Message::Read(_, plaintext) => assert_eq!(plaintext, b"Hello, World!\0\0\0"),
         _ => panic!("expected transport data"),
     }
+}
+
+#[cfg(all(feature = "graviola", feature = "rustcrypto"))]
+#[test]
+fn mixed_provider_peers_exchange_handshakes_cookies_and_data() {
+    use rustyguard_crypto::providers::{Graviola, RustCrypto};
+    mixed_provider_pair::<Graviola, RustCrypto>();
+    mixed_provider_pair::<RustCrypto, Graviola>();
+}
+
+fn mixed_provider_pair<C: CryptoPrimatives, S: CryptoPrimatives>() {
+    let (mut client, mut server, cp, sp) = pair_with::<C, S>();
+    let initiation = match client.send_message(cp, &mut [0; 16]).unwrap() {
+        SendMessage::Maintenance(message) => message.data().to_vec(),
+        _ => panic!("expected initiation"),
+    };
+    // Force the next initiation through the cookie path before doing DH.
+    for _ in 0..10 {
+        server
+            .dynamic
+            .borrow_mut()
+            .overloaded(CLIENT_ADDR.parse::<SocketAddr>().unwrap().ip());
+    }
+    let mut packet = Packet([0; 256]);
+    packet.0[..initiation.len()].copy_from_slice(&initiation);
+    let cookie = match server
+        .recv_message(
+            CLIENT_ADDR.parse().unwrap(),
+            &mut packet.0[..initiation.len()],
+        )
+        .unwrap()
+    {
+        Message::Write(reply) => reply.to_vec(),
+        _ => panic!("expected cookie challenge"),
+    };
+    packet.0[..cookie.len()].copy_from_slice(&cookie);
+    assert!(matches!(
+        client.recv_message(SERVER_ADDR.parse().unwrap(), &mut packet.0[..cookie.len()]),
+        Ok(Message::Noop)
+    ));
+
+    let mut retry = initiation;
+    let mut init = HandshakeInit::read_from_bytes(&retry).unwrap();
+    use rustyguard_crypto::HasMac;
+    init.mac2 = init.compute_mac2::<C>(client.dynamic.borrow().peers[cp].cookie.as_ref().unwrap());
+    retry.copy_from_slice(init.as_bytes());
+    packet.0[..retry.len()].copy_from_slice(&retry);
+    let response = match server
+        .recv_message(CLIENT_ADDR.parse().unwrap(), &mut packet.0[..retry.len()])
+        .unwrap()
+    {
+        Message::Write(reply) => reply,
+        _ => panic!("expected handshake response"),
+    };
+    assert!(matches!(
+        client.recv_message(SERVER_ADDR.parse().unwrap(), response),
+        Ok(Message::HandshakeComplete(_))
+    ));
+    exchange_data(&mut client, cp, &mut server, CLIENT_ADDR);
+    exchange_data(&mut server, sp, &mut client, SERVER_ADDR);
+}
+
+#[test]
+fn custom_provider_is_used_for_protocol_operations() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use rustyguard_crypto::{CryptoError, Key, Mac, PublicKey};
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    struct Traced;
+    macro_rules! forward {
+        ($bit:expr, $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $out:ty) => {
+            fn $name($($arg: $ty),*) -> $out {
+                CALLS.fetch_or(1 << $bit, Ordering::Relaxed);
+                CryptoCore::$name($($arg),*)
+            }
+        };
+    }
+    impl CryptoPrimatives for Traced {
+        forward!(0, blake2s_hash(left: &[u8], right: &[u8]) -> Key);
+        forward!(1, blake2s_mac(key: &[u8], msg: &[u8]) -> Mac);
+        forward!(2, hmac_blake2s(key: &Key, msg: &[u8]) -> Key);
+        fn hkdf_blake2s<const N: usize>(key: &mut Key, msg: &[u8], output: &mut [Key; N]) {
+            CALLS.fetch_or(1 << 3, Ordering::Relaxed);
+            CryptoCore::hkdf_blake2s(key, msg, output);
+        }
+        forward!(
+            4,
+            x25519(secret: &StaticPrivateKey, public: &PublicKey) -> Result<Key, CryptoError>
+        );
+        forward!(5, x25519_pubkey(secret: &StaticPrivateKey) -> PublicKey);
+        forward!(
+            6,
+            chacha20poly1305_enc(
+                key: &Key,
+                nonce: &[u8; 12],
+                aad: &[u8],
+                payload: &mut [u8],
+                tag: &mut [u8; 16],
+            ) -> ()
+        );
+        forward!(
+            7,
+            chacha20poly1305_dec(
+                key: &Key,
+                nonce: &[u8; 12],
+                aad: &[u8],
+                payload: &mut [u8],
+                tag: &[u8; 16],
+            ) -> Result<(), CryptoError>
+        );
+        forward!(
+            8,
+            xchacha20poly1305_enc(
+                key: &Key,
+                nonce: &[u8; 24],
+                aad: &[u8],
+                payload: &mut [u8],
+                tag: &mut [u8; 16],
+            ) -> ()
+        );
+        forward!(
+            9,
+            xchacha20poly1305_dec(
+                key: &Key,
+                nonce: &[u8; 24],
+                aad: &[u8],
+                payload: &mut [u8],
+                tag: &[u8; 16],
+            ) -> Result<(), CryptoError>
+        );
+    }
+
+    mixed_provider_pair::<Traced, CryptoCore>();
+    mixed_provider_pair::<CryptoCore, Traced>();
+    // HMAC can be internal to the provider's HKDF implementation, rather than
+    // called separately by the protocol. All other primitive hooks are exercised.
+    let expected = 0x3ff & !(1 << 2);
+    assert_eq!(CALLS.load(Ordering::Relaxed) & expected, expected);
 }
 
 #[test]

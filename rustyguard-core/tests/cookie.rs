@@ -1,3 +1,5 @@
+#![cfg(any(feature = "graviola", feature = "rustcrypto"))]
+
 use rand::{rngs::StdRng, SeedableRng};
 use rustyguard_core::{Config, Message, SendMessage, Sessions, StaticPrivateKey, Tai64N};
 use rustyguard_crypto::{CryptoCore, CryptoPrimatives, StaticPeerConfig};

@@ -40,7 +40,18 @@ macro_rules! unsafe_log {
 }
 
 mod prim;
-pub use prim::{Core as CryptoCore, CryptoPrimatives, PublicKey, StaticPrivateKey};
+pub use prim::{CryptoPrimatives, PublicKey, StaticPrivateKey};
+pub mod providers;
+
+/// Default provider: Graviola when enabled, otherwise RustCrypto.
+#[cfg(feature = "graviola")]
+pub use providers::Graviola as CryptoCore;
+/// Default provider when only the portable backend is enabled.
+#[cfg(all(not(feature = "graviola"), feature = "rustcrypto"))]
+pub use providers::RustCrypto as CryptoCore;
+/// No built-in provider is selected. Supply your provider type explicitly.
+#[cfg(not(any(feature = "graviola", feature = "rustcrypto")))]
+pub struct CryptoCore;
 pub struct EphemeralPrivateKey(StaticPrivateKey);
 
 #[derive(Debug)]
@@ -51,6 +62,7 @@ pub enum CryptoError {
 }
 
 /// Decrypt a cookie using the default crypto provider.
+#[cfg(any(feature = "graviola", feature = "rustcrypto"))]
 pub fn decrypt_cookie<'c>(
     cookie: &'c mut EncryptedCookie,
     key: &Key,
@@ -61,16 +73,19 @@ pub fn decrypt_cookie<'c>(
 }
 
 /// Encrypt a cookie using the default crypto provider.
+#[cfg(any(feature = "graviola", feature = "rustcrypto"))]
 pub fn encrypt_cookie(cookie: Cookie, key: &Key, nonce: &[u8; 24], aad: &[u8]) -> EncryptedCookie {
     encrypt_cookie_with::<CryptoCore>(cookie, key, nonce, aad)
 }
 
 /// Derive a peer's MAC1 key using the default crypto provider.
+#[cfg(any(feature = "graviola", feature = "rustcrypto"))]
 pub fn mac1_key(spk: &[u8]) -> Key {
     mac1_key_with::<CryptoCore>(spk)
 }
 
 /// Derive a peer's cookie key using the default crypto provider.
+#[cfg(any(feature = "graviola", feature = "rustcrypto"))]
 pub fn cookie_key(spk: &[u8]) -> Key {
     cookie_key_with::<CryptoCore>(spk)
 }
@@ -126,6 +141,7 @@ impl CookieState {
     }
 
     /// Create an address-bound cookie using the default provider.
+    #[cfg(any(feature = "graviola", feature = "rustcrypto"))]
     pub fn new_cookie(&self, addr: SocketAddr) -> Cookie {
         self.new_cookie_with::<CryptoCore>(addr)
     }
@@ -283,6 +299,7 @@ pub struct StaticInitiatorConfig<C = CryptoCore> {
 }
 
 impl StaticPeerConfig {
+    #[cfg(any(feature = "graviola", feature = "rustcrypto"))]
     pub fn new(key: PublicKey, preshared_key: Option<Key>, endpoint: Option<SocketAddr>) -> Self {
         Self::with_crypto::<CryptoCore>(key, preshared_key, endpoint)
     }
@@ -303,6 +320,7 @@ impl StaticPeerConfig {
     }
 }
 
+#[cfg(any(feature = "graviola", feature = "rustcrypto"))]
 impl StaticInitiatorConfig {
     pub fn new(key: StaticPrivateKey) -> Self {
         Self::with_crypto(key)
@@ -525,7 +543,7 @@ impl EphemeralPrivateKey {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "graviola", feature = "rustcrypto")))]
 mod tests {
 
     use rand::{rngs::StdRng, RngCore, SeedableRng};
