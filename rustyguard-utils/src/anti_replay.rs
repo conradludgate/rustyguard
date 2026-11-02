@@ -9,10 +9,18 @@ const BITMAP_INDEX_MASK: usize = BITMAP_LEN - 1;
 const BITMAP_LOC_MASK: u64 = (SIZE_OF_WORD as u64) - 1;
 pub const WINDOW_SIZE: u64 = (BITMAP_BITLEN - SIZE_OF_WORD) as u64;
 
-#[derive(Default)]
 pub struct AntiReplay {
     bitmap: [usize; BITMAP_LEN],
     last: u64,
+}
+
+impl Default for AntiReplay {
+    fn default() -> Self {
+        Self {
+            bitmap: [0; BITMAP_LEN],
+            last: 0,
+        }
+    }
 }
 
 impl AntiReplay {
@@ -41,25 +49,25 @@ impl AntiReplay {
     /// Record an authenticated counter. Must only be called after
     /// [`AntiReplay::would_accept`] returned true for the same `n`.
     pub fn mark_seen(&mut self, n: u64) {
-        let index = (n >> REDUNDANT_BIT_SHIFTS) as usize;
+        let index = n >> REDUNDANT_BIT_SHIFTS;
         let shift = n & BITMAP_LOC_MASK;
 
         if n > self.last {
-            let next_index = ((self.last >> REDUNDANT_BIT_SHIFTS) + 1) as usize;
+            let next_index = (self.last >> REDUNDANT_BIT_SHIFTS) + 1;
 
             // edge case - skips the entire window ahead.
-            if index > next_index && index - next_index > BITMAP_LEN {
+            if index > next_index && index - next_index > BITMAP_LEN as u64 {
                 self.bitmap = [0; BITMAP_LEN];
             } else {
                 for i in next_index..=index {
-                    self.bitmap[i & BITMAP_INDEX_MASK] = 0;
+                    self.bitmap[i as usize & BITMAP_INDEX_MASK] = 0;
                 }
             };
 
             self.last = n;
         }
 
-        self.bitmap[index & BITMAP_INDEX_MASK] |= 1 << shift;
+        self.bitmap[index as usize & BITMAP_INDEX_MASK] |= 1 << shift;
     }
 }
 
@@ -104,5 +112,24 @@ mod tests {
         assert!(check(&mut replay, 5));
         assert!(replay.would_accept(1_000_000));
         assert!(check(&mut replay, 6));
+    }
+
+    #[test]
+    fn word_index_wrap_preserves_replay_detection() {
+        // Cross the point where a 32-bit word index wraps, retaining an old
+        // counter that maps to the newly entered bitmap word.
+        let boundary = (1u64 << 32) << super::REDUNDANT_BIT_SHIFTS;
+        let mut replay = AntiReplay::default();
+        let old = boundary - super::BITMAP_BITLEN as u64;
+        assert!(check(&mut replay, old));
+        assert!(check(
+            &mut replay,
+            boundary - super::SIZE_OF_WORD as u64 - 1
+        ));
+        assert!(check(&mut replay, boundary + 1));
+        // The old bitmap word must have been cleared: this counter is new.
+        assert!(check(&mut replay, boundary));
+        assert!(!check(&mut replay, boundary));
+        assert!(!check(&mut replay, boundary + 1));
     }
 }
