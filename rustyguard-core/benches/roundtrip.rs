@@ -2,8 +2,9 @@ use core::net::SocketAddr;
 
 use divan::{black_box, Bencher};
 use rand::{rng, rngs::ThreadRng, RngCore};
-use rustyguard_core::{PublicKey, StaticPrivateKey};
+use rustyguard_core::{PublicKey, StaticPrivateKey, Tai64N};
 use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
+use tai64::Tai64;
 use zerocopy::IntoBytes;
 
 use rustyguard_core::{Config, PeerId, Sessions};
@@ -22,6 +23,8 @@ fn session_with_peer(
     let mut config = Config::new(secret_key);
     let id = config.insert_peer(peer);
     let sessions = Sessions::new(config, &mut rng());
+    // Timestamp zero is the initial replay floor; real callers advance time.
+    sessions.turn(Tai64N(Tai64(1), 0), &mut rng());
     (sessions, id)
 }
 
