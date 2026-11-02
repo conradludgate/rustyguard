@@ -171,6 +171,15 @@ impl Default for HandshakeState {
 }
 
 impl HandshakeState {
+    // Candidate responses need an owned transcript without invalidating the
+    // outstanding initiation on authentication failure. Both copies zeroize.
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            hash: self.hash,
+            chain: self.chain,
+        }
+    }
+
     /// Like mix-key, but discards the unused key
     pub fn mix_chain<C: CryptoPrimatives>(&mut self, b: &[u8]) {
         C::hkdf_blake2s(&mut self.chain, b, &mut []);
@@ -211,7 +220,7 @@ impl HandshakeState {
         self.mix_key_dh::<C>(&sk.0, pk)
     }
 
-    fn mix_key<C: CryptoPrimatives>(&mut self, b: &[u8]) -> Key {
+    pub(crate) fn mix_key<C: CryptoPrimatives>(&mut self, b: &[u8]) -> Key {
         let mut k = Key::default();
         C::hkdf_blake2s(&mut self.chain, b, array::from_mut(&mut k));
         k

@@ -1,9 +1,8 @@
 use divan::Bencher;
 use rand::{rng, rngs::ThreadRng, Rng, RngCore};
 use rustyguard_crypto::{
-    decrypt_handshake_init, encrypt_handshake_init, encrypt_handshake_resp, CryptoCore,
-    CryptoPrimatives, EphemeralPrivateKey, HandshakeState, Key, StaticInitiatorConfig,
-    StaticPeerConfig, StaticPrivateKey,
+    CryptoCore, CryptoPrimatives, DecryptHandshakeInit, EncryptHandshakeInit, EphemeralPrivateKey,
+    HandshakeState, Key, SharedSecret, StaticInitiatorConfig, StaticPeerConfig, StaticPrivateKey,
 };
 use tai64::Tai64N;
 
@@ -27,17 +26,22 @@ fn handshake(b: Bencher) {
         let mut psk = Key::default();
         rng().fill_bytes(&mut psk);
 
-        let mut hs = HandshakeState::default();
-        let init = encrypt_handshake_init(
-            &mut hs,
-            &StaticInitiatorConfig::new(ssk_i),
-            &StaticPeerConfig::new(spk_r, Some(psk), None),
+        let local = StaticInitiatorConfig::new(ssk_i);
+        let peer = StaticPeerConfig::new(spk_r, Some(psk), None);
+        let request = EncryptHandshakeInit::<CryptoCore>::new(
+            HandshakeState::default(),
+            &local.public_key,
+            &peer,
             &EphemeralPrivateKey::generate(&mut rng()),
             Tai64N::now(),
             rng().random(),
             None,
         )
         .unwrap();
+        let secret =
+            SharedSecret::new(CryptoCore::x25519(&local.private_key, &request.peer_key()).unwrap())
+                .unwrap();
+        let (init, _) = request.complete(secret);
 
         (
             init,
@@ -45,17 +49,32 @@ fn handshake(b: Bencher) {
             StaticPeerConfig::new(spk_i, Some(psk), None),
         )
     })
-    .bench_local_values(|(mut msg, config, peer)| {
-        let mut hs = HandshakeState::default();
-        let decrypted = decrypt_handshake_init(&mut msg, &mut hs, &config).unwrap();
-        assert_eq!(decrypted.static_key().0, peer.key.0);
-        encrypt_handshake_resp::<rustyguard_crypto::CryptoCore>(
-            &mut hs,
-            decrypted,
-            &EphemeralPrivateKey::generate(&mut rng()),
-            &peer,
-            rng().random(),
-            None,
+    .bench_local_values(|(msg, config, peer)| {
+        let request = DecryptHandshakeInit::<CryptoCore>::new(
+            msg,
+            HandshakeState::default(),
+            &config.public_key,
+        );
+        let secret = SharedSecret::new(
+            CryptoCore::x25519(&config.private_key, &request.peer_key()).unwrap(),
         )
+        .unwrap();
+        let request = request.complete(secret).unwrap();
+        let secret = SharedSecret::new(
+            CryptoCore::x25519(&config.private_key, &request.peer_key()).unwrap(),
+        )
+        .unwrap();
+        let decrypted = request.complete(secret).unwrap();
+        assert_eq!(decrypted.static_key().0, peer.key.0);
+        let (response, transcript) = decrypted
+            .respond(
+                &EphemeralPrivateKey::generate(&mut rng()),
+                &peer,
+                rng().random(),
+                None,
+            )
+            .unwrap();
+        drop(transcript);
+        response
     })
 }

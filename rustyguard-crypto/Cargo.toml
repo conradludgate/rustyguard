@@ -14,6 +14,7 @@ rustyguard-utils = { version = "0.1", path = "../rustyguard-utils" }
 
 # crypto
 blake2s_simd = { version = "1.0", default-features = false }
+constant_time_eq = "0.3"
 
 # crypto adjacent
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
@@ -27,6 +28,7 @@ x25519-dalek = { version = "2", default-features = false, features = ["static_se
 chacha20poly1305 = { version = "0.10", default-features = false, optional = true }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
 divan = "0.1.14"
 rand = { version = "0.9", features = [] }
 tai64 = { version = "4.0", default-features = false, features = ["std"] }

@@ -5,8 +5,8 @@ use crate::time::{TimerEntry, TimerEntryType};
 use alloc::boxed::Box;
 use rand_core::RngCore;
 use rustyguard_crypto::{
-    decrypt_cookie_with, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    CryptoPrimatives, EphemeralPrivateKey, HandshakeState, HasMac,
+    decrypt_cookie_with, CryptoPrimatives, DecryptHandshakeInit, DecryptHandshakeResp,
+    EncryptHandshakeInit, EphemeralPrivateKey, HandshakeState, HasMac, SharedSecret,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
@@ -70,10 +70,21 @@ impl<C: CryptoPrimatives> Sessions<C> {
             }
         };
 
-        // start new handshake state.
-        let mut hs = HandshakeState::default();
-
-        let data = decrypt_handshake_init(init_msg, &mut hs, &self.config.static_)?;
+        let request = DecryptHandshakeInit::<C>::new(
+            *init_msg,
+            HandshakeState::default(),
+            &self.config.static_.public_key,
+        );
+        let secret = SharedSecret::new(C::x25519(
+            &self.config.static_.private_key,
+            &request.peer_key(),
+        )?)?;
+        let request = request.complete(secret)?;
+        let secret = SharedSecret::new(C::x25519(
+            &self.config.static_.private_key,
+            &request.peer_key(),
+        )?)?;
+        let data = request.complete(secret)?;
 
         unsafe_log!("payload decrypted");
         // check if we know this peer
@@ -98,14 +109,8 @@ impl<C: CryptoPrimatives> Sessions<C> {
         // complete handshake
         let esk_r = EphemeralPrivateKey::generate(&mut state.rng);
 
-        let response = encrypt_handshake_resp::<C>(
-            &mut hs,
-            data,
-            &esk_r,
-            peer_config,
-            session_id,
-            peer.cookie.as_ref(),
-        )?;
+        let (response, mut hs) =
+            data.respond(&esk_r, peer_config, session_id, peer.cookie.as_ref())?;
         peer.last_sent_mac1 = response.mac1;
 
         peer.current_transport = Some(session_id);
@@ -192,13 +197,12 @@ impl<C: CryptoPrimatives> Sessions<C> {
         let peer_config = &self.config.peers[session.peer];
         let peer = &mut state.peers[session.peer];
 
-        decrypt_handshake_resp(
-            resp_msg,
-            &mut hs.state,
-            &self.config.static_,
-            peer_config,
-            &hs.esk_i,
-        )?;
+        let request = DecryptHandshakeResp::<C>::new(*resp_msg, &hs.state, peer_config, &hs.esk_i)?;
+        let secret = SharedSecret::new(C::x25519(
+            &self.config.static_.private_key,
+            &request.peer_key(),
+        )?)?;
+        let mut completed = request.complete(secret)?;
 
         let hs_session = peer.current_handshake.take();
         debug_assert_eq!(hs_session, Some(session_id));
@@ -206,7 +210,7 @@ impl<C: CryptoPrimatives> Sessions<C> {
 
         peer.endpoint = Some(addr);
 
-        let (encrypt, decrypt) = hs.state.split::<C>(true);
+        let (encrypt, decrypt) = completed.split::<C>(true);
         hs.zeroize();
 
         session.state = SessionState::Transport(SessionTransport {
@@ -304,15 +308,21 @@ pub(crate) fn new_handshake<C: CryptoPrimatives>(
         unreachable!()
     };
 
-    let msg = rustyguard_crypto::encrypt_handshake_init(
-        &mut handshake.state,
-        &sessions.config.static_,
+    let request = EncryptHandshakeInit::<C>::new(
+        core::mem::take(&mut handshake.state),
+        &sessions.config.static_.public_key,
         peer_config,
         &handshake.esk_i,
         state.now,
         sender,
         peer.cookie.as_ref(),
     )?;
+    let secret = SharedSecret::new(C::x25519(
+        &sessions.config.static_.private_key,
+        &request.peer_key(),
+    )?)?;
+    let (msg, completed) = request.complete(secret);
+    handshake.state = completed;
     peer.last_sent_mac1 = msg.mac1;
 
     state.timers.push(TimerEntry {
