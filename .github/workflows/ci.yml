@@ -19,3 +19,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+
+  providers:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: [rustcrypto, "graviola,rustcrypto"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p rustyguard-core -p rustyguard-crypto --no-default-features --features '${{ matrix.features }}'
+      - run: cargo clippy --locked -p rustyguard-core -p rustyguard-crypto --all-targets --no-default-features --features '${{ matrix.features }}' -- -D warnings
+
+  pico:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv8m.main-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked -p rustyguard-core --lib --no-default-features --features rustcrypto --target thumbv8m.main-none-eabihf
+      - run: cargo check --locked -p rustyguard-core -p rustyguard-crypto --lib --no-default-features

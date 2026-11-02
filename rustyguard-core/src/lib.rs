@@ -83,6 +83,13 @@ impl PeerId {
     }
 }
 
+/// Peer configuration and a statically selected crypto provider.
+///
+/// `Config::new` uses the default provider. To select another provider, use
+/// `Config::<Provider>::with_crypto(key)`; [`Sessions::new`] infers the provider
+/// from this configuration. Built-in providers are in
+/// [`rustyguard_crypto::providers`]. With both built-in backend features disabled,
+/// supply a custom [`CryptoPrimatives`] implementation explicitly.
 pub struct Config<C = CryptoCore> {
     static_: StaticInitiatorConfig<C>,
 
@@ -122,6 +129,7 @@ impl<P> PeerList<P> {
     }
 }
 
+#[cfg(any(feature = "graviola", feature = "rustcrypto"))]
 impl Config {
     pub fn new(private_key: StaticPrivateKey) -> Self {
         Self::with_crypto(private_key)
@@ -725,7 +733,7 @@ impl<C: CryptoPrimatives> Sessions<C> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "graviola", feature = "rustcrypto")))]
 mod tests {
     use core::net::SocketAddr;
 
@@ -988,5 +996,5 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "graviola", feature = "rustcrypto")))]
 mod protocol_tests;

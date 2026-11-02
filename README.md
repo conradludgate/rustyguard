@@ -58,16 +58,45 @@ library that provides a simple Read/Write wrapper on top of rustyguard that does
 
 ## Embedding into microcontrollers
 
-> [!NOTE]
-> This article is a stub
+The default `graviola` crypto backend uses `std`. For a portable `no_std` build,
+disable default features and select `rustcrypto` on `rustyguard-core` (and on
+`rustyguard-crypto` if depending on it directly):
 
-Because rustyguard is `#![no_std]`, it supports most embedded devices with little effort. Only need an allocator.
+```toml
+rustyguard-core = { version = "0.1", default-features = false, features = ["rustcrypto"] }
+rustyguard-crypto = { version = "0.1", default-features = false, features = ["rustcrypto"] }
+```
+
+This configuration is cross-checked for the Pico 2's Cortex-M33 target,
+`thumbv8m.main-none-eabihf`. It still requires an allocator.
+
 All the allocations currently performed by rustyguard could be replaced with [`heapless`](https://docs.rs/heapless) to
 truly be no-alloc and support most embedded targets.
 However, It is still necessary for the application developer to provide:
 1. UDP Network
 2. Time
 3. Cryptographic RNG
+
+## Crypto providers
+
+Both providers implement WireGuard's fixed crypto suite. `Config::new` selects
+Graviola when its feature is enabled, otherwise RustCrypto. Both features may be
+enabled together; select a provider explicitly when needed:
+
+```rust
+use rustyguard_core::{Config, StaticPrivateKey};
+use rustyguard_crypto::providers::RustCrypto;
+
+let config = Config::<RustCrypto>::with_crypto(StaticPrivateKey([1; 32]));
+```
+
+The key above is only an example; use a securely generated private key in an
+application. `Sessions::new(config, rng)` infers the provider. Peer configuration
+can be built with `StaticPeerConfig::with_crypto::<RustCrypto>(...)`.
+
+Custom providers implement `rustyguard_crypto::CryptoPrimatives` and use the same
+typed constructors. With both built-in features disabled, an explicit provider
+is required. Selection uses static dispatch and adds no provider allocation.
 
 ## Project TODO:
 
