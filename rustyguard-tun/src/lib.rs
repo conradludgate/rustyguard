@@ -124,8 +124,8 @@ impl TunConfig {
         private_key
     }
 
-    pub fn build(self) -> (Sessions, Ipv4LCTrieMap<PeerId>) {
-        let mut rg_config = Config::new(self.key());
+    pub fn build(self, public_key: PublicKey) -> (Sessions, Ipv4LCTrieMap<PeerId>) {
+        let mut rg_config = Config::new(public_key);
 
         let mut peer_net = Ipv4RTrieMap::with_root(PeerId::sentinal());
         for peer in self.peers {
@@ -150,6 +150,7 @@ impl TunConfig {
 }
 
 pub enum Write<'a> {
+    Handshake(Box<rustyguard_core::Handshake>),
     Outbound(&'a [u8], SocketAddr),
     Inbound(&'a [u8]),
     None,
@@ -164,12 +165,8 @@ pub fn handle_extern<'a>(
     // println!("packet from {addr:?}: {:?}", &ep_buf.filled());
     match sessions.recv_message(addr, ep_buf) {
         Err(e) => println!("error: {e:?}"),
+        Ok(Message::Handshake(work)) => return Write::Handshake(work),
         Ok(Message::Noop) => println!("noop"),
-        Ok(Message::HandshakeComplete(_encryptor)) => {
-            // TODO(conrad): resend queued message.
-            // _encryptor.encrypt_and_frame(payload_buffer)
-            // endpoint.send_to(payload_buffer, addr).await.unwrap()
-        }
         Ok(Message::Read(peer_idx, buf)) => {
             if buf.is_empty() {
                 return Write::None;
@@ -240,11 +237,7 @@ pub fn handle_intern<'a>(
         .send_message(*peer_idx, &mut reply_buf[IP_PACKET_START..pad_to])
         .unwrap()
     {
-        rustyguard_core::SendMessage::Maintenance(msg) => {
-            let data = msg.data();
-            reply_buf[..data.len()].copy_from_slice(data);
-            Write::Outbound(&reply_buf[..data.len()], msg.to())
-        }
+        rustyguard_core::SendMessage::Handshake(work) => Write::Handshake(work),
         rustyguard_core::SendMessage::Data(ep, metadata) => {
             /// Size of the WireGuard tag
             const TAG_FOOTER_SIZE: usize = 16;

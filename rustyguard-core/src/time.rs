@@ -4,8 +4,8 @@ use rustyguard_crypto::CryptoPrimatives;
 use tai64::Tai64N;
 
 use crate::{
-    handshake::new_handshake, EncryptedMetadata, Keepalive, MaintenanceMsg, MaintenanceRepr,
-    SessionState, Sessions,
+    EncryptedMetadata, Error, Event, Keepalive, MaintenanceMsg, MaintenanceRepr, SessionState,
+    Sessions, REKEY_TIMEOUT,
 };
 
 pub(crate) struct TimerEntry {
@@ -40,7 +40,7 @@ pub(crate) enum TimerEntryType {
     ExpireHandshake { session_id: u32 },
 }
 
-pub(crate) fn tick_timers<C: CryptoPrimatives>(sessions: &Sessions<C>) -> Option<MaintenanceMsg> {
+pub(crate) fn tick_timers<C: CryptoPrimatives>(sessions: &Sessions<C>) -> Option<Event<C>> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let mut state = &mut *state_ref;
 
@@ -53,7 +53,6 @@ pub(crate) fn tick_timers<C: CryptoPrimatives>(sessions: &Sessions<C>) -> Option
                     continue;
                 };
                 let peer_idx = session.peer;
-                let peer = &sessions.config.peers[peer_idx];
 
                 // only re-init if
                 // 1. it's been REKEY_TIMEOUT seconds since our last attempt
@@ -61,25 +60,30 @@ pub(crate) fn tick_timers<C: CryptoPrimatives>(sessions: &Sessions<C>) -> Option
                 // 3. the session needs to be re-init
                 let should_reinit = match &session.state {
                     SessionState::Handshake(hs) => session.should_reinit(state.now, hs),
-                    SessionState::Transport(ts) => session.should_rekey(state.now, ts),
+                    SessionState::Transport(ts) => {
+                        session.should_rekey(state.now, ts)
+                            && state.peers[peer_idx].current_handshake.is_none()
+                    }
                 };
 
                 if should_reinit {
-                    let socket = peer.endpoint.expect("a rekey event should not be scheduled if we've never seen this endpoint before");
-                    // Must drop the borrow before calling new_handshake,
+                    // Must drop the borrow before starting a handshake,
                     // which needs its own mutable borrow of dynamic.
                     drop(state_ref);
-                    // if this errors, it's due to a key-exchange error (diffie-hellman produced all zeros).
-                    // nothign we can really do about that.
-                    if let Ok(hs) = new_handshake(sessions, peer_idx) {
-                        return Some(MaintenanceMsg {
-                            socket,
-                            data: MaintenanceRepr::Init(hs),
-                        });
-                    }
-                    // Re-borrow for the next loop iteration
+                    let result = sessions.start_handshake(peer_idx);
+                    // Re-borrow for the next loop iteration.
                     state_ref = sessions.dynamic.borrow_mut();
                     state = &mut *state_ref;
+                    match result {
+                        Ok(work) => return Some(Event::Handshake(work)),
+                        // Temporary saturation must not discard the only rekey
+                        // timer for an established transport.
+                        Err(Error::HandshakeLimit) => state.timers.push(TimerEntry {
+                            time: state.now + REKEY_TIMEOUT,
+                            kind: TimerEntryType::InitAttempt { session_id },
+                        }),
+                        Err(_) => {}
+                    }
                 }
             }
             TimerEntryType::ExpireTransport { session_id } => {
@@ -135,10 +139,10 @@ pub(crate) fn tick_timers<C: CryptoPrimatives>(sessions: &Sessions<C>) -> Option
                     };
                     let socket = peer.endpoint.expect("a keepalive event should not be scheduled if we've never seen this endpoint before");
 
-                    return Some(MaintenanceMsg {
+                    return Some(Event::Write(MaintenanceMsg {
                         socket,
                         data: MaintenanceRepr::Data(Keepalive { header, tag }),
-                    });
+                    }));
                 }
             }
         }

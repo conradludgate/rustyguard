@@ -9,38 +9,45 @@ const SERVER_ADDR: &str = "127.0.0.1:2000";
 fn invalid_response_preserves_the_outstanding_handshake() {
     use rustyguard_crypto::HasMac;
     let (mut client, mut server, cp, sp) = pair();
-    let initiation = match client.send_message(cp, &mut [0; 16]).unwrap() {
-        SendMessage::Maintenance(message) => message.data().to_vec(),
-        _ => panic!("expected initiation"),
-    };
+    let initiation = start(&mut client, cp, &StaticPrivateKey([1; 32]))
+        .data()
+        .to_vec();
     let mut packet = Packet([0; 256]);
     packet.0[..initiation.len()].copy_from_slice(&initiation);
-    let response = match server
-        .recv_message(
-            CLIENT_ADDR.parse().unwrap(),
-            &mut packet.0[..initiation.len()],
-        )
-        .unwrap()
+    let response = match receive_handshake(
+        &mut server,
+        CLIENT_ADDR.parse().unwrap(),
+        &mut packet.0[..initiation.len()],
+        &StaticPrivateKey([2; 32]),
+    )
+    .unwrap()
     {
-        Message::Write(message) => message.to_vec(),
+        Event::Write(message) => message.data().to_vec(),
         _ => panic!("expected response"),
     };
     let mut invalid = rustyguard_types::HandshakeResp::read_from_bytes(&response).unwrap();
     invalid.empty.tag.0[0] ^= 1;
-    invalid.mac1 = invalid.compute_mac1::<CryptoCore>(&client.config.static_.mac1_key);
+    invalid.mac1 = invalid.compute_mac1::<CryptoCore>(&client.config.mac1_key);
     let bytes = invalid.as_bytes();
     packet.0[..bytes.len()].copy_from_slice(bytes);
     assert!(matches!(
-        client.recv_message(SERVER_ADDR.parse().unwrap(), &mut packet.0[..bytes.len()],),
+        receive_handshake(
+            &mut client,
+            SERVER_ADDR.parse().unwrap(),
+            &mut packet.0[..bytes.len()],
+            &StaticPrivateKey([1; 32])
+        ),
         Err(Error::DecryptionError)
     ));
     packet.0[..response.len()].copy_from_slice(&response);
     assert!(matches!(
-        client.recv_message(
+        receive_handshake(
+            &mut client,
             SERVER_ADDR.parse().unwrap(),
             &mut packet.0[..response.len()],
+            &StaticPrivateKey([1; 32])
         ),
-        Ok(Message::HandshakeComplete(_))
+        Ok(Event::HandshakeComplete(_))
     ));
     exchange_data(&mut client, cp, &mut server, CLIENT_ADDR);
     exchange_data(&mut server, sp, &mut client, SERVER_ADDR);
@@ -59,8 +66,8 @@ fn pair_with<C: CryptoPrimatives, S: CryptoPrimatives>(
     let server_key = StaticPrivateKey([2; 32]);
     let client_pk = C::x25519_pubkey(&client_key);
     let server_pk = S::x25519_pubkey(&server_key);
-    let mut client_cfg = Config::<C>::with_crypto(client_key);
-    let mut server_cfg = Config::<S>::with_crypto(server_key);
+    let mut client_cfg = Config::<C>::with_crypto(PublicKey(client_pk.0));
+    let mut server_cfg = Config::<S>::with_crypto(PublicKey(server_pk.0));
     let cp = client_cfg.insert_peer(StaticPeerConfig::with_crypto::<C>(
         server_pk,
         None,
@@ -113,10 +120,9 @@ fn mixed_provider_peers_exchange_handshakes_cookies_and_data() {
 
 fn mixed_provider_pair<C: CryptoPrimatives, S: CryptoPrimatives>() {
     let (mut client, mut server, cp, sp) = pair_with::<C, S>();
-    let initiation = match client.send_message(cp, &mut [0; 16]).unwrap() {
-        SendMessage::Maintenance(message) => message.data().to_vec(),
-        _ => panic!("expected initiation"),
-    };
+    let initiation = start(&mut client, cp, &StaticPrivateKey([1; 32]))
+        .data()
+        .to_vec();
     // Force the next initiation through the cookie path before doing DH.
     for _ in 0..10 {
         server
@@ -148,16 +154,26 @@ fn mixed_provider_pair<C: CryptoPrimatives, S: CryptoPrimatives>() {
     init.mac2 = init.compute_mac2::<C>(client.dynamic.borrow().peers[cp].cookie.as_ref().unwrap());
     retry.copy_from_slice(init.as_bytes());
     packet.0[..retry.len()].copy_from_slice(&retry);
-    let response = match server
-        .recv_message(CLIENT_ADDR.parse().unwrap(), &mut packet.0[..retry.len()])
-        .unwrap()
+    let response = match receive_handshake(
+        &mut server,
+        CLIENT_ADDR.parse().unwrap(),
+        &mut packet.0[..retry.len()],
+        &StaticPrivateKey([2; 32]),
+    )
+    .unwrap()
     {
-        Message::Write(reply) => reply,
+        Event::Write(reply) => reply,
         _ => panic!("expected handshake response"),
     };
+    packet.0[..response.data().len()].copy_from_slice(response.data());
     assert!(matches!(
-        client.recv_message(SERVER_ADDR.parse().unwrap(), response),
-        Ok(Message::HandshakeComplete(_))
+        receive_handshake(
+            &mut client,
+            SERVER_ADDR.parse().unwrap(),
+            &mut packet.0[..response.data().len()],
+            &StaticPrivateKey([1; 32])
+        ),
+        Ok(Event::HandshakeComplete(_))
     ));
     exchange_data(&mut client, cp, &mut server, CLIENT_ADDR);
     exchange_data(&mut server, sp, &mut client, SERVER_ADDR);
@@ -244,25 +260,31 @@ fn custom_provider_is_used_for_protocol_operations() {
 #[test]
 fn identical_initiation_replay_preserves_established_transport() {
     let (mut client, mut server, cp, sp) = pair();
-    let initiation = match client.send_message(cp, &mut [0; 16]).unwrap() {
-        SendMessage::Maintenance(message) => message.data().to_vec(),
-        _ => panic!("expected initiation"),
-    };
+    let initiation = start(&mut client, cp, &StaticPrivateKey([1; 32]))
+        .data()
+        .to_vec();
     let mut packet = Packet([0; 256]);
     packet.0[..initiation.len()].copy_from_slice(&initiation);
-    let response = match server
-        .recv_message(
-            CLIENT_ADDR.parse().unwrap(),
-            &mut packet.0[..initiation.len()],
-        )
-        .unwrap()
+    let response = match receive_handshake(
+        &mut server,
+        CLIENT_ADDR.parse().unwrap(),
+        &mut packet.0[..initiation.len()],
+        &StaticPrivateKey([2; 32]),
+    )
+    .unwrap()
     {
-        Message::Write(response) => response,
+        Event::Write(response) => response,
         _ => panic!("expected handshake response"),
     };
+    packet.0[..response.data().len()].copy_from_slice(response.data());
     assert!(matches!(
-        client.recv_message(SERVER_ADDR.parse().unwrap(), response),
-        Ok(Message::HandshakeComplete(_))
+        receive_handshake(
+            &mut client,
+            SERVER_ADDR.parse().unwrap(),
+            &mut packet.0[..response.data().len()],
+            &StaticPrivateKey([1; 32])
+        ),
+        Ok(Event::HandshakeComplete(_))
     ));
     exchange_data(&mut client, cp, &mut server, CLIENT_ADDR);
     exchange_data(&mut server, sp, &mut client, SERVER_ADDR);
@@ -279,9 +301,11 @@ fn identical_initiation_replay_preserves_established_transport() {
         // recv_message decrypts in place, so replay the original wire bytes.
         packet.0[..initiation.len()].copy_from_slice(&initiation);
         assert!(matches!(
-            server.recv_message(
+            receive_handshake(
+                &mut server,
                 CLIENT_ADDR.parse().unwrap(),
-                &mut packet.0[..initiation.len()]
+                &mut packet.0[..initiation.len()],
+                &StaticPrivateKey([2; 32])
             ),
             Err(Error::Rejected)
         ));
@@ -308,7 +332,7 @@ fn initiation_timestamps_must_strictly_increase() {
     for (seconds, accepted) in [(1000, true), (999, false), (1000, false), (1001, true)] {
         let request = EncryptHandshakeInit::<CryptoCore>::new(
             HandshakeState::default(),
-            &client.config.static_.public_key,
+            &client.config.public_key,
             &client.config.peers[cp],
             &EphemeralPrivateKey::generate(&mut rng),
             Tai64N(Tai64(seconds), 0),
@@ -317,7 +341,7 @@ fn initiation_timestamps_must_strictly_increase() {
         )
         .unwrap();
         let secret = SharedSecret::new(
-            CryptoCore::x25519(&client.config.static_.private_key, &request.peer_key()).unwrap(),
+            CryptoCore::x25519(&StaticPrivateKey([1; 32]), &request.peer_key()).unwrap(),
         )
         .unwrap();
         let (initiation, _) = request.complete(secret);
@@ -325,10 +349,14 @@ fn initiation_timestamps_must_strictly_increase() {
         let bytes = initiation.as_bytes();
         packet.0[..bytes.len()].copy_from_slice(bytes);
         let old_transport = server.dynamic.borrow().peers[sp].current_transport;
-        let result =
-            server.recv_message(CLIENT_ADDR.parse().unwrap(), &mut packet.0[..bytes.len()]);
+        let result = receive_handshake(
+            &mut server,
+            CLIENT_ADDR.parse().unwrap(),
+            &mut packet.0[..bytes.len()],
+            &StaticPrivateKey([2; 32]),
+        );
         if accepted {
-            assert!(matches!(result, Ok(Message::Write(_))));
+            assert!(matches!(result, Ok(Event::Write(_))));
             assert_ne!(
                 server.dynamic.borrow().peers[sp].current_transport,
                 old_transport
@@ -452,3 +480,47 @@ fn incoming_counter_limit_preserves_transport_state() {
         Some(session_id)
     );
 }
+
+// Application-side drivers used by the software-key regression fixtures. Core
+// only sees public keys and the same owned work used by the delayed-key test.
+pub(super) fn finish<C: CryptoPrimatives>(
+    sessions: &Sessions<C>,
+    key: &StaticPrivateKey,
+    mut work: Handshake<C>,
+) -> Result<Event<C>, Error> {
+    loop {
+        let secret = SharedSecret::new(C::x25519(key, &work.peer_key())?)?;
+        match work.complete(sessions, secret)? {
+            Event::Handshake(next) => work = next,
+            event => return Ok(event),
+        }
+    }
+}
+
+pub(super) fn start<C: CryptoPrimatives>(
+    sessions: &mut Sessions<C>,
+    peer: PeerId,
+    key: &StaticPrivateKey,
+) -> MaintenanceMsg {
+    let SendMessage::Handshake(work) = sessions.send_message(peer, &mut [0; 16]).unwrap() else {
+        panic!("expected DH work")
+    };
+    let Event::Write(message) = finish(sessions, key, *work).unwrap() else {
+        panic!("expected initiation")
+    };
+    message
+}
+
+pub(super) fn receive_handshake<C: CryptoPrimatives>(
+    sessions: &mut Sessions<C>,
+    addr: SocketAddr,
+    packet: &mut [u8],
+    key: &StaticPrivateKey,
+) -> Result<Event<C>, Error> {
+    let Message::Handshake(work) = sessions.recv_message(addr, packet)? else {
+        panic!("expected DH work")
+    };
+    finish(sessions, key, *work)
+}
+
+mod pending;

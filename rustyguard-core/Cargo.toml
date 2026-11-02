@@ -22,6 +22,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 zeroize = "1.8"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
 divan = "0.1.14"
 base64ct = { version = "1", features = ["std"] }
 tai64 = { version = "4.0", features = ["std"] }

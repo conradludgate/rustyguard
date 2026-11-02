@@ -26,23 +26,24 @@ macro_rules! unsafe_log {
 extern crate alloc;
 
 use core::cell::RefCell;
+use core::marker::PhantomData;
 use core::net::SocketAddr;
 use core::time::Duration;
 use core::{hash::BuildHasher, net::IpAddr};
 
 use alloc::boxed::Box;
 use alloc::collections::BinaryHeap;
+use alloc::sync::Weak;
 use alloc::vec::Vec;
 
 use foldhash::fast::FixedState;
-use handshake::new_handshake;
 use hashbrown::{HashMap, HashTable};
 use rand_chacha::ChaCha12Rng as StdRng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
     encrypt_cookie_with, CookieState, CryptoCore, CryptoError, CryptoPrimatives, DecryptionKey,
-    EncryptionKey, EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig,
-    StaticPeerConfig, REJECT_AFTER_MESSAGES,
+    EncryptionKey, EphemeralPrivateKey, HandshakeState, Key, Mac, StaticPeerConfig,
+    REJECT_AFTER_MESSAGES,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -59,6 +60,7 @@ pub use rustyguard_types::DataHeader;
 pub use tai64::Tai64N;
 
 mod handshake;
+pub use handshake::Handshake;
 mod time;
 
 /// After sending this many messages, a rekey should take place.
@@ -86,12 +88,16 @@ impl PeerId {
 /// Peer configuration and a statically selected crypto provider.
 ///
 /// `Config::new` uses the default provider. To select another provider, use
-/// `Config::<Provider>::with_crypto(key)`; [`Sessions::new`] infers the provider
+/// `Config::<Provider>::with_crypto(public_key)`; [`Sessions::new`] infers the provider
 /// from this configuration. Built-in providers are in
 /// [`rustyguard_crypto::providers`]. With both built-in backend features disabled,
 /// supply a custom [`CryptoPrimatives`] implementation explicitly.
 pub struct Config<C = CryptoCore> {
-    static_: StaticInitiatorConfig<C>,
+    public_key: PublicKey,
+    mac1_key: Key,
+    cookie_key: Key,
+    max_pending_handshakes: usize,
+    _crypto: PhantomData<fn() -> C>,
 
     /// This hashtable identifies peers by their public key.
     ///
@@ -131,22 +137,34 @@ impl<P> PeerList<P> {
 
 #[cfg(any(feature = "graviola", feature = "rustcrypto"))]
 impl Config {
-    pub fn new(private_key: StaticPrivateKey) -> Self {
-        Self::with_crypto(private_key)
+    pub fn new(public_key: PublicKey) -> Self {
+        Self::with_crypto(public_key)
     }
 }
 
 impl<C: CryptoPrimatives> Config<C> {
-    /// Construct a configuration with a statically selected crypto provider.
-    pub fn with_crypto(private_key: StaticPrivateKey) -> Self {
+    /// Configure the local public identity and crypto provider. The static private
+    /// key stays with the caller; every handshake returns owned DH work.
+    pub fn with_crypto(public_key: PublicKey) -> Self {
         Config {
-            static_: StaticInitiatorConfig::<C>::with_crypto(private_key),
+            mac1_key: rustyguard_crypto::mac1_key_with::<C>(&public_key.0),
+            cookie_key: rustyguard_crypto::cookie_key_with::<C>(&public_key.0),
+            public_key,
+            max_pending_handshakes: 64,
+            _crypto: PhantomData,
             // TODO(conrad): seed this
             pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
             peers: PeerList(Vec::new()),
             ip_rate_limit_params: RateLimitParams::default(),
         }
+    }
+
+    /// Bound caller-managed handshake jobs, including unauthenticated incoming
+    /// initiations. The default is 64. Dropped or expired jobs release capacity.
+    pub fn with_max_pending_handshakes(mut self, limit: usize) -> Self {
+        self.max_pending_handshakes = limit;
+        self
     }
 
     /// Adds a new peer to this wireguard config.
@@ -255,7 +273,9 @@ enum SessionState {
 struct SessionHandshake {
     #[zeroize(skip)]
     esk_i: EphemeralPrivateKey,
-    state: HandshakeState,
+    state: Option<HandshakeState>,
+    #[zeroize(skip)]
+    generation: u64,
 }
 
 struct SessionTransport {
@@ -328,8 +348,8 @@ impl PeerState {
     }
 }
 
-/// Handle to a freshly-completed handshake's data session, returned to the
-/// caller of `recv_message`. Use [`MessageEncrypter::encrypt`] to send the
+/// Handle to a freshly-completed handshake's data session, returned through
+/// [`Event::HandshakeComplete`]. Use [`MessageEncrypter::encrypt`] to send the
 /// first transport packet.
 pub struct MessageEncrypter(u32);
 
@@ -404,6 +424,9 @@ pub struct DynamicState {
     peers_by_session: SessionMap,
 
     timers: BinaryHeap<TimerEntry>,
+    // Weak references do not retain transcripts or prevent cancellation by drop.
+    pending_handshakes: Vec<Weak<handshake::PendingJob>>,
+    handshake_generation: u64,
 }
 
 impl DynamicState {
@@ -429,6 +452,8 @@ impl DynamicState {
             ),
             peers_by_session: HashMap::default(),
             timers: BinaryHeap::new(),
+            pending_handshakes: Vec::new(),
+            handshake_generation: 0,
         }
     }
 }
@@ -441,9 +466,11 @@ impl<C: CryptoPrimatives> Sessions<C> {
         }
     }
 
+    /// Advance protocol time, including pending-handshake expiry.
+    /// Returns writes or caller-managed handshake work; never HandshakeComplete.
     /// Should be called at least once per second.
     /// Should be called until it returns None.
-    pub fn turn(&self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<MaintenanceMsg> {
+    pub fn turn(&self, now: Tai64N, rng: &mut impl CryptoRng) -> Option<Event<C>> {
         let mut state = self.dynamic.borrow_mut();
         if now > state.now {
             state.now = now;
@@ -471,6 +498,9 @@ pub enum Error {
     KeyExchangeError,
     Unaligned,
     Rejected,
+    /// All caller-managed handshake slots are occupied. Retry after work is
+    /// completed, dropped or expired. Established transport remains usable.
+    HandshakeLimit,
 }
 
 impl From<CryptoError> for Error {
@@ -483,19 +513,28 @@ impl From<CryptoError> for Error {
     }
 }
 
-pub enum Message<'a> {
+pub enum Message<'a, C = CryptoCore> {
     // This should be sent back to the client
     Write(&'a mut [u8]),
     // This can be processed appropriately
     Read(PeerId, &'a mut [u8]),
     Noop,
-    HandshakeComplete(MessageEncrypter),
+    /// Owned work, boxed to keep data results small.
+    /// The receive buffer and engine can immediately be reused.
+    Handshake(Box<Handshake<C>>),
 }
 
-pub enum SendMessage {
-    // This handshake message should be sent
-    Maintenance(MaintenanceMsg),
+pub enum SendMessage<C = CryptoCore> {
     Data(SocketAddr, EncryptedMetadata),
+    Handshake(Box<Handshake<C>>),
+}
+
+/// An owned action from handshake completion or timer maintenance.
+#[must_use]
+pub enum Event<C = CryptoCore> {
+    Write(MaintenanceMsg),
+    Handshake(Handshake<C>),
+    HandshakeComplete(MessageEncrypter),
 }
 
 pub struct EncryptedMetadata {
@@ -532,6 +571,7 @@ impl MaintenanceMsg {
     pub fn data(&self) -> &[u8] {
         match &self.data {
             MaintenanceRepr::Init(init) => init.as_bytes(),
+            MaintenanceRepr::Resp(resp) => resp.as_bytes(),
             MaintenanceRepr::Data(ka) => ka.as_bytes(),
         }
     }
@@ -539,6 +579,7 @@ impl MaintenanceMsg {
 
 enum MaintenanceRepr {
     Init(HandshakeInit),
+    Resp(rustyguard_types::HandshakeResp),
     Data(Keepalive),
 }
 
@@ -579,8 +620,7 @@ impl<C: CryptoPrimatives> Sessions<C> {
         // As I said above, this should be parallisable with an rng per thread.
         let mut nonce = [0u8; 24];
         self.dynamic.borrow_mut().rng.fill_bytes(&mut nonce);
-        let cookie =
-            encrypt_cookie_with::<C>(cookie, &self.config.static_.cookie_key, &nonce, &mac1);
+        let cookie = encrypt_cookie_with::<C>(cookie, &self.config.cookie_key, &nonce, &mac1);
 
         let msg = CookieMessage {
             _type: little_endian::U32::new(MSG_COOKIE),
@@ -591,11 +631,14 @@ impl<C: CryptoPrimatives> Sessions<C> {
         write_msg(buf, &msg)
     }
 
+    /// Encrypt with an established transport, or return the first DH request.
+    /// A handshake request leaves the payload unencrypted and does not queue it;
+    /// the application retains it and retries after handshake completion.
     pub fn send_message(
         &mut self,
         peer_idx: PeerId,
         payload: &mut [u8],
-    ) -> Result<SendMessage, Error> {
+    ) -> Result<SendMessage<C>, Error> {
         let mut state_ref = self.dynamic.borrow_mut();
         let state = &mut *state_ref;
 
@@ -626,10 +669,8 @@ impl<C: CryptoPrimatives> Sessions<C> {
             // create a handshake init message to be sent.
             None => {
                 drop(state_ref);
-                Ok(SendMessage::Maintenance(MaintenanceMsg {
-                    socket: ep,
-                    data: MaintenanceRepr::Init(new_handshake(self, peer_idx)?),
-                }))
+                self.start_handshake(peer_idx)
+                    .map(|work| SendMessage::Handshake(Box::new(work)))
             }
         }
     }
@@ -644,9 +685,7 @@ impl<C: CryptoPrimatives> Sessions<C> {
     /// * [`Message::Noop`] - The packet was ok, but there is nothing to do right now
     /// * [`Message::Read`] - The packet was a data packet, the data is decrypted and ready to be read
     /// * [`Message::Write`] - This is a new packet that must be sent back.
-    /// * [`Message::HandshakeComplete`] - We just completed a handshake as the
-    ///   initiator; the returned [`MessageEncrypter`] can be used to send the
-    ///   first transport packet on this fresh session.
+    /// * [`Message::Handshake`] - Supply caller-managed static-key DH asynchronously.
     ///
     /// # Errors
     ///
@@ -658,7 +697,7 @@ impl<C: CryptoPrimatives> Sessions<C> {
         &mut self,
         socket: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<Message<'m>, Error> {
+    ) -> Result<Message<'m, C>, Error> {
         unsafe_log!("[{socket:?}] received packet");
 
         // For optimisation purposes, we want to assume the message is 16-byte aligned.
@@ -671,7 +710,7 @@ impl<C: CryptoPrimatives> Sessions<C> {
         let (msg_type, _) =
             little_endian::U32::ref_from_prefix(msg).map_err(|_| Error::InvalidMessage)?;
         match msg_type.get() {
-            MSG_FIRST => self.handle_handshake_init(socket, msg).map(Message::Write),
+            MSG_FIRST => self.handle_handshake_init(socket, msg),
             MSG_SECOND => self.handle_handshake_resp(socket, msg),
             MSG_COOKIE => self.handle_cookie(msg).map(|_| Message::Noop),
             MSG_DATA => self
@@ -747,13 +786,14 @@ mod tests {
     use tai64::Tai64N;
     use zerocopy::IntoBytes;
 
-    use crate::{Config, PeerId, RateLimitParams, Sessions};
+    use crate::protocol_tests::{receive_handshake, start};
+    use crate::{Config, Event, PeerId, RateLimitParams, Sessions};
 
     #[test]
     fn configured_counter_retains_the_packet_threshold() {
         let mut rng = StdRng::seed_from_u64(123);
-        let config =
-            Config::new(StaticPrivateKey([7; 32])).with_rate_limit_params(RateLimitParams {
+        let config = Config::new(CryptoCore::x25519_pubkey(&StaticPrivateKey([7; 32])))
+            .with_rate_limit_params(RateLimitParams {
                 // One bucket and one row: distinct IPs deliberately collide.
                 epsilon: 3.0,
                 delta: 0.5,
@@ -773,13 +813,13 @@ mod tests {
     }
 
     fn session_with_peer(
-        secret_key: StaticPrivateKey,
+        secret_key: &StaticPrivateKey,
         peer_public_key: PublicKey,
         preshared_key: Key,
         endpoint: SocketAddr,
     ) -> (PeerId, Sessions) {
         let peer = StaticPeerConfig::new(peer_public_key, Some(preshared_key), Some(endpoint));
-        let mut config = Config::new(secret_key);
+        let mut config = Config::new(CryptoCore::x25519_pubkey(secret_key));
         let id = config.insert_peer(peer);
         let session = Sessions::new(config, &mut OsRng.unwrap_err());
         // Initialize protocol time before generating handshake timestamps.
@@ -801,33 +841,38 @@ mod tests {
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
-        let (peer_r, mut sessions_i) = session_with_peer(ssk_i, spk_r, psk, server_addr);
-        let (peer_i, mut sessions_r) = session_with_peer(ssk_r, spk_i, psk, client_addr);
+        let (peer_r, mut sessions_i) = session_with_peer(&ssk_i, spk_r, psk, server_addr);
+        let (peer_i, mut sessions_r) = session_with_peer(&ssk_r, spk_i, psk, client_addr);
 
         let mut buf = Box::new(AlignedPacket([0; 256]));
 
         let mut msg = *b"Hello, World!\0\0\0";
 
         // try wrap the message - get back handshake message to send
-        let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
-            crate::SendMessage::Maintenance(m) => m,
-            crate::SendMessage::Data(_, _) => panic!("expecting handshake"),
-        };
+        let m = start(&mut sessions_i, peer_r, &ssk_i);
 
         // send handshake to server
         let response_buf = {
             let handshake_buf = &mut buf.0[..m.data().len()];
             handshake_buf.copy_from_slice(m.data());
-            match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
-                crate::Message::Write(buf) => buf,
+            match receive_handshake(&mut sessions_r, client_addr, handshake_buf, &ssk_r).unwrap() {
+                Event::Write(message) => message,
                 _ => panic!("expecting write"),
             }
         };
 
         // send the handshake response to the client
         let encryptor = {
-            match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-                crate::Message::HandshakeComplete(encryptor) => encryptor,
+            buf.0[..response_buf.data().len()].copy_from_slice(response_buf.data());
+            match receive_handshake(
+                &mut sessions_i,
+                server_addr,
+                &mut buf.0[..response_buf.data().len()],
+                &ssk_i,
+            )
+            .unwrap()
+            {
+                Event::HandshakeComplete(encryptor) => encryptor,
                 _ => panic!("expecting noop"),
             }
         };
@@ -868,26 +913,31 @@ mod tests {
         let mut psk = Key::default();
         OsRng.unwrap_err().fill_bytes(&mut psk);
 
-        let (peer_r, mut sessions_i) = session_with_peer(ssk_i, spk_r, psk, server_addr);
-        let (peer_i, mut sessions_r) = session_with_peer(ssk_r, spk_i, psk, client_addr);
+        let (peer_r, mut sessions_i) = session_with_peer(&ssk_i, spk_r, psk, server_addr);
+        let (peer_i, mut sessions_r) = session_with_peer(&ssk_r, spk_i, psk, client_addr);
 
         let mut buf = Box::new(AlignedPacket([0; 256]));
         let mut msg = *b"Hello, World!\0\0\0";
 
-        let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
-            crate::SendMessage::Maintenance(m) => m,
-            _ => panic!("expecting handshake"),
-        };
+        let m = start(&mut sessions_i, peer_r, &ssk_i);
         let response_buf = {
             let handshake_buf = &mut buf.0[..m.data().len()];
             handshake_buf.copy_from_slice(m.data());
-            match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
-                crate::Message::Write(buf) => buf,
+            match receive_handshake(&mut sessions_r, client_addr, handshake_buf, &ssk_r).unwrap() {
+                Event::Write(message) => message,
                 _ => panic!("expecting write"),
             }
         };
-        let encryptor = match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-            crate::Message::HandshakeComplete(e) => e,
+        buf.0[..response_buf.data().len()].copy_from_slice(response_buf.data());
+        let encryptor = match receive_handshake(
+            &mut sessions_i,
+            server_addr,
+            &mut buf.0[..response_buf.data().len()],
+            &ssk_i,
+        )
+        .unwrap()
+        {
+            Event::HandshakeComplete(e) => e,
             _ => panic!("expecting handshake complete"),
         };
         let data_msg = {
@@ -910,7 +960,7 @@ mod tests {
         let mut reply = *b"hi back\0\0\0\0\0\0\0\0\0";
         match sessions_r.send_message(peer_i, &mut reply).unwrap() {
             crate::SendMessage::Data(addr, _) => assert_eq!(addr, client_addr),
-            crate::SendMessage::Maintenance(m) => assert_eq!(m.to(), client_addr),
+            crate::SendMessage::Handshake(_) => panic!("expected established transport"),
         }
     }
 
@@ -929,13 +979,13 @@ mod tests {
         let now = Tai64N::UNIX_EPOCH;
 
         let peer = StaticPeerConfig::new(spk_r, Some(psk), Some(server_addr));
-        let mut config = Config::new(ssk_i);
+        let mut config = Config::new(CryptoCore::x25519_pubkey(&ssk_i));
         let peer_r = config.insert_peer(peer);
         let mut sessions_i = Sessions::new(config, &mut rng);
         sessions_i.turn(now, &mut rng);
 
         let peer = StaticPeerConfig::new(spk_i, Some(psk), Some(client_addr));
-        let mut config = Config::new(ssk_r);
+        let mut config = Config::new(CryptoCore::x25519_pubkey(&ssk_r));
         let peer_i = config.insert_peer(peer);
         let mut sessions_r = Sessions::new(config, &mut rng);
         sessions_r.turn(now, &mut rng);
@@ -945,10 +995,7 @@ mod tests {
         let mut msg = *b"Hello, World!\0\0\0";
 
         // try wrap the message - get back handshake message to send
-        let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
-            crate::SendMessage::Maintenance(m) => m,
-            crate::SendMessage::Data(_, _) => panic!("expecting handshake"),
-        };
+        let m = start(&mut sessions_i, peer_r, &ssk_i);
 
         insta::assert_debug_snapshot!(m.data());
 
@@ -956,18 +1003,26 @@ mod tests {
         let response_buf = {
             let handshake_buf = &mut buf.0[..m.data().len()];
             handshake_buf.copy_from_slice(m.data());
-            match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
-                crate::Message::Write(buf) => buf,
+            match receive_handshake(&mut sessions_r, client_addr, handshake_buf, &ssk_r).unwrap() {
+                Event::Write(message) => message,
                 _ => panic!("expecting write"),
             }
         };
 
-        insta::assert_debug_snapshot!(response_buf);
+        insta::assert_debug_snapshot!(response_buf.data());
 
         // send the handshake response to the client
         let encryptor = {
-            match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-                crate::Message::HandshakeComplete(encryptor) => encryptor,
+            buf.0[..response_buf.data().len()].copy_from_slice(response_buf.data());
+            match receive_handshake(
+                &mut sessions_i,
+                server_addr,
+                &mut buf.0[..response_buf.data().len()],
+                &ssk_i,
+            )
+            .unwrap()
+            {
+                Event::HandshakeComplete(encryptor) => encryptor,
                 _ => panic!("expecting noop"),
             }
         };
