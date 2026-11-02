@@ -98,6 +98,47 @@ Custom providers implement `rustyguard_crypto::CryptoPrimatives` and use the sam
 typed constructors. With both built-in features disabled, an explicit provider
 is required. Selection uses static dispatch and adds no provider allocation.
 
+### Caller-driven static-key agreement
+
+The crypto crate exposes owned DH requests so the caller can keep its long-term
+private key or HSM handle entirely outside Rustyguard. Each request provides
+`peer_key()` and consumes itself in `complete(SharedSecret)`. The caller decides
+whether agreement runs inline, is queued, or awaits a device; no key trait,
+future type, executor or device error is imposed by the library.
+
+Receiving an initiation has two dependent agreements. For example, caller code
+can await its own device between steps:
+
+```rust
+let request = DecryptHandshakeInit::<RustCrypto>::new(
+    packet, HandshakeState::default(), &local_public_key,
+);
+let bytes = device.agree(request.peer_key()).await?;
+let request = request.complete(SharedSecret::new(bytes)?)?;
+let bytes = device.agree(request.peer_key()).await?;
+let initiation = request.complete(SharedSecret::new(bytes)?)?;
+```
+
+`EncryptHandshakeInit` prepares outgoing initiations, and `DecryptHandshakeResp`
+handles responses. Requests own their packet, transcript and required peer
+snapshots; they borrow no key, configuration or receive buffer while waiting.
+`SharedSecret` rejects all-zero output and clears its own bytes on drop. Dropping
+an unfinished request clears its transcript; cancelling hardware work remains
+the caller's responsibility. The authenticated initiation owns its transcript;
+after checking its peer and timestamp, consume `initiation.respond(...)` to produce the response and final
+transcript. These state transitions are the handshake API. Core, tests and
+benchmarks drive the same states, with core doing its software DH inline.
+Ephemeral DH and packet protection still use C.
+
+These are low-level operations. Before starting device work, verify admission
+with `HasMac::verify_with`, using a MAC1 key cached from the local public key via
+`mac1_key_with`. The first incoming DH step exposes only a claimed identity;
+check the known peer, authenticated timestamp ordering and live job before
+installing completed results. The session engine still needs external
+pending-work limits, expiry and stale-completion rejection in a separate integration step.
+Response candidates own a snapshot of the outstanding initiation, so a failed
+attempt leaves that initiation available for a later valid response.
+
 ## Project TODO:
 
 - [ ] Overload detection for DDoS mitigation

@@ -1,9 +1,50 @@
 use super::*;
 use rand::{rngs::StdRng, SeedableRng};
-use rustyguard_crypto::{encrypt_handshake_init, CryptoPrimatives};
+use rustyguard_crypto::{CryptoPrimatives, EncryptHandshakeInit, SharedSecret};
 
 const CLIENT_ADDR: &str = "127.0.0.1:1000";
 const SERVER_ADDR: &str = "127.0.0.1:2000";
+
+#[test]
+fn invalid_response_preserves_the_outstanding_handshake() {
+    use rustyguard_crypto::HasMac;
+    let (mut client, mut server, cp, sp) = pair();
+    let initiation = match client.send_message(cp, &mut [0; 16]).unwrap() {
+        SendMessage::Maintenance(message) => message.data().to_vec(),
+        _ => panic!("expected initiation"),
+    };
+    let mut packet = Packet([0; 256]);
+    packet.0[..initiation.len()].copy_from_slice(&initiation);
+    let response = match server
+        .recv_message(
+            CLIENT_ADDR.parse().unwrap(),
+            &mut packet.0[..initiation.len()],
+        )
+        .unwrap()
+    {
+        Message::Write(message) => message.to_vec(),
+        _ => panic!("expected response"),
+    };
+    let mut invalid = rustyguard_types::HandshakeResp::read_from_bytes(&response).unwrap();
+    invalid.empty.tag.0[0] ^= 1;
+    invalid.mac1 = invalid.compute_mac1::<CryptoCore>(&client.config.static_.mac1_key);
+    let bytes = invalid.as_bytes();
+    packet.0[..bytes.len()].copy_from_slice(bytes);
+    assert!(matches!(
+        client.recv_message(SERVER_ADDR.parse().unwrap(), &mut packet.0[..bytes.len()],),
+        Err(Error::DecryptionError)
+    ));
+    packet.0[..response.len()].copy_from_slice(&response);
+    assert!(matches!(
+        client.recv_message(
+            SERVER_ADDR.parse().unwrap(),
+            &mut packet.0[..response.len()],
+        ),
+        Ok(Message::HandshakeComplete(_))
+    ));
+    exchange_data(&mut client, cp, &mut server, CLIENT_ADDR);
+    exchange_data(&mut server, sp, &mut client, SERVER_ADDR);
+}
 
 #[repr(align(16))]
 struct Packet([u8; 256]);
@@ -265,9 +306,9 @@ fn initiation_timestamps_must_strictly_increase() {
     let (client, mut server, cp, sp) = pair();
     let mut rng = StdRng::seed_from_u64(456);
     for (seconds, accepted) in [(1000, true), (999, false), (1000, false), (1001, true)] {
-        let initiation = encrypt_handshake_init(
-            &mut HandshakeState::default(),
-            &client.config.static_,
+        let request = EncryptHandshakeInit::<CryptoCore>::new(
+            HandshakeState::default(),
+            &client.config.static_.public_key,
             &client.config.peers[cp],
             &EphemeralPrivateKey::generate(&mut rng),
             Tai64N(Tai64(seconds), 0),
@@ -275,6 +316,11 @@ fn initiation_timestamps_must_strictly_increase() {
             None,
         )
         .unwrap();
+        let secret = SharedSecret::new(
+            CryptoCore::x25519(&client.config.static_.private_key, &request.peer_key()).unwrap(),
+        )
+        .unwrap();
+        let (initiation, _) = request.complete(secret);
         let mut packet = Packet([0; 256]);
         let bytes = initiation.as_bytes();
         packet.0[..bytes.len()].copy_from_slice(bytes);
