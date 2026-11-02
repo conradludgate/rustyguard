@@ -60,6 +60,7 @@ impl<C: CryptoPrimatives> Sessions<C> {
             // the mac1 was valid, but we need a valid mac2 as well.
             ControlFlow::Break(cookie) => {
                 // cookie message is always smaller than the initial message
+                drop(state_ref);
                 return Ok(self.write_cookie_message(
                     init_msg.mac1,
                     init_msg.sender.get(),
@@ -158,12 +159,13 @@ impl<C: CryptoPrimatives> Sessions<C> {
         )? {
             // cookie message is always smaller than the initial message
             ControlFlow::Break(cookie) => {
+                drop(state_ref);
                 return Ok(Message::Write(self.write_cookie_message(
                     resp_msg.mac1,
                     resp_msg.sender.get(),
                     cookie,
                     msg,
-                )))
+                )));
             }
             ControlFlow::Continue(msg) => msg,
         };
@@ -311,6 +313,7 @@ pub(crate) fn new_handshake<C: CryptoPrimatives>(
         sender,
         peer.cookie.as_ref(),
     )?;
+    peer.last_sent_mac1 = msg.mac1;
 
     state.timers.push(TimerEntry {
         time: state.now + REKEY_TIMEOUT,
