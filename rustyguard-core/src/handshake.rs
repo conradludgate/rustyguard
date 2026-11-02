@@ -5,8 +5,8 @@ use crate::time::{TimerEntry, TimerEntryType};
 use alloc::boxed::Box;
 use rand_core::RngCore;
 use rustyguard_crypto::{
-    decrypt_cookie, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
-    CryptoCore, EphemeralPrivateKey, HandshakeState, HasMac,
+    decrypt_cookie_with, decrypt_handshake_init, decrypt_handshake_resp, encrypt_handshake_resp,
+    CryptoPrimatives, EphemeralPrivateKey, HandshakeState, HasMac,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
@@ -31,7 +31,7 @@ macro_rules! allocate_session {
     }};
 }
 
-impl Sessions {
+impl<C: CryptoPrimatives> Sessions<C> {
     #[inline(never)]
     pub(crate) fn handle_handshake_init<'m>(
         &self,
@@ -97,7 +97,7 @@ impl Sessions {
         // complete handshake
         let esk_r = EphemeralPrivateKey::generate(&mut state.rng);
 
-        let response = encrypt_handshake_resp(
+        let response = encrypt_handshake_resp::<C>(
             &mut hs,
             data,
             &esk_r,
@@ -110,7 +110,7 @@ impl Sessions {
         peer.current_transport = Some(session_id);
 
         // generate the encryption keys
-        let (encrypt, decrypt) = hs.split::<CryptoCore>(false);
+        let (encrypt, decrypt) = hs.split::<C>(false);
         let transport = SessionTransport {
             receiver: init_msg.sender.get(),
             encrypt,
@@ -204,7 +204,7 @@ impl Sessions {
 
         peer.endpoint = Some(addr);
 
-        let (encrypt, decrypt) = hs.state.split::<CryptoCore>(true);
+        let (encrypt, decrypt) = hs.state.split::<C>(true);
         hs.zeroize();
 
         session.state = SessionState::Transport(SessionTransport {
@@ -244,7 +244,7 @@ impl Sessions {
         let peer_config = &self.config.peers[session.peer];
         let peer = &mut state.peers[session.peer];
 
-        let cookie = decrypt_cookie(
+        let cookie = decrypt_cookie_with::<C>(
             &mut cookie_msg.cookie,
             &peer_config.cookie_key,
             &cookie_msg.nonce,
@@ -257,7 +257,10 @@ impl Sessions {
     }
 }
 
-pub(crate) fn new_handshake(sessions: &Sessions, peer_idx: PeerId) -> Result<HandshakeInit, Error> {
+pub(crate) fn new_handshake<C: CryptoPrimatives>(
+    sessions: &Sessions<C>,
+    peer_idx: PeerId,
+) -> Result<HandshakeInit, Error> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let state = &mut *state_ref;
     let peer_config = &sessions.config.peers[peer_idx];

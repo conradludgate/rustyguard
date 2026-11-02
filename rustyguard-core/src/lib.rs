@@ -40,9 +40,9 @@ use hashbrown::{HashMap, HashTable};
 use rand_chacha::ChaCha12Rng as StdRng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rustyguard_crypto::{
-    encrypt_cookie, CookieState, CryptoCore, CryptoError, DecryptionKey, EncryptionKey,
-    EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig, StaticPeerConfig,
-    REJECT_AFTER_MESSAGES,
+    encrypt_cookie_with, CookieState, CryptoCore, CryptoError, CryptoPrimatives, DecryptionKey,
+    EncryptionKey, EphemeralPrivateKey, HandshakeState, Mac, StaticInitiatorConfig,
+    StaticPeerConfig, REJECT_AFTER_MESSAGES,
 };
 use rustyguard_types::{
     Cookie, CookieMessage, HandshakeInit, MSG_COOKIE, MSG_DATA, MSG_FIRST, MSG_SECOND,
@@ -83,8 +83,8 @@ impl PeerId {
     }
 }
 
-pub struct Config {
-    static_: StaticInitiatorConfig,
+pub struct Config<C = CryptoCore> {
+    static_: StaticInitiatorConfig<C>,
 
     /// This hashtable identifies peers by their public key.
     ///
@@ -124,8 +124,15 @@ impl<P> PeerList<P> {
 
 impl Config {
     pub fn new(private_key: StaticPrivateKey) -> Self {
+        Self::with_crypto(private_key)
+    }
+}
+
+impl<C: CryptoPrimatives> Config<C> {
+    /// Construct a configuration with a statically selected crypto provider.
+    pub fn with_crypto(private_key: StaticPrivateKey) -> Self {
         Config {
-            static_: StaticInitiatorConfig::new(private_key),
+            static_: StaticInitiatorConfig::<C>::with_crypto(private_key),
             // TODO(conrad): seed this
             pubkey_hasher: FixedState::with_seed(0),
             peers_by_pubkey: HashTable::default(),
@@ -262,7 +269,7 @@ impl PeerState {
         }
     }
 
-    fn encrypt_message(
+    fn encrypt_message<C: CryptoPrimatives>(
         &mut self,
         sessions: &mut SessionMap,
         payload: &mut [u8],
@@ -277,10 +284,10 @@ impl PeerState {
             return None;
         }
 
-        Some(self.force_encrypt(session, payload, now))
+        Some(self.force_encrypt::<C>(session, payload, now))
     }
 
-    fn force_encrypt(
+    fn force_encrypt<C: CryptoPrimatives>(
         &mut self,
         session: &mut Session,
         payload: &mut [u8],
@@ -296,7 +303,7 @@ impl PeerState {
             unreachable!()
         };
         let n = ts.encrypt.counter();
-        let tag = ts.encrypt.encrypt::<CryptoCore>(payload);
+        let tag = ts.encrypt.encrypt::<C>(payload);
 
         session.sent = now;
         let header = DataHeader {
@@ -321,7 +328,11 @@ pub struct MessageEncrypter(u32);
 impl MessageEncrypter {
     /// Returns `None` if the session has been removed/rotated or has already
     /// crossed REJECT_AFTER_{MESSAGES,TIME} since the encrypter was issued.
-    pub fn encrypt(self, sessions: &Sessions, payload: &mut [u8]) -> Option<EncryptedMetadata> {
+    pub fn encrypt<C: CryptoPrimatives>(
+        self,
+        sessions: &Sessions<C>,
+        payload: &mut [u8],
+    ) -> Option<EncryptedMetadata> {
         let mut state_ref = sessions.dynamic.borrow_mut();
         let state = &mut *state_ref;
 
@@ -335,7 +346,7 @@ impl MessageEncrypter {
         }
         let peer = &mut state.peers[session.peer];
 
-        Some(peer.force_encrypt(session, payload, now))
+        Some(peer.force_encrypt::<C>(session, payload, now))
     }
 
     /// Encrypts the payload and attaches the wireguard framing in-place.
@@ -345,7 +356,11 @@ impl MessageEncrypter {
     ///
     /// Returns `false` (with `buffer` left in an unspecified state) if the
     /// session has expired between issuance and use.
-    pub fn encrypt_and_frame(self, sessions: &Sessions, buffer: &mut [u8]) -> bool {
+    pub fn encrypt_and_frame<C: CryptoPrimatives>(
+        self,
+        sessions: &Sessions<C>,
+        buffer: &mut [u8],
+    ) -> bool {
         let len = buffer.len();
         let payload = &mut buffer[16..len - 16];
         let Some(meta) = self.encrypt(sessions, payload) else {
@@ -362,8 +377,8 @@ type Tai64NBytes = [u8; 12];
 // and don't need a high-quality hasher
 type SessionMap = HashMap<u32, Box<Session>, FixedState>;
 
-pub struct Sessions {
-    config: Config,
+pub struct Sessions<C = CryptoCore> {
+    config: Config<C>,
     dynamic: RefCell<DynamicState>,
 }
 
@@ -384,7 +399,7 @@ pub struct DynamicState {
 }
 
 impl DynamicState {
-    fn new(config: &Config, rng: &mut impl CryptoRng) -> Self {
+    fn new<C>(config: &Config<C>, rng: &mut impl CryptoRng) -> Self {
         Self {
             cookie: CookieState::new(rng),
             last_reseed: Tai64N(Tai64(0), 0),
@@ -410,8 +425,8 @@ impl DynamicState {
     }
 }
 
-impl Sessions {
-    pub fn new(config: Config, rng: &mut impl CryptoRng) -> Self {
+impl<C: CryptoPrimatives> Sessions<C> {
+    pub fn new(config: Config<C>, rng: &mut impl CryptoRng) -> Self {
         Self {
             dynamic: RefCell::new(DynamicState::new(&config, rng)),
             config,
@@ -542,7 +557,7 @@ impl DynamicState {
     }
 }
 
-impl Sessions {
+impl<C: CryptoPrimatives> Sessions<C> {
     fn write_cookie_message<'b>(
         &self,
         mac1: Mac,
@@ -556,7 +571,8 @@ impl Sessions {
         // As I said above, this should be parallisable with an rng per thread.
         let mut nonce = [0u8; 24];
         self.dynamic.borrow_mut().rng.fill_bytes(&mut nonce);
-        let cookie = encrypt_cookie(cookie, &self.config.static_.cookie_key, &nonce, &mac1);
+        let cookie =
+            encrypt_cookie_with::<C>(cookie, &self.config.static_.cookie_key, &nonce, &mac1);
 
         let msg = CookieMessage {
             _type: little_endian::U32::new(MSG_COOKIE),
@@ -580,7 +596,7 @@ impl Sessions {
             return Err(Error::Rejected);
         };
 
-        match peer.encrypt_message(&mut state.peers_by_session, payload, state.now) {
+        match peer.encrypt_message::<C>(&mut state.peers_by_session, payload, state.now) {
             // we encrypted the message in-place in payload.
             Some(metadata) => {
                 let session_id = peer.current_transport.unwrap();
@@ -687,7 +703,7 @@ impl Sessions {
         // WireGuard whitepaper §6.5: only update peer.endpoint after AEAD auth.
         let payload = ts
             .decrypt
-            .decrypt::<CryptoCore>(header.counter.get(), payload_and_tag)?;
+            .decrypt::<C>(header.counter.get(), payload_and_tag)?;
 
         let peer_idx = session.peer;
         let needs_keepalive =

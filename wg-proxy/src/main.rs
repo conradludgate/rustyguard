@@ -217,7 +217,8 @@ impl State {
                     let peer = peers.iter().fold(
                         CtOption::new(0, Choice::from(0)),
                         |acc, (peer_idx, peer)| {
-                            let mac1 = init.compute_mac1(&peer.mac1_key);
+                            let mac1 =
+                                init.compute_mac1::<rustyguard_crypto::CryptoCore>(&peer.mac1_key);
 
                             acc.or_else(|| {
                                 CtOption::new(
@@ -240,11 +241,14 @@ impl State {
                 // mac2 was sent, let's check it and replace it.
                 if init.mac2 != [0; 16] || overloaded {
                     let cookie = cookie_state.read().unwrap().new_cookie(addr);
-                    if init.verify_mac2(&cookie).is_err() {
+                    if init
+                        .verify_mac2::<rustyguard_crypto::CryptoCore>(&cookie)
+                        .is_err()
+                    {
                         return;
                     }
                     if let Some(cookie) = &last_sent_cookie {
-                        init.mac2 = init.compute_mac2(cookie);
+                        init.mac2 = init.compute_mac2::<rustyguard_crypto::CryptoCore>(cookie);
                     }
                 }
 

@@ -1,6 +1,6 @@
 #![no_std]
 
-use core::{net::SocketAddr, ops::ControlFlow};
+use core::{marker::PhantomData, net::SocketAddr, ops::ControlFlow};
 
 pub use prim::{DecryptionKey, EncryptionKey, HandshakeState, Key, Mac};
 use prim::{Encrypted, LABEL_COOKIE, LABEL_MAC1};
@@ -50,33 +50,63 @@ pub enum CryptoError {
     Rejected,
 }
 
+/// Decrypt a cookie using the default crypto provider.
 pub fn decrypt_cookie<'c>(
     cookie: &'c mut EncryptedCookie,
     key: &Key,
     nonce: &[u8; 24],
     aad: &[u8],
 ) -> Result<&'c mut Cookie, CryptoError> {
-    CryptoCore::xchacha20poly1305_dec(key, nonce, aad, &mut cookie.msg.0, &cookie.tag.0)?;
+    decrypt_cookie_with::<CryptoCore>(cookie, key, nonce, aad)
+}
+
+/// Encrypt a cookie using the default crypto provider.
+pub fn encrypt_cookie(cookie: Cookie, key: &Key, nonce: &[u8; 24], aad: &[u8]) -> EncryptedCookie {
+    encrypt_cookie_with::<CryptoCore>(cookie, key, nonce, aad)
+}
+
+/// Derive a peer's MAC1 key using the default crypto provider.
+pub fn mac1_key(spk: &[u8]) -> Key {
+    mac1_key_with::<CryptoCore>(spk)
+}
+
+/// Derive a peer's cookie key using the default crypto provider.
+pub fn cookie_key(spk: &[u8]) -> Key {
+    cookie_key_with::<CryptoCore>(spk)
+}
+
+pub fn decrypt_cookie_with<'c, C: CryptoPrimatives>(
+    cookie: &'c mut EncryptedCookie,
+    key: &Key,
+    nonce: &[u8; 24],
+    aad: &[u8],
+) -> Result<&'c mut Cookie, CryptoError> {
+    C::xchacha20poly1305_dec(key, nonce, aad, &mut cookie.msg.0, &cookie.tag.0)?;
 
     Ok(&mut cookie.msg)
 }
 
-pub fn encrypt_cookie(cookie: Cookie, key: &Key, nonce: &[u8; 24], aad: &[u8]) -> EncryptedCookie {
+pub fn encrypt_cookie_with<C: CryptoPrimatives>(
+    cookie: Cookie,
+    key: &Key,
+    nonce: &[u8; 24],
+    aad: &[u8],
+) -> EncryptedCookie {
     let mut out = EncryptedCookie {
         msg: cookie,
         tag: Tag([0; 16]),
     };
 
-    CryptoCore::xchacha20poly1305_enc(key, nonce, aad, &mut out.msg.0, &mut out.tag.0);
+    C::xchacha20poly1305_enc(key, nonce, aad, &mut out.msg.0, &mut out.tag.0);
 
     out
 }
 
-pub fn mac1_key(spk: &[u8]) -> Key {
-    CryptoCore::blake2s_hash(&LABEL_MAC1, spk)
+pub fn mac1_key_with<C: CryptoPrimatives>(spk: &[u8]) -> Key {
+    C::blake2s_hash(&LABEL_MAC1, spk)
 }
-pub fn cookie_key(spk: &[u8]) -> Key {
-    CryptoCore::blake2s_hash(&LABEL_COOKIE, spk)
+pub fn cookie_key_with<C: CryptoPrimatives>(spk: &[u8]) -> Key {
+    C::blake2s_hash(&LABEL_COOKIE, spk)
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -95,7 +125,13 @@ impl CookieState {
         rng.fill_bytes(&mut self.key);
     }
 
+    /// Create an address-bound cookie using the default provider.
     pub fn new_cookie(&self, addr: SocketAddr) -> Cookie {
+        self.new_cookie_with::<CryptoCore>(addr)
+    }
+
+    /// Create an address-bound cookie using a selected provider.
+    pub fn new_cookie_with<C: CryptoPrimatives>(&self, addr: SocketAddr) -> Cookie {
         // there's no specified encoding here - it just needs to contain the IP address and port :shrug:
         let mut a = [0; 18];
         match addr.ip() {
@@ -103,7 +139,7 @@ impl CookieState {
             core::net::IpAddr::V6(ipv6) => a[..16].copy_from_slice(&ipv6.octets()[..]),
         }
         a[16..].copy_from_slice(&addr.port().to_le_bytes()[..]);
-        Cookie(CryptoCore::blake2s_mac(&self.key, &a))
+        Cookie(C::blake2s_mac(&self.key, &a))
     }
 }
 
@@ -115,9 +151,9 @@ impl CookieState {
 /// overloaded and second MAC is invalid, a CookieReply is sent to the client,
 /// which contains an encrypted key that can be used to re-sign the handshake later.
 pub trait HasMac: FromBytes + IntoBytes + Sized {
-    fn verify<'m>(
+    fn verify<'m, C: CryptoPrimatives>(
         &'m mut self,
-        config: &StaticInitiatorConfig,
+        config: &StaticInitiatorConfig<C>,
         overload: bool,
         cookie: &CookieState,
         addr: SocketAddr,
@@ -127,14 +163,14 @@ pub trait HasMac: FromBytes + IntoBytes + Sized {
         // Thus, can handle ~2 million handshakes per second.
         // This is currently single threaded.
         // TODO(conrad): need to make the rejection multi-threaded.
-        self.verify_mac1(&config.mac1_key)?;
+        self.verify_mac1::<C>(&config.mac1_key)?;
 
         if overload {
             // Will be roughly twice as slow as verify_mac1. 750ns on my M2 Max.
             // If the server is overloaded, this is good for rejecting DDoS attacks
             // as it requires a round trip from the sender.
-            let cookie = cookie.new_cookie(addr);
-            if self.verify_mac2(&cookie).is_err() {
+            let cookie = cookie.new_cookie_with::<C>(addr);
+            if self.verify_mac2::<C>(&cookie).is_err() {
                 return Ok(ControlFlow::Break(cookie));
             }
         }
@@ -142,8 +178,8 @@ pub trait HasMac: FromBytes + IntoBytes + Sized {
         Ok(ControlFlow::Continue(self))
     }
 
-    fn verify_mac1(&self, mac1_key: &Key) -> Result<(), CryptoError> {
-        let actual_mac1 = self.compute_mac1(mac1_key);
+    fn verify_mac1<C: CryptoPrimatives>(&self, mac1_key: &Key) -> Result<(), CryptoError> {
+        let actual_mac1 = self.compute_mac1::<C>(mac1_key);
         if &actual_mac1 != self.get_mac1() {
             unsafe_log!("invalid mac1");
             Err(CryptoError::Rejected)
@@ -153,8 +189,8 @@ pub trait HasMac: FromBytes + IntoBytes + Sized {
         }
     }
 
-    fn verify_mac2(&self, cookie: &Cookie) -> Result<(), CryptoError> {
-        let actual_mac2 = self.compute_mac2(cookie);
+    fn verify_mac2<C: CryptoPrimatives>(&self, cookie: &Cookie) -> Result<(), CryptoError> {
+        let actual_mac2 = self.compute_mac2::<C>(cookie);
         if &actual_mac2 != self.get_mac2() {
             unsafe_log!("invalid mac2");
             Err(CryptoError::Rejected)
@@ -164,8 +200,8 @@ pub trait HasMac: FromBytes + IntoBytes + Sized {
         }
     }
 
-    fn compute_mac1(&self, mac1_key: &Key) -> Mac;
-    fn compute_mac2(&self, cookie: &Cookie) -> Mac;
+    fn compute_mac1<C: CryptoPrimatives>(&self, mac1_key: &Key) -> Mac;
+    fn compute_mac2<C: CryptoPrimatives>(&self, cookie: &Cookie) -> Mac;
     fn get_mac1(&self) -> &Mac;
     fn get_mac2(&self) -> &Mac;
 }
@@ -182,16 +218,16 @@ macro_rules! mac_protected {
         const _: () = assert!(core::mem::offset_of!($i, mac2) + 16 == core::mem::size_of::<$i>());
 
         impl HasMac for $i {
-            fn compute_mac1(&self, mac1_key: &crate::Key) -> Mac {
+            fn compute_mac1<C: CryptoPrimatives>(&self, mac1_key: &crate::Key) -> Mac {
                 let offset = core::mem::offset_of!($i, mac1);
                 let bytes = self.as_bytes();
-                CryptoCore::blake2s_mac(mac1_key, &bytes[..offset])
+                C::blake2s_mac(mac1_key, &bytes[..offset])
             }
 
-            fn compute_mac2(&self, cookie: &Cookie) -> Mac {
+            fn compute_mac2<C: CryptoPrimatives>(&self, cookie: &Cookie) -> Mac {
                 let offset = core::mem::offset_of!($i, mac2);
                 let bytes = self.as_bytes();
-                CryptoCore::blake2s_mac(&cookie.0, &bytes[..offset])
+                C::blake2s_mac(&cookie.0, &bytes[..offset])
             }
 
             fn get_mac1(&self) -> &Mac {
@@ -234,7 +270,8 @@ pub struct StaticPeerConfig {
     pub endpoint: Option<SocketAddr>,
 }
 
-pub struct StaticInitiatorConfig {
+pub struct StaticInitiatorConfig<C = CryptoCore> {
+    _crypto: PhantomData<fn() -> C>,
     /// Our private key
     pub private_key: StaticPrivateKey,
     /// Cached public key, derived from the above private key
@@ -247,9 +284,18 @@ pub struct StaticInitiatorConfig {
 
 impl StaticPeerConfig {
     pub fn new(key: PublicKey, preshared_key: Option<Key>, endpoint: Option<SocketAddr>) -> Self {
+        Self::with_crypto::<CryptoCore>(key, preshared_key, endpoint)
+    }
+
+    /// Construct peer key caches using the selected crypto provider.
+    pub fn with_crypto<C: CryptoPrimatives>(
+        key: PublicKey,
+        preshared_key: Option<Key>,
+        endpoint: Option<SocketAddr>,
+    ) -> Self {
         Self {
-            mac1_key: mac1_key(&key.0),
-            cookie_key: cookie_key(&key.0),
+            mac1_key: mac1_key_with::<C>(&key.0),
+            cookie_key: cookie_key_with::<C>(&key.0),
             key,
             preshared_key: preshared_key.unwrap_or_default(),
             endpoint,
@@ -259,12 +305,20 @@ impl StaticPeerConfig {
 
 impl StaticInitiatorConfig {
     pub fn new(key: StaticPrivateKey) -> Self {
-        let public_key = CryptoCore::x25519_pubkey(&key);
+        Self::with_crypto(key)
+    }
+}
+
+impl<C: CryptoPrimatives> StaticInitiatorConfig<C> {
+    /// Construct the local identity using this configuration's crypto provider.
+    pub fn with_crypto(key: StaticPrivateKey) -> Self {
+        let public_key = C::x25519_pubkey(&key);
         Self {
-            mac1_key: mac1_key(&public_key.0),
-            cookie_key: cookie_key(&public_key.0),
+            mac1_key: mac1_key_with::<C>(&public_key.0),
+            cookie_key: cookie_key_with::<C>(&public_key.0),
             public_key,
             private_key: key,
+            _crypto: PhantomData,
         }
     }
 }
@@ -284,9 +338,9 @@ impl DecryptedHandshakeInit {
     }
 }
 
-pub fn encrypt_handshake_init(
+pub fn encrypt_handshake_init<C: CryptoPrimatives>(
     hs: &mut HandshakeState,
-    initiator: &StaticInitiatorConfig,
+    initiator: &StaticInitiatorConfig<C>,
     peer: &StaticPeerConfig,
     esk_i: &EphemeralPrivateKey,
     now: Tai64N,
@@ -301,29 +355,28 @@ pub fn encrypt_handshake_init(
     // -> e, es, s, ss
 
     // <- s:
-    let epk_i = CryptoCore::x25519_pubkey(&esk_i.0);
-    hs.mix_hash::<CryptoCore>(&peer.key.0);
+    let epk_i = C::x25519_pubkey(&esk_i.0);
+    hs.mix_hash::<C>(&peer.key.0);
 
     // -> e: ephemeral keypair generated by caller
-    hs.mix_hash::<CryptoCore>(&epk_i.0);
+    hs.mix_hash::<C>(&epk_i.0);
     // > In non-PSK handshakes, the "e" token in a pre-message pattern or message pattern
     // > always results in a call to MixHash(e.public_key).
     // > In a PSK handshake, all of these calls are followed by MixKey(e.public_key).
     // As an optimisation, we don't need the key, so mix_chain is more efficient.
-    hs.mix_chain::<CryptoCore>(&epk_i.0);
+    hs.mix_chain::<C>(&epk_i.0);
 
     // -> es:
-    let k = hs.mix_key_edh::<CryptoCore>(esk_i, &peer.key)?;
+    let k = hs.mix_key_edh::<C>(esk_i, &peer.key)?;
 
     // -> s:
-    let static_key =
-        EncryptedPublicKey::encrypt_and_hash::<CryptoCore>(initiator.public_key.0, hs, &k);
+    let static_key = EncryptedPublicKey::encrypt_and_hash::<C>(initiator.public_key.0, hs, &k);
 
     // -> ss:
-    let k = hs.mix_key_dh::<CryptoCore>(&initiator.private_key, &peer.key)?;
+    let k = hs.mix_key_dh::<C>(&initiator.private_key, &peer.key)?;
 
     // payload:
-    let timestamp = EncryptedTimestamp::encrypt_and_hash::<CryptoCore>(now.to_bytes(), hs, &k);
+    let timestamp = EncryptedTimestamp::encrypt_and_hash::<C>(now.to_bytes(), hs, &k);
 
     // build the message and protect with the MACs
     let mut msg = HandshakeInit {
@@ -335,55 +388,55 @@ pub fn encrypt_handshake_init(
         mac1: [0; 16],
         mac2: [0; 16],
     };
-    msg.mac1 = msg.compute_mac1(&peer.mac1_key);
+    msg.mac1 = msg.compute_mac1::<C>(&peer.mac1_key);
     if let Some(cookie) = cookie {
-        msg.mac2 = msg.compute_mac2(cookie);
+        msg.mac2 = msg.compute_mac2::<C>(cookie);
     }
 
     Ok(msg)
 }
 
-pub fn decrypt_handshake_init<'m>(
+pub fn decrypt_handshake_init<'m, C: CryptoPrimatives>(
     init: &'m mut HandshakeInit,
     hs: &mut HandshakeState,
-    receiver: &StaticInitiatorConfig,
+    receiver: &StaticInitiatorConfig<C>,
 ) -> Result<&'m mut DecryptedHandshakeInit, CryptoError> {
     // IKpsk2:
     // <- s
     // -> e, es, s, ss
 
     // <- s:
-    hs.mix_hash::<CryptoCore>(&receiver.public_key.0);
+    hs.mix_hash::<C>(&receiver.public_key.0);
 
     // -> e:
-    hs.mix_hash::<CryptoCore>(&init.ephemeral_key);
+    hs.mix_hash::<C>(&init.ephemeral_key);
     // > In non-PSK handshakes, the "e" token in a pre-message pattern or message pattern
     // > always results in a call to MixHash(e.public_key).
     // > In a PSK handshake, all of these calls are followed by MixKey(e.public_key).
     // As an optimisation, we don't need the key, so mix_chain is more efficient.
-    hs.mix_chain::<CryptoCore>(&init.ephemeral_key);
+    hs.mix_chain::<C>(&init.ephemeral_key);
 
     // -> es:
     let epk_i = PublicKey(init.ephemeral_key);
-    let k = hs.mix_key_dh::<CryptoCore>(&receiver.private_key, &epk_i)?;
+    let k = hs.mix_key_dh::<C>(&receiver.private_key, &epk_i)?;
 
     unsafe_log!("decrypting static key");
     // -> s:
-    let spk_i = init.static_key.decrypt_and_hash::<CryptoCore>(hs, &k)?;
+    let spk_i = init.static_key.decrypt_and_hash::<C>(hs, &k)?;
     let spk_i = PublicKey(*spk_i);
     unsafe_log!("decrypted public key {:?}", spk_i.0);
 
     // -> ss:
-    let k = hs.mix_key_dh::<CryptoCore>(&receiver.private_key, &spk_i)?;
+    let k = hs.mix_key_dh::<C>(&receiver.private_key, &spk_i)?;
 
     unsafe_log!("decrypting payload");
     // payload:
-    let _timestamp = *init.timestamp.decrypt_and_hash::<CryptoCore>(hs, &k)?;
+    let _timestamp = *init.timestamp.decrypt_and_hash::<C>(hs, &k)?;
 
     Ok(transmute_mut!(init))
 }
 
-pub fn encrypt_handshake_resp(
+pub fn encrypt_handshake_resp<C: CryptoPrimatives>(
     hs: &mut HandshakeState,
     data: &DecryptedHandshakeInit,
     esk_r: &EphemeralPrivateKey,
@@ -396,23 +449,23 @@ pub fn encrypt_handshake_resp(
 
     // <- e: ephemeral keypair generated by caller
     // wireguard goes off-spec here with mix-chain.
-    let epk_r = CryptoCore::x25519_pubkey(&esk_r.0);
-    hs.mix_chain::<CryptoCore>(&epk_r.0);
-    hs.mix_hash::<CryptoCore>(&epk_r.0);
+    let epk_r = C::x25519_pubkey(&esk_r.0);
+    hs.mix_chain::<C>(&epk_r.0);
+    hs.mix_hash::<C>(&epk_r.0);
 
     // <- ee
     let epk_i = PublicKey(data.0.ephemeral_key);
-    hs.mix_edh::<CryptoCore>(esk_r, &epk_i)?;
+    hs.mix_edh::<C>(esk_r, &epk_i)?;
 
     // <- se
     let spk_i = PublicKey(data.0.static_key.msg);
-    hs.mix_edh::<CryptoCore>(esk_r, &spk_i)?;
+    hs.mix_edh::<C>(esk_r, &spk_i)?;
 
     // <- psk
-    let k = hs.mix_key_and_hash::<CryptoCore>(&peer.preshared_key);
+    let k = hs.mix_key_and_hash::<C>(&peer.preshared_key);
 
     // payload:
-    let empty = EncryptedEmpty::encrypt_and_hash::<CryptoCore>([], hs, &k);
+    let empty = EncryptedEmpty::encrypt_and_hash::<C>([], hs, &k);
 
     // build the message and protect with the MACs
     let mut msg = HandshakeResp {
@@ -424,18 +477,18 @@ pub fn encrypt_handshake_resp(
         mac1: [0; 16],
         mac2: [0; 16],
     };
-    msg.mac1 = msg.compute_mac1(&peer.mac1_key);
+    msg.mac1 = msg.compute_mac1::<C>(&peer.mac1_key);
     if let Some(cookie) = cookie {
-        msg.mac2 = msg.compute_mac2(cookie);
+        msg.mac2 = msg.compute_mac2::<C>(cookie);
     }
 
     Ok(msg)
 }
 
-pub fn decrypt_handshake_resp(
+pub fn decrypt_handshake_resp<C: CryptoPrimatives>(
     resp: &mut HandshakeResp,
     hs: &mut HandshakeState,
-    initiator: &StaticInitiatorConfig,
+    initiator: &StaticInitiatorConfig<C>,
     peer: &StaticPeerConfig,
     esk_i: &EphemeralPrivateKey,
 ) -> Result<(), CryptoError> {
@@ -445,21 +498,21 @@ pub fn decrypt_handshake_resp(
     // <- e:
     // wireguard goes off-spec here with mix-chain.
     let epk_r = PublicKey(resp.ephemeral_key);
-    hs.mix_chain::<CryptoCore>(&epk_r.0);
-    hs.mix_hash::<CryptoCore>(&epk_r.0);
+    hs.mix_chain::<C>(&epk_r.0);
+    hs.mix_hash::<C>(&epk_r.0);
 
     // <- ee:
-    hs.mix_edh::<CryptoCore>(esk_i, &epk_r)?;
+    hs.mix_edh::<C>(esk_i, &epk_r)?;
 
     // <- se:
-    hs.mix_dh::<CryptoCore>(&initiator.private_key, &epk_r)?;
+    hs.mix_dh::<C>(&initiator.private_key, &epk_r)?;
 
     // <- psk:
-    let k = hs.mix_key_and_hash::<CryptoCore>(&peer.preshared_key);
+    let k = hs.mix_key_and_hash::<C>(&peer.preshared_key);
 
     unsafe_log!("decrypting payload");
     // payload:
-    resp.empty.decrypt_and_hash::<CryptoCore>(hs, &k)?;
+    resp.empty.decrypt_and_hash::<C>(hs, &k)?;
 
     Ok(())
 }
@@ -521,8 +574,8 @@ mod tests {
             encrypt_handshake_init(&mut hs1, &init_i, &peer_r, &esk_i, now, 1, Some(&cookie))
                 .unwrap();
 
-        init.verify_mac1(&init_r.mac1_key).unwrap();
-        init.verify_mac2(&cookie).unwrap();
+        init.verify_mac1::<CryptoCore>(&init_r.mac1_key).unwrap();
+        init.verify_mac2::<CryptoCore>(&cookie).unwrap();
 
         let mut hs2 = HandshakeState::default();
         let init = decrypt_handshake_init(&mut init, &mut hs2, &init_r).unwrap();
@@ -531,9 +584,10 @@ mod tests {
         assert_eq!(init.timestamp(), &now.to_bytes());
 
         let esk_r = EphemeralPrivateKey::generate(&mut rng);
-        let mut resp = encrypt_handshake_resp(&mut hs2, init, &esk_r, &peer_i, 2, None).unwrap();
+        let mut resp =
+            encrypt_handshake_resp::<CryptoCore>(&mut hs2, init, &esk_r, &peer_i, 2, None).unwrap();
 
-        resp.verify_mac1(&init_i.mac1_key).unwrap();
+        resp.verify_mac1::<CryptoCore>(&init_i.mac1_key).unwrap();
         insta::assert_debug_snapshot!(resp.empty.as_bytes());
 
         decrypt_handshake_resp(&mut resp, &mut hs1, &init_i, &peer_r, &esk_i).unwrap();
@@ -597,9 +651,10 @@ mod tests {
                 .unwrap();
 
         init.mac2[0] = 0;
-        init.verify_mac2(&cookie).unwrap_err();
+        init.verify_mac2::<CryptoCore>(&cookie).unwrap_err();
 
         init.mac1[0] = 0;
-        init.verify_mac1(&init_r.mac1_key).unwrap_err();
+        init.verify_mac1::<CryptoCore>(&init_r.mac1_key)
+            .unwrap_err();
     }
 }
