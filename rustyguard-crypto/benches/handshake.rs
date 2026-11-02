@@ -49,7 +49,7 @@ fn handshake(b: Bencher) {
         let mut hs = HandshakeState::default();
         let decrypted = decrypt_handshake_init(&mut msg, &mut hs, &config).unwrap();
         assert_eq!(decrypted.static_key().0, peer.key.0);
-        encrypt_handshake_resp(
+        encrypt_handshake_resp::<rustyguard_crypto::CryptoCore>(
             &mut hs,
             decrypted,
             &EphemeralPrivateKey::generate(&mut rng()),

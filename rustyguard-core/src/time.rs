@@ -1,5 +1,6 @@
 //! wireguard timers
 
+use rustyguard_crypto::CryptoPrimatives;
 use tai64::Tai64N;
 
 use crate::{
@@ -39,7 +40,7 @@ pub(crate) enum TimerEntryType {
     ExpireHandshake { session_id: u32 },
 }
 
-pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
+pub(crate) fn tick_timers<C: CryptoPrimatives>(sessions: &Sessions<C>) -> Option<MaintenanceMsg> {
     let mut state_ref = sessions.dynamic.borrow_mut();
     let mut state = &mut *state_ref;
 
@@ -128,7 +129,7 @@ pub(crate) fn tick_timers(sessions: &Sessions) -> Option<MaintenanceMsg> {
                         header,
                         tag,
                         payload_len: _,
-                    }) = peer.encrypt_message(&mut state.peers_by_session, &mut [], state.now)
+                    }) = peer.encrypt_message::<C>(&mut state.peers_by_session, &mut [], state.now)
                     else {
                         continue;
                     };
