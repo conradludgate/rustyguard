@@ -2,8 +2,8 @@ use core::net::SocketAddr;
 
 use divan::{black_box, Bencher};
 use rand::{rng, rngs::ThreadRng, RngCore};
-use rustyguard_core::{PublicKey, StaticPrivateKey, Tai64N};
-use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
+use rustyguard_core::{Event, Handshake, PublicKey, StaticPrivateKey, Tai64N};
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, SharedSecret, StaticPeerConfig};
 use tai64::Tai64;
 use zerocopy::IntoBytes;
 
@@ -18,14 +18,14 @@ fn session_with_peer(
     peer_public_key: PublicKey,
     preshared_key: Key,
     endpoint: SocketAddr,
-) -> (Sessions, PeerId) {
+) -> (Sessions, PeerId, StaticPrivateKey) {
     let peer = StaticPeerConfig::new(peer_public_key, Some(preshared_key), Some(endpoint));
-    let mut config = Config::new(secret_key);
+    let mut config = Config::new(CryptoCore::x25519_pubkey(&secret_key));
     let id = config.insert_peer(peer);
     let sessions = Sessions::new(config, &mut rng());
     // Timestamp zero is the initial replay floor; real callers advance time.
     sessions.turn(Tai64N(Tai64(1), 0), &mut rng());
-    (sessions, id)
+    (sessions, id, secret_key)
 }
 
 #[repr(align(16))]
@@ -64,15 +64,18 @@ fn roundtrip_impl(
     mut buf: Box<AlignedPacket>,
     server_addr: SocketAddr,
     client_addr: SocketAddr,
-    (mut sessions_i, peer_r): (Sessions, PeerId),
-    (mut sessions_r, peer_i): (Sessions, PeerId),
+    (mut sessions_i, peer_r, key_i): (Sessions, PeerId, StaticPrivateKey),
+    (mut sessions_r, peer_i, key_r): (Sessions, PeerId, StaticPrivateKey),
 ) {
     let mut msg = black_box(*b"Hello, World!\0\0\0");
 
     // try wrap the message - get back handshake message to send
     let m = match sessions_i.send_message(peer_r, &mut msg).unwrap() {
-        rustyguard_core::SendMessage::Maintenance(m) => m,
-        rustyguard_core::SendMessage::Data(_, _) => panic!("expecting handshake"),
+        rustyguard_core::SendMessage::Handshake(work) => match finish(&sessions_i, &key_i, *work) {
+            Event::Write(message) => message,
+            _ => panic!("expected initiation"),
+        },
+        _ => panic!("expecting handshake"),
     };
 
     // send handshake to server
@@ -80,15 +83,25 @@ fn roundtrip_impl(
         let handshake_buf = &mut buf.0[..m.data().len()];
         handshake_buf.copy_from_slice(m.data());
         match sessions_r.recv_message(client_addr, handshake_buf).unwrap() {
-            rustyguard_core::Message::Write(buf) => buf,
+            rustyguard_core::Message::Handshake(work) => match finish(&sessions_r, &key_r, *work) {
+                Event::Write(message) => message,
+                _ => panic!("expected response"),
+            },
             _ => panic!("expecting write"),
         }
     };
 
     // send the handshake response to the client
     let encryptor = {
-        match sessions_i.recv_message(server_addr, response_buf).unwrap() {
-            rustyguard_core::Message::HandshakeComplete(encryptor) => encryptor,
+        buf.0[..response_buf.data().len()].copy_from_slice(response_buf.data());
+        let rustyguard_core::Message::Handshake(work) = sessions_i
+            .recv_message(server_addr, &mut buf.0[..response_buf.data().len()])
+            .unwrap()
+        else {
+            panic!("expected DH work")
+        };
+        match finish(&sessions_i, &key_i, *work) {
+            Event::HandshakeComplete(encryptor) => encryptor,
             _ => panic!("expecting noop"),
         }
     };
@@ -110,6 +123,16 @@ fn roundtrip_impl(
                 assert_eq!(data, b"Hello, World!\0\0\0")
             }
             _ => panic!("expecting read"),
+        }
+    }
+}
+
+fn finish(sessions: &Sessions, key: &StaticPrivateKey, mut work: Handshake) -> Event {
+    loop {
+        let secret = SharedSecret::new(CryptoCore::x25519(key, &work.peer_key()).unwrap()).unwrap();
+        match work.complete(sessions, secret).unwrap() {
+            Event::Handshake(next) => work = next,
+            event => return event,
         }
     }
 }

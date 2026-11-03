@@ -7,8 +7,8 @@ use base64ct::{Base64, Encoding};
 use clap::Parser;
 use packet::{Builder, Packet};
 use rand::{rngs::OsRng, Rng, TryRngCore};
-use rustyguard_core::{Config, Message, PublicKey, Sessions, StaticPrivateKey};
-use rustyguard_crypto::{CryptoCore, CryptoPrimatives, StaticPeerConfig};
+use rustyguard_core::{Config, Event, Handshake, Message, PublicKey, Sessions, StaticPrivateKey};
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, SharedSecret, StaticPeerConfig};
 use tai64::Tai64N;
 
 /// 16-byte aligned packet of 2048 bytes.
@@ -53,7 +53,7 @@ fn main() {
         }
     };
 
-    let mut config = Config::new(private_key);
+    let mut config = Config::new(CryptoCore::x25519_pubkey(&private_key));
     for peer in args.peer {
         let pk = Base64::decode_vec(&peer).unwrap();
         let peer_pk = PublicKey(<[u8; 32]>::try_from(&*pk).unwrap());
@@ -71,14 +71,27 @@ fn main() {
     loop {
         let (n, addr) = endpoint.recv_from(&mut buf.0).unwrap();
         while let Some(msg) = sessions.turn(Tai64N::now(), &mut OsRng.unwrap_err()) {
-            endpoint.send_to(msg.data(), msg.to()).unwrap();
+            let event = match msg {
+                Event::Handshake(work) => finish(&sessions, &private_key, work).unwrap(),
+                event => event,
+            };
+            if let Event::Write(msg) = event {
+                endpoint.send_to(msg.data(), msg.to()).unwrap();
+            }
         }
 
         println!("packet from {addr:?}: {:?}", &buf.0[..n]);
         match sessions.recv_message(addr, &mut buf.0[..n]) {
             Err(err) => println!("error: {err:?}"),
+            Ok(Message::Handshake(work)) => match finish(&sessions, &private_key, *work) {
+                Ok(Event::Write(message)) => {
+                    endpoint.send_to(message.data(), message.to()).unwrap();
+                }
+                Ok(Event::HandshakeComplete(_)) => {}
+                Ok(Event::Handshake(_)) => unreachable!(),
+                Err(err) => println!("handshake error: {err:?}"),
+            },
             Ok(Message::Noop) => println!("noop"),
-            Ok(Message::HandshakeComplete(_encryptor)) => {}
             Ok(Message::Read(peer, buf)) => {
                 if buf.is_empty() {
                     continue;
@@ -124,7 +137,15 @@ fn main() {
                                             .send_message(peer, &mut inner_reply_buf[..reply_len])
                                             .unwrap()
                                         {
-                                            rustyguard_core::SendMessage::Maintenance(_) => todo!(),
+                                            rustyguard_core::SendMessage::Handshake(work) => {
+                                                if let Event::Write(message) =
+                                                    finish(&sessions, &private_key, *work).unwrap()
+                                                {
+                                                    endpoint
+                                                        .send_to(message.data(), message.to())
+                                                        .unwrap();
+                                                }
+                                            }
                                             rustyguard_core::SendMessage::Data(_, metadata) => {
                                                 let buf = &mut reply_buf[..reply_len + 16 + 16];
                                                 metadata.frame_in_place(buf);
@@ -148,6 +169,21 @@ fn main() {
                 println!("sending: {buf:?}");
                 endpoint.send_to(buf, addr).unwrap();
             }
+        }
+    }
+}
+
+// The example services the same requests that an asynchronous key service sees.
+fn finish(
+    sessions: &Sessions,
+    key: &StaticPrivateKey,
+    mut work: Handshake,
+) -> Result<Event, rustyguard_core::Error> {
+    loop {
+        let secret = SharedSecret::new(CryptoCore::x25519(key, &work.peer_key())?)?;
+        match work.complete(sessions, secret)? {
+            Event::Handshake(next) => work = next,
+            event => return Ok(event),
         }
     }
 }

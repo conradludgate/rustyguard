@@ -930,6 +930,7 @@ dependencies = [
  "rustyguard-types",
  "rustyguard-utils",
  "tai64",
+ "tokio",
  "zerocopy",
  "zeroize",
 ]

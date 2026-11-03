@@ -1,34 +1,246 @@
-use core::net::SocketAddr;
-use core::ops::ControlFlow;
-
 use crate::time::{TimerEntry, TimerEntryType};
-use alloc::boxed::Box;
+use crate::{
+    DynamicState, Error, Event, MaintenanceMsg, MaintenanceRepr, Message, MessageEncrypter, PeerId,
+    Session, SessionHandshake, SessionState, SessionTransport, Sessions, Tai64N, REJECT_AFTER_TIME,
+    REKEY_AFTER_TIME, REKEY_ATTEMPT_TIME, REKEY_TIMEOUT,
+};
+use alloc::{boxed::Box, sync::Arc};
+use core::{net::SocketAddr, ops::ControlFlow};
 use rand_core::RngCore;
 use rustyguard_crypto::{
     decrypt_cookie_with, CryptoPrimatives, DecryptHandshakeInit, DecryptHandshakeResp,
-    EncryptHandshakeInit, EphemeralPrivateKey, HandshakeState, HasMac, SharedSecret,
+    DecryptHandshakeTimestamp, EncryptHandshakeInit, EphemeralPrivateKey, HandshakeState, HasMac,
+    SharedSecret,
 };
 use rustyguard_types::{CookieMessage, HandshakeInit, HandshakeResp};
 use zerocopy::FromBytes;
 use zeroize::Zeroize;
 
-use crate::{
-    write_msg, Error, Message, MessageEncrypter, PeerId, Session, SessionHandshake, SessionState,
-    SessionTransport, Sessions, REJECT_AFTER_TIME, REKEY_AFTER_TIME, REKEY_ATTEMPT_TIME,
-    REKEY_TIMEOUT,
-};
+pub(crate) struct PendingJob {
+    expires: Tai64N,
+}
 
-macro_rules! allocate_session {
-    ($state:expr) => {{
-        let mut session_id = $state.rng.next_u32();
-        loop {
-            use hashbrown::hash_map::Entry;
-            match $state.peers_by_session.entry(session_id) {
-                Entry::Occupied(_) => session_id = $state.rng.next_u32(),
-                Entry::Vacant(v) => break v,
+/// One owned static-key DH operation, with no borrow of the engine or packet.
+///
+/// Use the configuration's local static key with [`Self::peer_key`], then call
+/// [`Self::complete`]. The result may request a second agreement. Device errors
+/// and runtime choices stay with the caller; drop this value to cancel. Never
+/// reuse an agreement result for a different request.
+///
+/// Pending jobs expire after the handshake attempt window (90 seconds, measured
+/// by [`Sessions::turn`]). Late results, results for another engine and responses
+/// to replaced handshakes are rejected. Call `turn` while work is pending.
+/// Dropping the engine or request does not cancel physical work on an HSM.
+#[must_use]
+pub struct Handshake<C = rustyguard_crypto::CryptoCore> {
+    socket: SocketAddr,
+    job: Arc<PendingJob>,
+    kind: HandshakeKind<C>,
+}
+
+enum HandshakeKind<C> {
+    Init {
+        request: EncryptHandshakeInit<C>,
+        session_id: u32,
+        generation: u64,
+    },
+    Identity(DecryptHandshakeInit<C>),
+    Timestamp(DecryptHandshakeTimestamp<C>),
+    Response {
+        request: DecryptHandshakeResp<C>,
+        session_id: u32,
+        generation: u64,
+        sender: u32,
+    },
+}
+
+impl<C: CryptoPrimatives> Handshake<C> {
+    /// The remote public key for this agreement. On incoming work this may be
+    /// an unauthenticated claimed identity; do not use it as proof of identity.
+    pub fn peer_key(&self) -> crate::PublicKey {
+        match &self.kind {
+            HandshakeKind::Init { request, .. } => request.peer_key(),
+            HandshakeKind::Identity(request) => request.peer_key(),
+            HandshakeKind::Timestamp(request) => request.peer_key(),
+            HandshakeKind::Response { request, .. } => request.peer_key(),
+        }
+    }
+
+    /// Last protocol time at which this work may complete is strictly before
+    /// this deadline. The caller can use it to bound device waits.
+    pub fn deadline(&self) -> Tai64N {
+        self.job.expires
+    }
+
+    /// Resume this operation on the engine that issued it. No caller-provided
+    /// secret or transcript is installed unless this job is still live.
+    pub fn complete(self, sessions: &Sessions<C>, secret: SharedSecret) -> Result<Event<C>, Error> {
+        let mut state_ref = sessions.dynamic.borrow_mut();
+        let state = &mut *state_ref;
+        if state.now >= self.job.expires {
+            return Err(Error::Rejected);
+        }
+        let weak = Arc::downgrade(&self.job);
+        if !state
+            .pending_handshakes
+            .iter()
+            .any(|registered| registered.ptr_eq(&weak))
+        {
+            return Err(Error::Rejected);
+        }
+        match self.kind {
+            HandshakeKind::Identity(request) => {
+                let request = request.complete(secret)?;
+                // This is still only a claimed identity. Reject unknown peers
+                // before another device operation; commit nothing yet.
+                sessions
+                    .config
+                    .get_peer_idx(&request.peer_key())
+                    .ok_or(Error::Rejected)?;
+                Ok(Event::Handshake(Self {
+                    kind: HandshakeKind::Timestamp(request),
+                    ..self
+                }))
+            }
+            HandshakeKind::Timestamp(request) => {
+                let data = request.complete(secret)?;
+                let peer_idx = sessions
+                    .config
+                    .get_peer_idx(&data.static_key())
+                    .ok_or(Error::Rejected)?;
+                let peer_config = &sessions.config.peers[peer_idx];
+                let peer = &mut state.peers[peer_idx];
+                if *data.timestamp() <= peer.latest_ts {
+                    return Err(Error::Rejected);
+                }
+                let timestamp = *data.timestamp();
+                let mut session_id = state.rng.next_u32();
+                while state.peers_by_session.contains_key(&session_id) {
+                    session_id = state.rng.next_u32();
+                }
+                let esk_r = EphemeralPrivateKey::generate(&mut state.rng);
+                let (response, mut hs) =
+                    data.respond(&esk_r, peer_config, session_id, peer.cookie.as_ref())?;
+                let (encrypt, decrypt) = hs.split::<C>(false);
+                peer.latest_ts = timestamp;
+                peer.last_sent_mac1 = response.mac1;
+                peer.current_transport = Some(session_id);
+                state.peers_by_session.insert(
+                    session_id,
+                    Box::new(Session {
+                        peer: peer_idx,
+                        started: state.now,
+                        sent: state.now,
+                        state: SessionState::Transport(SessionTransport {
+                            receiver: response.receiver.get(),
+                            encrypt,
+                            decrypt,
+                        }),
+                        keepalive_pending: false,
+                    }),
+                );
+                state.timers.push(TimerEntry {
+                    time: state.now + REJECT_AFTER_TIME,
+                    kind: TimerEntryType::ExpireTransport { session_id },
+                });
+                Ok(Event::Write(MaintenanceMsg {
+                    socket: self.socket,
+                    data: MaintenanceRepr::Resp(response),
+                }))
+            }
+            HandshakeKind::Init {
+                request,
+                session_id,
+                generation,
+            } => {
+                let session = state
+                    .peers_by_session
+                    .get_mut(&session_id)
+                    .ok_or(Error::Rejected)?;
+                let SessionState::Handshake(hs) = &mut session.state else {
+                    return Err(Error::Rejected);
+                };
+                if hs.generation != generation
+                    || hs.state.is_some()
+                    || state.peers[session.peer].current_handshake != Some(session_id)
+                {
+                    return Err(Error::Rejected);
+                }
+                let (message, transcript) = request.complete(secret);
+                hs.state = Some(transcript);
+                session.sent = state.now;
+                state.peers[session.peer].last_sent_mac1 = message.mac1;
+                state.timers.push(TimerEntry {
+                    time: state.now + REKEY_TIMEOUT,
+                    kind: TimerEntryType::InitAttempt { session_id },
+                });
+                Ok(Event::Write(MaintenanceMsg {
+                    socket: self.socket,
+                    data: MaintenanceRepr::Init(message),
+                }))
+            }
+            HandshakeKind::Response {
+                request,
+                session_id,
+                generation,
+                sender,
+            } => {
+                let session = state
+                    .peers_by_session
+                    .get_mut(&session_id)
+                    .ok_or(Error::Rejected)?;
+                let SessionState::Handshake(hs) = &mut session.state else {
+                    return Err(Error::Rejected);
+                };
+                let peer = &mut state.peers[session.peer];
+                if hs.generation != generation
+                    || hs.state.is_none()
+                    || peer.current_handshake != Some(session_id)
+                {
+                    return Err(Error::Rejected);
+                }
+                let mut completed = request.complete(secret)?;
+                let (encrypt, decrypt) = completed.split::<C>(true);
+                peer.current_handshake = None;
+                peer.current_transport = Some(session_id);
+                peer.endpoint = Some(self.socket);
+                hs.zeroize();
+                session.state = SessionState::Transport(SessionTransport {
+                    receiver: sender,
+                    encrypt,
+                    decrypt,
+                });
+                session.started = state.now;
+                session.sent = state.now;
+                state.timers.push(TimerEntry {
+                    time: state.now + REKEY_AFTER_TIME,
+                    kind: TimerEntryType::RekeyAttempt { session_id },
+                });
+                state.timers.push(TimerEntry {
+                    time: state.now + REJECT_AFTER_TIME,
+                    kind: TimerEntryType::ExpireTransport { session_id },
+                });
+                Ok(Event::HandshakeComplete(MessageEncrypter(session_id)))
             }
         }
-    }};
+    }
+}
+
+impl DynamicState {
+    fn reserve_handshake(
+        &mut self,
+        limit: usize,
+        expires: Tai64N,
+    ) -> Result<Arc<PendingJob>, Error> {
+        self.pending_handshakes
+            .retain(|job| job.upgrade().is_some_and(|job| self.now < job.expires));
+        if self.pending_handshakes.len() >= limit {
+            return Err(Error::HandshakeLimit);
+        }
+        let job = Arc::new(PendingJob { expires });
+        self.pending_handshakes.push(Arc::downgrade(&job));
+        Ok(job)
+    }
 }
 
 impl<C: CryptoPrimatives> Sessions<C> {
@@ -37,109 +249,35 @@ impl<C: CryptoPrimatives> Sessions<C> {
         &self,
         addr: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<&'m mut [u8], Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
-
-        unsafe_log!("[{addr:?}] parsed as handshake init packet");
+    ) -> Result<Message<'m, C>, Error> {
+        let mut state = self.dynamic.borrow_mut();
         let init_msg = HandshakeInit::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
-
         let overload = state.overloaded(addr.ip());
-
-        // try verify the MACs
-        let verify_mac = HandshakeInit::verify(
-            init_msg,
-            &self.config.static_,
-            overload,
-            &state.cookie,
-            addr,
-        )?;
-        let init_msg = match verify_mac {
-            // macs are valid
-            ControlFlow::Continue(msg) => msg,
-            // the mac1 was valid, but we need a valid mac2 as well.
+        match init_msg.verify_with::<C>(&self.config.mac1_key, overload, &state.cookie, addr)? {
             ControlFlow::Break(cookie) => {
-                // cookie message is always smaller than the initial message
-                drop(state_ref);
-                return Ok(self.write_cookie_message(
+                drop(state);
+                return Ok(Message::Write(self.write_cookie_message(
                     init_msg.mac1,
                     init_msg.sender.get(),
                     cookie,
                     msg,
-                ));
+                )));
             }
-        };
-
-        let request = DecryptHandshakeInit::<C>::new(
-            *init_msg,
-            HandshakeState::default(),
-            &self.config.static_.public_key,
-        );
-        let secret = SharedSecret::new(C::x25519(
-            &self.config.static_.private_key,
-            &request.peer_key(),
-        )?)?;
-        let request = request.complete(secret)?;
-        let secret = SharedSecret::new(C::x25519(
-            &self.config.static_.private_key,
-            &request.peer_key(),
-        )?)?;
-        let data = request.complete(secret)?;
-
-        unsafe_log!("payload decrypted");
-        // check if we know this peer
-        let peer_idx = self
-            .config
-            .get_peer_idx(&data.static_key())
-            .ok_or(Error::Rejected)?;
-        let peer_config = &self.config.peers[peer_idx];
-        let peer = &mut state.peers[peer_idx];
-
-        unsafe_log!("peer id: {peer_idx:?}");
-        // check for potential replay attack
-        if *data.timestamp() <= peer.latest_ts {
-            return Err(Error::Rejected);
+            ControlFlow::Continue(_) => {}
         }
-        peer.latest_ts = *data.timestamp();
-
-        // start a new session
-        let vacant = allocate_session!(state);
-        let session_id = *vacant.key();
-
-        // complete handshake
-        let esk_r = EphemeralPrivateKey::generate(&mut state.rng);
-
-        let (response, mut hs) =
-            data.respond(&esk_r, peer_config, session_id, peer.cookie.as_ref())?;
-        peer.last_sent_mac1 = response.mac1;
-
-        peer.current_transport = Some(session_id);
-
-        // generate the encryption keys
-        let (encrypt, decrypt) = hs.split::<C>(false);
-        let transport = SessionTransport {
-            receiver: init_msg.sender.get(),
-            encrypt,
-            decrypt,
+        let expires = state.now + REKEY_ATTEMPT_TIME;
+        let job = state.reserve_handshake(self.config.max_pending_handshakes, expires)?;
+        let work = Handshake {
+            socket: addr,
+            job,
+            kind: HandshakeKind::Identity(DecryptHandshakeInit::<C>::new(
+                *init_msg,
+                HandshakeState::default(),
+                &self.config.public_key,
+            )),
         };
-        let session = Session {
-            peer: peer_idx,
-            started: state.now,
-            sent: state.now,
-            state: SessionState::Transport(transport),
-            keepalive_pending: false,
-        };
-
-        vacant.insert(Box::new(session));
-
-        // schedule key expiration
-        state.timers.push(TimerEntry {
-            time: state.now + REJECT_AFTER_TIME,
-            kind: TimerEntryType::ExpireTransport { session_id },
-        });
-
-        // response message is always smaller than the initial message
-        Ok(write_msg(msg, &response))
+        drop(state);
+        Ok(Message::Handshake(Box::new(work)))
     }
 
     #[inline(never)]
@@ -147,94 +285,56 @@ impl<C: CryptoPrimatives> Sessions<C> {
         &self,
         addr: SocketAddr,
         msg: &'m mut [u8],
-    ) -> Result<Message<'m>, Error> {
-        let mut state_ref = self.dynamic.borrow_mut();
-        let state = &mut *state_ref;
-
-        unsafe_log!("[{addr:?}] parsed as handshake resp packet");
-        let resp_msg = HandshakeResp::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
-
+    ) -> Result<Message<'m, C>, Error> {
+        let mut state = self.dynamic.borrow_mut();
+        let resp = HandshakeResp::mut_from_bytes(msg).map_err(|_| Error::InvalidMessage)?;
         let overload = state.overloaded(addr.ip());
-        let resp_msg = match HandshakeResp::verify(
-            resp_msg,
-            &self.config.static_,
-            overload,
-            &state.cookie,
-            addr,
-        )? {
-            // cookie message is always smaller than the initial message
+        match resp.verify_with::<C>(&self.config.mac1_key, overload, &state.cookie, addr)? {
             ControlFlow::Break(cookie) => {
-                drop(state_ref);
+                drop(state);
                 return Ok(Message::Write(self.write_cookie_message(
-                    resp_msg.mac1,
-                    resp_msg.sender.get(),
+                    resp.mac1,
+                    resp.sender.get(),
                     cookie,
                     msg,
                 )));
             }
-            ControlFlow::Continue(msg) => msg,
+            ControlFlow::Continue(_) => {}
+        }
+        let session_id = resp.receiver.get();
+        let session = state
+            .peers_by_session
+            .get(&session_id)
+            .ok_or(Error::Rejected)?;
+        let SessionState::Handshake(hs) = &session.state else {
+            return Err(Error::Rejected);
         };
-
-        // check for a session expecting this handshake response
-        use hashbrown::hash_map::Entry;
-        let session_id = resp_msg.receiver.get();
-        let session = match state.peers_by_session.entry(session_id) {
-            // session not found
-            Entry::Vacant(_) => {
-                unsafe_log!("[{addr:?}] [{session_id:?}] session not found");
-                return Err(Error::Rejected);
-            }
-            Entry::Occupied(o) => o.into_mut(),
+        let transcript = hs.state.as_ref().ok_or(Error::Rejected)?;
+        let expires = session.started + REKEY_ATTEMPT_TIME;
+        if state.now >= expires {
+            return Err(Error::Rejected);
+        }
+        let generation = hs.generation;
+        let request = DecryptHandshakeResp::<C>::new(
+            *resp,
+            transcript,
+            &self.config.peers[session.peer],
+            &hs.esk_i,
+        )?;
+        let job = state.reserve_handshake(self.config.max_pending_handshakes, expires)?;
+        let work = Handshake {
+            socket: addr,
+            job,
+            kind: HandshakeKind::Response {
+                request,
+                session_id,
+                generation,
+                sender: resp.sender.get(),
+            },
         };
-        let hs = match &mut session.state {
-            // session is already past the handshake phase
-            SessionState::Transport(_) => {
-                unsafe_log!("[{addr:?}] [{session_id:?}] session handshake already completed");
-                return Err(Error::Rejected);
-            }
-            SessionState::Handshake(hs) => hs,
-        };
-        let peer_config = &self.config.peers[session.peer];
-        let peer = &mut state.peers[session.peer];
-
-        let request = DecryptHandshakeResp::<C>::new(*resp_msg, &hs.state, peer_config, &hs.esk_i)?;
-        let secret = SharedSecret::new(C::x25519(
-            &self.config.static_.private_key,
-            &request.peer_key(),
-        )?)?;
-        let mut completed = request.complete(secret)?;
-
-        let hs_session = peer.current_handshake.take();
-        debug_assert_eq!(hs_session, Some(session_id));
-        peer.current_transport = Some(session_id);
-
-        peer.endpoint = Some(addr);
-
-        let (encrypt, decrypt) = completed.split::<C>(true);
-        hs.zeroize();
-
-        session.state = SessionState::Transport(SessionTransport {
-            receiver: resp_msg.sender.get(),
-            encrypt,
-            decrypt,
-        });
-        session.started = state.now;
-        session.sent = state.now;
-
-        // schedule re-key as we were the initiator
-        state.timers.push(TimerEntry {
-            time: state.now + REKEY_AFTER_TIME,
-            kind: TimerEntryType::RekeyAttempt { session_id },
-        });
-        // schedule key expiration
-        state.timers.push(TimerEntry {
-            time: state.now + REJECT_AFTER_TIME,
-            kind: TimerEntryType::ExpireTransport { session_id },
-        });
-
-        Ok(Message::HandshakeComplete(MessageEncrypter(session_id)))
+        drop(state);
+        Ok(Message::Handshake(Box::new(work)))
     }
-
     #[inline(never)]
     pub(crate) fn handle_cookie(&self, msg: &mut [u8]) -> Result<(), Error> {
         let mut state_ref = self.dynamic.borrow_mut();
@@ -263,79 +363,82 @@ impl<C: CryptoPrimatives> Sessions<C> {
     }
 }
 
-pub(crate) fn new_handshake<C: CryptoPrimatives>(
-    sessions: &Sessions<C>,
-    peer_idx: PeerId,
-) -> Result<HandshakeInit, Error> {
-    let mut state_ref = sessions.dynamic.borrow_mut();
-    let state = &mut *state_ref;
-    let peer_config = &sessions.config.peers[peer_idx];
-    let peer = &mut state.peers[peer_idx];
-
-    let old_handshake = peer
-        .current_handshake
-        .and_then(|session| state.peers_by_session.remove(&session));
-
-    // start a new session
-    let vacant = allocate_session!(state);
-    let sender = *vacant.key();
-    peer.current_handshake = Some(sender);
-
-    let esk_i = EphemeralPrivateKey::generate(&mut state.rng);
-    let handshake = SessionHandshake {
-        esk_i,
-        state: HandshakeState::default(),
-    };
-
-    let session = match old_handshake {
-        Some(mut session) => {
-            session.sent = state.now;
-            session.state = SessionState::Handshake(handshake);
-            session
+impl<C: CryptoPrimatives> Sessions<C> {
+    /// Begin or replace this peer's outgoing handshake without interrupting its
+    /// established transport. Use this to retry after caller-managed device failure.
+    /// Replacement invalidates completions for the previous outgoing handshake.
+    pub fn start_handshake(&self, peer_idx: PeerId) -> Result<Handshake<C>, Error> {
+        let sessions = self;
+        let mut state_ref = sessions.dynamic.borrow_mut();
+        let state = &mut *state_ref;
+        let peer = state.peers.get_mut(peer_idx).ok_or(Error::Rejected)?;
+        let peer_config = &sessions.config.peers[peer_idx];
+        let socket = peer.endpoint.ok_or(Error::Rejected)?;
+        let old_id = peer.current_handshake;
+        let started = old_id
+            .and_then(|id| state.peers_by_session.get(&id))
+            .map(|session| session.started)
+            .filter(|started| state.now < *started + REKEY_ATTEMPT_TIME)
+            .unwrap_or(state.now);
+        let expires = started + REKEY_ATTEMPT_TIME;
+        if state.now >= expires {
+            return Err(Error::Rejected);
         }
-        None => Box::new(Session {
-            peer: peer_idx,
-            started: state.now,
-            sent: state.now,
-            state: SessionState::Handshake(handshake),
-            keepalive_pending: false,
-        }),
-    };
-
-    let session_id = *vacant.key();
-    let session = vacant.insert(session);
-    let SessionState::Handshake(handshake) = &mut session.state else {
-        unreachable!()
-    };
-
-    let request = EncryptHandshakeInit::<C>::new(
-        core::mem::take(&mut handshake.state),
-        &sessions.config.static_.public_key,
-        peer_config,
-        &handshake.esk_i,
-        state.now,
-        sender,
-        peer.cookie.as_ref(),
-    )?;
-    let secret = SharedSecret::new(C::x25519(
-        &sessions.config.static_.private_key,
-        &request.peer_key(),
-    )?)?;
-    let (msg, completed) = request.complete(secret);
-    handshake.state = completed;
-    peer.last_sent_mac1 = msg.mac1;
-
-    state.timers.push(TimerEntry {
-        time: state.now + REKEY_TIMEOUT,
-        kind: TimerEntryType::InitAttempt { session_id },
-    });
-    // Bound the lifetime of the handshake-state session: if it never
-    // completes, ExpireHandshake removes it after REKEY_ATTEMPT_TIME so
-    // that abandoned handshakes don't leak in peers_by_session forever.
-    state.timers.push(TimerEntry {
-        time: state.now + REKEY_ATTEMPT_TIME,
-        kind: TimerEntryType::ExpireHandshake { session_id },
-    });
-
-    Ok(msg)
+        let generation = state
+            .handshake_generation
+            .checked_add(1)
+            .ok_or(Error::Rejected)?;
+        let mut sender = state.rng.next_u32();
+        while state.peers_by_session.contains_key(&sender) {
+            sender = state.rng.next_u32();
+        }
+        let esk_i = EphemeralPrivateKey::generate(&mut state.rng);
+        let request = EncryptHandshakeInit::<C>::new(
+            HandshakeState::default(),
+            &sessions.config.public_key,
+            peer_config,
+            &esk_i,
+            state.now,
+            sender,
+            peer.cookie.as_ref(),
+        )?;
+        let job = state.reserve_handshake(sessions.config.max_pending_handshakes, expires)?;
+        state.handshake_generation = generation;
+        let handshake = SessionHandshake {
+            esk_i,
+            state: None,
+            generation,
+        };
+        let session = match old_id.and_then(|id| state.peers_by_session.remove(&id)) {
+            Some(mut session) => {
+                session.sent = state.now;
+                session.state = SessionState::Handshake(handshake);
+                session
+            }
+            None => Box::new(Session {
+                peer: peer_idx,
+                started,
+                sent: state.now,
+                state: SessionState::Handshake(handshake),
+                keepalive_pending: false,
+            }),
+        };
+        state.peers[peer_idx].current_handshake = Some(sender);
+        state.peers_by_session.insert(sender, session);
+        state.timers.push(TimerEntry {
+            time: expires,
+            kind: TimerEntryType::ExpireHandshake { session_id: sender },
+        });
+        let work = Handshake {
+            socket,
+            job,
+            kind: HandshakeKind::Init {
+                request,
+                session_id: sender,
+                generation,
+            },
+        };
+        drop(state_ref);
+        Ok(work)
+    }
 }

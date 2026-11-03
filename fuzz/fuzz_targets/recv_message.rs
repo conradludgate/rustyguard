@@ -5,9 +5,9 @@ use std::{fmt::Debug, net::SocketAddr};
 use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use rustyguard_core::{
-    Config, Message, PublicKey, SendMessage, Sessions, StaticPrivateKey, Tai64N,
+    Config, Event, Handshake, Message, PublicKey, SendMessage, Sessions, StaticPrivateKey, Tai64N,
 };
-use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, StaticPeerConfig};
+use rustyguard_crypto::{CryptoCore, CryptoPrimatives, Key, SharedSecret, StaticPeerConfig};
 
 #[repr(align(16))]
 struct AlignedPacket([u8; 2048]);
@@ -81,11 +81,15 @@ fuzz_target!(|input: FuzzInput| {
     let mut psk = Key::default();
     rng.fill_bytes(&mut psk);
 
-    let mut config_i = Config::new(ssk_i);
-    let peer_r = config_i.insert_peer(StaticPeerConfig::new(spk_r, Some(psk), Some(server_addr)));
+    let mut config_i = Config::new(PublicKey(spk_i.0));
+    let peer_r = config_i.insert_peer(StaticPeerConfig::new(
+        PublicKey(spk_r.0),
+        Some(psk),
+        Some(server_addr),
+    ));
     let mut sessions_i = Sessions::new(config_i, &mut rng);
 
-    let mut config_r = Config::new(ssk_r);
+    let mut config_r = Config::new(PublicKey(spk_r.0));
     let peer_i = config_r.insert_peer(StaticPeerConfig::new(spk_i, Some(psk), Some(client_addr)));
     let mut sessions_r = Sessions::new(config_r, &mut rng);
 
@@ -95,17 +99,33 @@ fuzz_target!(|input: FuzzInput| {
     let mut buf = Box::new(AlignedPacket([0; 2048]));
     let mut payload = [0u8; 16];
     let init = match sessions_i.send_message(peer_r, &mut payload).unwrap() {
-        SendMessage::Maintenance(m) => m,
+        SendMessage::Handshake(work) => match finish(&sessions_i, &ssk_i, *work) {
+            Ok(Event::Write(message)) => message,
+            _ => return,
+        },
         SendMessage::Data(_, _) => return,
     };
     let init_bytes = init.data();
     buf.0[..init_bytes.len()].copy_from_slice(init_bytes);
     let resp = match sessions_r.recv_message(client_addr, &mut buf.0[..init_bytes.len()]) {
-        Ok(Message::Write(b)) => b.to_vec(),
+        Ok(Message::Handshake(work)) => match finish(&sessions_r, &ssk_r, *work) {
+            Ok(Event::Write(message)) => message.data().to_vec(),
+            _ => return,
+        },
         _ => return,
     };
     buf.0[..resp.len()].copy_from_slice(&resp);
-    let _ = sessions_i.recv_message(server_addr, &mut buf.0[..resp.len()]);
+    let Ok(Message::Handshake(work)) =
+        sessions_i.recv_message(server_addr, &mut buf.0[..resp.len()])
+    else {
+        return;
+    };
+    if !matches!(
+        finish(&sessions_i, &ssk_i, *work),
+        Ok(Event::HandshakeComplete(_))
+    ) {
+        return;
+    }
 
     let mut attacker_addr: SocketAddr =
         SocketAddr::from((std::net::Ipv4Addr::from(input.src_v4), input.src_port));
@@ -113,10 +133,32 @@ fuzz_target!(|input: FuzzInput| {
         attacker_addr.set_port(client_addr.port().wrapping_add(1));
     }
 
-    let _ = sessions_r.recv_message(attacker_addr, &mut input.packet.b.0[..input.packet.len]);
+    if let Ok(Message::Handshake(work)) =
+        sessions_r.recv_message(attacker_addr, &mut input.packet.b.0[..input.packet.len])
+    {
+        let _ = finish(&sessions_r, &ssk_r, *work);
+    }
 
     match sessions_r.send_message(peer_i, &mut payload).unwrap() {
         SendMessage::Data(addr, _) => assert_eq!(addr, client_addr),
-        SendMessage::Maintenance(m) => assert_eq!(m.to(), client_addr),
+        SendMessage::Handshake(work) => {
+            if let Ok(Event::Write(message)) = finish(&sessions_r, &ssk_r, *work) {
+                assert_eq!(message.to(), client_addr);
+            }
+        }
     }
 });
+
+fn finish(
+    sessions: &Sessions,
+    key: &StaticPrivateKey,
+    mut work: Handshake,
+) -> Result<Event, rustyguard_core::Error> {
+    loop {
+        let secret = SharedSecret::new(CryptoCore::x25519(key, &work.peer_key())?)?;
+        match work.complete(sessions, secret)? {
+            Event::Handshake(next) => work = next,
+            event => return Ok(event),
+        }
+    }
+}

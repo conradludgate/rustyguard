@@ -84,10 +84,12 @@ Graviola when its feature is enabled, otherwise RustCrypto. Both features may be
 enabled together; select a provider explicitly when needed:
 
 ```rust
-use rustyguard_core::{Config, StaticPrivateKey};
+use rustyguard_core::Config;
+use rustyguard_crypto::{CryptoPrimatives, StaticPrivateKey};
 use rustyguard_crypto::providers::RustCrypto;
 
-let config = Config::<RustCrypto>::with_crypto(StaticPrivateKey([1; 32]));
+let private_key = StaticPrivateKey([1; 32]);
+let config = Config::<RustCrypto>::with_crypto(RustCrypto::x25519_pubkey(&private_key));
 ```
 
 The key above is only an example; use a securely generated private key in an
@@ -103,7 +105,7 @@ is required. Selection uses static dispatch and adds no provider allocation.
 The crypto crate exposes owned DH requests so the caller can keep its long-term
 private key or HSM handle entirely outside Rustyguard. Each request provides
 `peer_key()` and consumes itself in `complete(SharedSecret)`. The caller decides
-whether agreement runs inline, is queued, or awaits a device; no key trait,
+whether to compute agreement immediately, queue it, or await a device; no key trait,
 future type, executor or device error is imposed by the library.
 
 Receiving an initiation has two dependent agreements. For example, caller code
@@ -127,17 +129,57 @@ an unfinished request clears its transcript; cancelling hardware work remains
 the caller's responsibility. The authenticated initiation owns its transcript;
 after checking its peer and timestamp, consume `initiation.respond(...)` to produce the response and final
 transcript. These state transitions are the handshake API. Core, tests and
-benchmarks drive the same states, with core doing its software DH inline.
+benchmarks drive the same states. Static-key agreement always belongs to the caller.
 Ephemeral DH and packet protection still use C.
 
 These are low-level operations. Before starting device work, verify admission
 with `HasMac::verify_with`, using a MAC1 key cached from the local public key via
 `mac1_key_with`. The first incoming DH step exposes only a claimed identity;
 check the known peer, authenticated timestamp ordering and live job before
-installing completed results. The session engine still needs external
-pending-work limits, expiry and stale-completion rejection in a separate integration step.
+installing completed results. The session engine handles these checks when
+using the session API below.
 Response candidates own a snapshot of the outstanding initiation, so a failed
 attempt leaves that initiation available for a later valid response.
+
+### Caller-managed keys in the session engine
+
+`Config::new(local_public_key)` or `Config::<Provider>::with_crypto(local_public_key)`
+configures only the public identity. Core never stores a static private key.
+`send_message` and `recv_message` return
+`SendMessage::Handshake(work)` or `Message::Handshake(work)`. Continue servicing
+packets and calling `turn` while the caller's device is busy. Each work item
+owns its message/transcript; it borrows no engine or reusable receive buffer.
+
+Supply the agreement from the matching local static key with
+`work.complete(&sessions, SharedSecret::new(bytes)?)`. The returned `Event` is:
+
+- `Handshake(next)`: another DH operation, using `next.peer_key()`.
+- `Write(message)`: send `message.data()` to `message.to()`.
+- `HandshakeComplete(encrypter)`: the initiator can send its first transport packet.
+
+`turn` returns owned `Event` values too: writes or pending handshake work.
+`start_handshake(peer)` directly returns owned work. Every static key follows this
+same API. For a software key, the application computes the agreement immediately;
+for a device it can wait, while continuing to service the engine. No executor,
+key trait or library-owned future is required. A !Send caller-owned key is supported.
+The TUN example services requests using its own software key; it has no privileged
+path through core.
+
+Core verifies MAC/cookie admission before issuing DH work. Jobs default to a limit of 64, adjustable through `with_max_pending_handshakes`;
+saturation returns `Error::HandshakeLimit` and timer rekeys retry later. Drop a
+request on device error or cancellation. Its transcript is released and its slot
+is reusable; an outgoing placeholder session is reaped by the existing timer.
+Use `start_handshake(peer)` to retry explicitly while transport is established.
+Core rejects results at or beyond `work.deadline()`, on another engine, or after
+the original handshake was replaced. Keep advancing protocol time with `turn`.
+Physical HSM cancellation and device result/request correlation remain the
+caller's responsibility.
+
+Every job allocates an identity token; send/receive requests are boxed to keep
+ordinary data result enums small. The bounded weak registry reuses its capacity.
+Neither transport send nor receive starts a DH job for an established session.
+See the core delayed-key test for traffic continuing during a suspended rekey.
+No actual HSM hardware is tested.
 
 ## Project TODO:
 
